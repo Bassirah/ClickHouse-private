@@ -1746,7 +1746,8 @@ const encodeState = (x) => LZString.compressToEncodedURIComponent(JSON.stringify
 
 function saveState() {
     const state = { host, user, queries, params, search_query, customized };
-    history.pushState(state, '',
+    /// Inside the console, a history entry per change would take over the Back button of the console.
+    (console_connection ? history.replaceState : history.pushState).call(history, state, '',
         window.location.pathname + (window.location.search || '') + '#' + encodeState(state));
 }
 
@@ -1880,6 +1881,28 @@ async function start() {
             showError(e.message);
         }
     }
+}
+
+/// Integration with the unified web console (`console.html`, served at `/console`). When this page is
+/// embedded by the console, the console owns the connection and returns the server URL and the
+/// credentials of the signed-in user, so that they never appear in the address bar or in storage.
+/// Returns `null` when the page is opened on its own.
+function getConsoleConnection() {
+    if (window.parent === window) return null;
+    let api = null;
+    try {
+        api = window.parent.clickhouseConsole;
+    } catch (e) {
+        /// Accessing a page of another origin throws: that parent is not the console.
+    }
+    return api ? api.getConnection(window) : null;
+}
+
+/// When embedded by the console, its connection takes precedence over the one restored from the URL hash.
+const console_connection = getConsoleConnection();
+if (console_connection) {
+    ({url: host, user, password} = console_connection);
+    document.getElementById('connection-params').style.display = 'none';
 }
 
 start();

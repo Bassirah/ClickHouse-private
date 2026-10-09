@@ -1,0 +1,6 @@
+<clickhouse>
+    <web_console>
+        <documentation_url>https://docs.example.internal/clickhouse/</documentation_url>
+        <cloud_url></cloud_url>
+    </web_console>
+</clickhouse>

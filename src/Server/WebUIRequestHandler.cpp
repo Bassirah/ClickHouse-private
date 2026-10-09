@@ -4,9 +4,13 @@
 
 #include <Common/re2.h>
 #include <Core/ServerSettings.h>
+#include <Formats/FormatSettings.h>
 #include <IO/HTTPCommon.h>
 #include <IO/Operators.h>
+#include <IO/WriteBufferFromString.h>
+#include <IO/WriteHelpers.h>
 #include <Interpreters/Context.h>
+#include <Server/IServer.h>
 #include <Server/HTTP/WriteBufferFromHTTPServerResponse.h>
 #include <ClickStackResources.generated.h>
 #include <SQLConsoleResources.generated.h>
@@ -76,6 +80,10 @@ constexpr unsigned char resource_processors_profile_html[] =
 constexpr unsigned char resource_docs_html[] =
 {
 #embed "../../programs/server/docs.html"
+};
+constexpr unsigned char resource_console_html[] =
+{
+#embed "../../programs/server/console.html"
 };
 constexpr unsigned char resource_marked_js[] =
 {
@@ -364,6 +372,77 @@ void ClickStackUIRequestHandler::handleRequest(HTTPServerRequest & request, HTTP
     }
 
     handleCompressedEmbeddedResource(request, response, *resource, http_response_headers_override);
+}
+
+namespace
+{
+
+/// Destinations of the links and integrations in the console. Each one can be overridden in the
+/// `web_console` section of the server configuration, for example to point `documentation_url` to an
+/// internal mirror in a network without Internet access. An empty value marks it as not configured.
+struct ConsoleDestination
+{
+    std::string_view config_key;
+    std::string_view default_value;
+};
+
+constexpr ConsoleDestination console_destinations[] =
+{
+    {"source_code_url", "https://github.com/ClickHouse/ClickHouse/"},
+    {"documentation_url", "https://clickhouse.com/docs/"},
+    {"website_url", "https://clickhouse.com/"},
+    {"cloud_url", "https://clickhouse.cloud/"},
+    {"clickstack_url", "/clickstack/"},
+};
+
+String getConsoleConfigJSON(const Poco::Util::AbstractConfiguration & config)
+{
+    const FormatSettings format_settings;
+    WriteBufferFromOwnString out;
+    writeChar('{', out);
+    bool first = true;
+    for (const auto & destination : console_destinations)
+    {
+        if (!first)
+            writeChar(',', out);
+        first = false;
+        writeJSONString(destination.config_key, out, format_settings);
+        writeChar(':', out);
+        writeJSONString(
+            config.getString(fmt::format("web_console.{}", destination.config_key), String(destination.default_value)),
+            out, format_settings);
+    }
+    writeChar('}', out);
+    return out.str();
+}
+
+}
+
+void ConsoleWebUIRequestHandler::handleRequest(HTTPServerRequest & request, HTTPServerResponse & response, const ProfileEvents::Event &)
+{
+    std::string_view path = request.getURI();
+    path = path.substr(0, path.find_first_of("?#"));
+
+    /// The console keeps the credentials in memory: never let the browser or a proxy cache the page,
+    /// do not allow other sites to frame it, and do not load anything except same-origin frames and
+    /// requests to ClickHouse servers. The administrator can still override each header.
+    auto headers = http_response_headers_override;
+    headers.try_emplace("Cache-Control", "no-store");
+    headers.try_emplace("X-Content-Type-Options", "nosniff");
+    headers.try_emplace("X-Frame-Options", "DENY");
+    headers.try_emplace("Referrer-Policy", "no-referrer");
+    headers.try_emplace("Content-Security-Policy",
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; "
+        "connect-src 'self' http: https:; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+
+    if (path == "/console/config.json")
+    {
+        headers["Content-Type"] = "application/json; charset=UTF-8";
+        handle(request, response, getConsoleConfigJSON(server.context()->getConfigRef()), headers);
+        return;
+    }
+
+    handle(request, response, {reinterpret_cast<const char *>(resource_console_html), std::size(resource_console_html)}, headers);
 }
 
 std::string SQLConsoleUIRequestHandler::getResourcePath(const std::string & uri) const

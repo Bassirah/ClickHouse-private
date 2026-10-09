@@ -1,0 +1,134 @@
+---
+description: 'Documentation for the unified web console served at `/console`, which brings the built-in web UIs under one login, home page, and sidebar'
+sidebarTitle: 'Web Console'
+slug: /interfaces/web-console
+title: 'Web Console'
+doc_type: 'reference'
+---
+
+The web console is a single entry point for the web UIs built into the ClickHouse server. It is served from any ClickHouse HTTP port at the `/console` path, for example `http://localhost:8123/console`.
+
+Open the console, sign in with a ClickHouse user, and pick a panel on the home page. Panels open in the main area next to a sidebar that stays visible, so you can switch between the SQL Console, dashboards, and diagnostics without signing in to each of them.
+
+## Panels {#panels}
+
+The home page and the sidebar list the same destinations:
+
+| Category | Destination | Path | How it receives the connection |
+|---|---|---|---|
+| Home | Home | `/console/home` | — |
+| Workspace | SQL Console | `/ui` | The console fills in the connection form of the SQL Console. |
+| Workspace | Dashboard | `/dashboard` | Console integration contract. |
+| Workspace | ClickStack | `/clickstack` or `clickstack_url` | ClickStack keeps its own connection settings. |
+| Workspace | Web Terminal | `/webterminal` | The `webterminal-credentials` message. |
+| Diagnostics | Binary visualizer | `/binary` | Console integration contract. |
+| Diagnostics | Merges visualizer | `/merges` | Console integration contract. |
+| Diagnostics | Schema visualizer | `/schema` | Console integration contract. |
+| Diagnostics | Jemalloc | `/jemalloc` | Console integration contract. |
+| Diagnostics | Processors profile | `/processors-profile` | Console integration contract. |
+| Resources | Source code, Documentation, Website, Cloud | `source_code_url`, `documentation_url`, `website_url`, `cloud_url` | None: opened in a new tab. |
+| Resources | Reference | `/docs` | Console integration contract. |
+
+Each panel has a refreshable address under `/console`, for example `/console/merges`. The browser's Back and Forward buttons move between panels. The pages keep working on their own at their original paths.
+
+After sign-in, the console runs a `LIMIT 0` query for each diagnostic panel with the privileges that panel needs. A panel is marked:
+
+- **Restricted** when the server denies that query. You can still open it, and the server rejects every query you are not allowed to run.
+- **Unavailable** when a system table the panel needs does not exist, for example when `system.part_log` is not configured.
+- **Not configured** when an administrator has removed its address (see [Configuration](#configuration)).
+- **Needs Internet** when the page loads a library from a public CDN: the Binary visualizer loads Leaflet, and Jemalloc loads uPlot. Every other panel and the console itself work without Internet access.
+
+The Web Terminal is unavailable when it is disabled with the `enable_webterminal` server setting, and when the console is connected to a server other than the one that serves it.
+
+## Signing in and out {#signing-in-and-out}
+
+The sign-in form has the same fields and URL rules as the [SQL Console](/interfaces/sql-console): the server URL, the username, and the password. The console checks them by running `SELECT currentUser(), version(), hostName()`, which needs no privileges. If the check fails, it tells apart:
+
+- an incorrect username or password;
+- a user that may not connect from your address, or that lacks permissions;
+- a server that cannot be reached;
+- a TLS certificate that the browser does not trust (the browser does not report the difference from an unreachable server, so the message names both);
+- a request that the browser blocked: mixed content, or a CORS policy that does not allow the console's origin.
+
+If you open a panel's address without being signed in, the console asks you to sign in and then opens that panel.
+
+**Sign out** and **Switch connection** close every panel, which ends their queries, timers, and terminal sessions. They also discard the password and the ClickHouse connection that ClickStack stored for the current browser tab. After signing out, the Back button does not restore the signed-in state.
+
+The home page shows the connection status the server reported at the last check. The console checks the connection again every minute while the tab is visible, and when you select **Check connection**.
+
+## Security model {#security-model}
+
+The sign-in screen is a convenience of the user interface, not an access control: the console page and the embedded pages are public static files, like the other web UIs. Every query is authorized by the ClickHouse server, with the credentials of the signed-in user. Hiding or marking a panel in the console does not change what the user can do.
+
+Credentials are handled as follows:
+
+- The console keeps the password in the memory of the browser tab. It is never written to the address bar, the browser history, cookies, or browser storage. Reloading the page signs you out.
+- The console sends the credentials in the `X-ClickHouse-User` and `X-ClickHouse-Key` headers.
+- Embedded pages get the credentials from the console without going through a URL, a storage, or a message to another origin (see [Integration contract](#integration-contract)). Some of them send the credentials to the server as `user` and `password` URL parameters, as they do when opened on their own. The ClickHouse server masks the password in its logs, but a reverse proxy may record such URLs: do not log query strings on a proxy in front of ClickHouse.
+- Links to external destinations open in a new tab with `noopener` and `noreferrer`, and carry no credentials, queries, or database names.
+- The console page is served with `Cache-Control: no-store`, `X-Frame-Options: DENY`, and a `Content-Security-Policy` that allows only inline code, same-origin frames, and requests to ClickHouse servers. To override any of these headers, set it in the [`http_handlers`](/interfaces/http#predefined_http_interface) configuration of a `console` handler.
+- The embedded pages are loaded in same-origin frames. Do not set `X-Frame-Options: DENY` or `frame-ancestors 'none'` on them, or they cannot be embedded.
+
+The SQL Console keeps its saved queries, query history, and open tabs in the browser's local storage, per server URL and user, also when it is used inside the console. Signing out of the console does not delete them.
+
+## Configuration {#configuration}
+
+The destinations of the resource links and of ClickStack are set in the `web_console` section of the server configuration. A path on the server is opened inside the console; an absolute HTTP or HTTPS URL is opened in a new tab; an empty value marks the destination as not configured. Other values are rejected.
+
+| Setting | Default |
+|---|---|
+| `source_code_url` | `https://github.com/ClickHouse/ClickHouse/` |
+| `documentation_url` | `https://clickhouse.com/docs/` |
+| `website_url` | `https://clickhouse.com/` |
+| `cloud_url` | `https://clickhouse.cloud/` |
+| `clickstack_url` | `/clickstack/` |
+
+For example, in a network without Internet access, point the documentation to an internal mirror and remove the other external links:
+
+```xml
+<clickhouse>
+    <web_console>
+        <documentation_url>https://docs.example.internal/clickhouse/</documentation_url>
+        <source_code_url></source_code_url>
+        <website_url></website_url>
+        <cloud_url></cloud_url>
+    </web_console>
+</clickhouse>
+```
+
+The console reads these settings from `/console/config.json`, so a configuration reload applies them without restarting the server.
+
+To serve the console with custom response headers, use the `console` handler type in `http_handlers`. The console works only at `/console`, so the rule must match every path under it, including `/console/config.json`:
+
+```xml
+<clickhouse>
+    <http_handlers>
+        <rule>
+            <url>regex:^/console(/.*)?$</url>
+            <methods>GET,HEAD</methods>
+            <handler>
+                <type>console</type>
+            </handler>
+        </rule>
+        <defaults/>
+    </http_handlers>
+</clickhouse>
+```
+
+## Integration contract {#integration-contract}
+
+The pages served by the server (`/dashboard`, `/binary`, `/merges`, `/schema`, `/jemalloc`, `/processors-profile`, and `/docs`) call `window.parent.clickhouseConsole.getConnection(window)` once at startup. When the page is embedded by the console on the same origin, this returns the server URL, the user, and the password, and the page hides its own connection fields. The console returns the connection only to frames it created for these pages, and only while you are signed in. When the page is opened on its own, or embedded by a page of another origin, the call is not made and the page behaves as before.
+
+The Web Terminal receives the credentials in its existing `webterminal-credentials` message. The console sends it only to the terminal frame, with its own origin as the target origin.
+
+The SQL Console has no embedding interface. The console fills in its connection form and submits it, as a user would. If that does not succeed, the console shows a notice above the panel, and you can sign in with the form of the SQL Console.
+
+ClickStack is a separate application with its own connection settings, entered in ClickStack on first use. The console does not sign in to it.
+
+## Limitations {#limitations}
+
+- The console and the panels share the origin of the ClickHouse HTTP port. Any page on that origin, including ClickStack and the SQL Console, can read the memory of the console. Do not serve untrusted content from the ClickHouse HTTP port.
+- Navigation inside an embedded page, for example opening a query in the SQL Console, also adds entries to the browser history.
+- Panels other than the SQL Console, Dashboard, ClickStack, Web Terminal, and Reference are reloaded each time they are opened, which stops their background refresh while they are hidden.
+- A theme change applies to panels opened after it. Panels that are already open keep their theme until they are reloaded.
+- The Merges visualizer does not display query errors, including permission errors.

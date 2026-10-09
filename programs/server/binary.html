@@ -70,6 +70,27 @@
             if (params.has('password')) { password = params.get('password'); }
         }
 
+        /// Integration with the unified web console (`console.html`, served at `/console`). When this page is
+        /// embedded by the console, the console owns the connection and returns the server URL and the
+        /// credentials of the signed-in user, so that they never appear in the address bar or in storage.
+        /// Returns `null` when the page is opened on its own.
+        function getConsoleConnection() {
+            if (window.parent === window) return null;
+            let api = null;
+            try {
+                api = window.parent.clickhouseConsole;
+            } catch (e) {
+                /// Accessing a page of another origin throws: that parent is not the console.
+            }
+            return api ? api.getConnection(window) : null;
+        }
+
+        const console_connection = getConsoleConnection();
+        if (console_connection) {
+            ({url: host, user, password} = console_connection);
+            add_http_cors_header = new URL(host).origin !== location.origin;
+        }
+
         let url = `${host}?allow_introspection_functions=1`;
 
         if (add_http_cors_header) {

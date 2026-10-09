@@ -1,0 +1,16 @@
+<clickhouse>
+    <http_handlers>
+        <rule>
+            <url>regex:^/console(/.*)?$</url>
+            <methods>GET,HEAD</methods>
+            <handler>
+                <type>console</type>
+                <http_response_headers>
+                    <X-Frame-Options>SAMEORIGIN</X-Frame-Options>
+                    <X-Test-Console>yes</X-Test-Console>
+                </http_response_headers>
+            </handler>
+        </rule>
+        <defaults/>
+    </http_handlers>
+</clickhouse>
