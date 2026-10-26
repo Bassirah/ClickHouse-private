@@ -86,13 +86,14 @@ protected:
     void setHasServerOwnedQuery() { has_server_owned_query = true; }
 
     /// Set by SQL-defined handlers, whose query is fully known in advance, so it is known whether it can consume
-    /// the request body at all (see `SQLDefinedHandler`). The other handlers do not know it: for them the body may
-    /// be the rest of the query text or the data of an `INSERT`, so they have to assume that it is consumed.
-    void setConsumesRequestBody(bool value)
+    /// the request body at all, and whether the body is the data of the query, to be appended to its text
+    /// (see `SQLDefinedHandler`). The other handlers do not know it: for them the body may be the rest of the
+    /// query text or the data of an `INSERT`, so they have to assume that it is consumed and appended.
+    void setRequestBodyContract(bool consumes, bool feeds_to_query)
     {
         body_contract_known = true;
-        consumes_request_body = value;
-        feeds_request_body_to_query = value;
+        consumes_request_body = consumes;
+        feeds_request_body_to_query = feeds_to_query;
     }
 
 private:
@@ -271,6 +272,13 @@ private:
     std::string predefined_query;
     CompiledRegexPtr url_regexp;
     std::unordered_map<String, CompiledRegexPtr> header_name_with_capture_regexp;
+    /// Whether the query uses the special `_request_body` parameter. Usually it is in `receive_params`, but a
+    /// SQL-defined handler binding it from a capture of its `URL REGEXP` drops it from there (see `SQLDefinedHandler`).
+    /// Such a query must not receive `_request_body` from the URL query string.
+    bool uses_request_body_param;
+
+protected:
+    void setUsesRequestBodyParam(bool value) { uses_request_body_param = value; }
 
 public:
     PredefinedQueryHandler(
