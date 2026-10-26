@@ -1447,6 +1447,9 @@ bool InsertDependenciesBuilder::observePath(const DependencyPath & path)
     const auto & current = path.current();
 
     auto storage = current == init_table_id ? init_storage : resolveStorageProxyLoading(DatabaseCatalog::instance().tryGetTable(current, init_context));
+    auto insert_lock = storage
+        ? storage->lockForInsert(init_context->getInitialQueryId(), init_context->getSettingsRef()[Setting::lock_acquire_timeout])
+        : nullptr;
     auto lock = storage ? storage->tryLockForShare(init_context->getInitialQueryId(), init_context->getSettingsRef()[Setting::lock_acquire_timeout]) : nullptr;
     if (!lock)
     {
@@ -1516,6 +1519,7 @@ bool InsertDependenciesBuilder::observePath(const DependencyPath & path)
 
     storages[current] = storage;
     metadata_snapshots[current] = metadata;
+    insert_locks[current] = std::move(insert_lock);
     storage_locks[current] = std::move(lock);
 
     auto set_defaults_for_root_view = [&] (const StorageIDMaybeEmpty & root_view_, const StorageIDMaybeEmpty & inner_table_)
