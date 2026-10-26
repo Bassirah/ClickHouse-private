@@ -25,6 +25,7 @@
 #include <Common/typeid_cast.h>
 #include <Interpreters/inplaceBlockConversions.h>
 #include <Interpreters/getColumnFromBlock.h>
+#include <Core/Settings.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Databases/enableAllExperimentalSettings.h>
@@ -349,7 +350,37 @@ void IMergeTreeReader::fillMissingColumns(
 
 ContextPtr IMergeTreeReader::createContextForDefaultExpressions() const
 {
-    auto context_copy = Context::createCopy(data_part_info_for_read->getContext());
+    auto storage_context = data_part_info_for_read->getContext();
+    ContextMutablePtr context_copy;
+    if (settings.read_context)
+    {
+        /// A default may read other tables, as in `DEFAULT x IN table`. Do that on behalf of the query
+        /// that reads the part: with the privileges and the row policies of its user, and with its query
+        /// status, so that the nested reading is cancelled together with the query. Keep the settings of
+        /// the storage context the defaults are evaluated with, except for those that restrict the access
+        /// and the resources of the reading query, so that the limits of its user also bound the set.
+        context_copy = Context::createCopy(settings.read_context);
+        auto default_expressions_settings = storage_context->getSettingsCopy();
+        static constexpr std::string_view reader_settings[] =
+        {
+            "readonly", "allow_ddl", "allow_introspection_functions",
+            "max_rows_in_set", "max_bytes_in_set", "set_overflow_mode",
+            "max_bytes_before_external_set", "max_bytes_ratio_before_external_set",
+            "max_bytes_for_external_set_bloom_filter", "max_bytes_for_external_set_cache",
+            "min_free_disk_space_for_temporary_data", "temporary_files_codec", "temporary_files_buffer_size",
+            "max_rows_to_read", "max_bytes_to_read", "read_overflow_mode",
+            "max_rows_to_read_leaf", "max_bytes_to_read_leaf", "read_overflow_mode_leaf",
+            "max_execution_time", "timeout_overflow_mode",
+        };
+        for (std::string_view name : reader_settings)
+            default_expressions_settings.set(name, settings.read_context->getSettingsRef().get(name));
+        context_copy->setSettings(default_expressions_settings);
+        context_copy->setCurrentDatabaseUnchecked(storage_context->getCurrentDatabase());
+    }
+    else
+    {
+        context_copy = Context::createCopy(storage_context);
+    }
     /// Default/materialized expressions may contain experimental or suspicious types that can be
     /// disabled in the current context. We must not perform any checks during reads from existing tables.
     enableAllExperimentalSettings(context_copy);
@@ -412,7 +443,10 @@ void IMergeTreeReader::evaluateMissingDefaults(Block additional_columns, Columns
             additional_columns,
             full_requested_columns,
             combined_columns,
-            context_copy);
+            context_copy,
+            /*save_unneeded_columns=*/ true,
+            /*null_as_default=*/ false,
+            /*allow_reading_tables=*/ settings.read_context != nullptr);
 
         if (dag)
         {
