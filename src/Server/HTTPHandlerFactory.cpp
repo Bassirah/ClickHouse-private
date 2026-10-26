@@ -319,6 +319,12 @@ static inline auto createHandlersFactoryFromConfig(
                 handler->addFiltersFromConfig(config, prefix + "." + key);
                 main_handler_factory->addHandler(std::move(handler));
             }
+            else if (handler_type == "console")
+            {
+                auto handler = createWebUIHandlerFactory<ConsoleWebUIRequestHandler>(server, config, prefix + "." + key, common_headers_override);
+                handler->addFiltersFromConfig(config, prefix + "." + key);
+                main_handler_factory->addHandler(std::move(handler));
+            }
             else if (handler_type == "docs")
             {
                 auto handler = createWebUIHandlerFactory<DocsWebUIRequestHandler>(server, config, prefix + "." + key, common_headers_override);
@@ -571,6 +577,20 @@ void addCommonDefaultHandlersFactory(HTTPRequestHandlerFactoryMain & factory, IS
     sql_console_handler->allowGetAndHeadRequest();
     factory.addPathToHints("/ui");
     factory.addHandler(sql_console_handler);
+
+    auto console_handler = std::make_shared<HandlingRuleHTTPHandlerFactory<ConsoleWebUIRequestHandler>>(server);
+    /// Match "/console" exactly or followed by a path/query/fragment boundary, like "/ui" above.
+    console_handler->addFilter([](const auto & request)
+    {
+        const auto & uri = request.getURI();
+        return uri == "/console"
+            || startsWith(uri, "/console/")
+            || startsWith(uri, "/console?")
+            || startsWith(uri, "/console#");
+    });
+    console_handler->allowGetAndHeadRequest();
+    factory.addPathToHints("/console");
+    factory.addHandler(console_handler);
 
 #if USE_SSL
     if (server.config().has("acme"))

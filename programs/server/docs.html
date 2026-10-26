@@ -445,6 +445,29 @@
         }
     }
 
+    /// Integration with the unified web console (`console.html`, served at `/console`). When this page is
+    /// embedded by the console, the console owns the connection and returns the server URL and the
+    /// credentials of the signed-in user, so that they never appear in the address bar or in storage.
+    /// Returns `null` when the page is opened on its own.
+    function getConsoleConnection() {
+        if (window.parent === window) return null;
+        let api = null;
+        try {
+            api = window.parent.clickhouseConsole;
+        } catch (e) {
+            /// Accessing a page of another origin throws: that parent is not the console.
+        }
+        return api ? api.getConnection(window) : null;
+    }
+
+    const console_connection = getConsoleConnection();
+    if (console_connection) {
+        $url.value = console_connection.url;
+        $user.value = console_connection.user;
+        $password.value = console_connection.password;
+        document.getElementById('connection-params').style.display = 'none';
+    }
+
     /* ----------------------------------------------------------------------------------------
        Color theme. Precedence matches `play.html`: the `?theme=` query parameter, then the value
        memoized in `localStorage`, then the operating-system preference. The user's choice (made
@@ -1504,7 +1527,9 @@
 
     function pushURL() {
         const state = currentState();
-        history.pushState(state, '', stateToHash(state));
+        /// Inside the console, a history entry per page would take over the Back button of the console.
+        if (console_connection) history.replaceState(state, '', stateToHash(state));
+        else history.pushState(state, '', stateToHash(state));
     }
 
     function replaceURL() {

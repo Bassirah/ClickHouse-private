@@ -165,6 +165,26 @@ private:
     std::unordered_map<String, String> http_response_headers_override;
 };
 
+/// Unified web console at `/console`: a login screen and a shell with a sidebar that embeds the other
+/// web UI pages (`/ui`, `/dashboard`, `/merges`, ...). Every path under `/console/` serves the same page
+/// (client-side routing), except `/console/config.json`, which returns the administrator-configured
+/// destinations from the `web_console` server configuration section.
+class ConsoleWebUIRequestHandler : public HTTPRequestHandler
+{
+public:
+    explicit ConsoleWebUIRequestHandler(IServer & server_) : server(server_) {}
+    explicit ConsoleWebUIRequestHandler(IServer & server_, const std::unordered_map<String, String> & http_response_headers_override_)
+        : ConsoleWebUIRequestHandler(server_)
+    {
+        http_response_headers_override = http_response_headers_override_;
+    }
+    void handleRequest(HTTPServerRequest & request, HTTPServerResponse & response, const ProfileEvents::Event & write_event) override;
+private:
+    IServer & server;
+    /// Overrides for response headers.
+    std::unordered_map<String, String> http_response_headers_override;
+};
+
 class SQLConsoleUIRequestHandler : public HTTPRequestHandler
 {
 public:

@@ -709,6 +709,31 @@ if (passFromUrl) {
     }
 }
 
+/// Integration with the unified web console (`console.html`, served at `/console`). When this page is
+/// embedded by the console, the console owns the connection and returns the server URL and the
+/// credentials of the signed-in user, so that they never appear in the address bar or in storage.
+/// Returns `null` when the page is opened on its own.
+function getConsoleConnection() {
+    if (window.parent === window) return null;
+    let api = null;
+    try {
+        api = window.parent.clickhouseConsole;
+    } catch (e) {
+        /// Accessing a page of another origin throws: that parent is not the console.
+    }
+    return api ? api.getConnection(window) : null;
+}
+
+/// When embedded by the console, use its connection. Its credentials are neither offered to the
+/// browser's password manager (`storeCredentials`) nor replaced by remembered ones (`autoLoadOnOpen`).
+const consoleConnection = getConsoleConnection();
+if (consoleConnection) {
+    $('url').value = consoleConnection.url;
+    $('user').value = consoleConnection.user;
+    $('password').value = consoleConnection.password;
+    $('connection-form').style.display = 'none';
+}
+
 /// Browser Credential Management API: remember the entered credentials so the browser
 /// can offer to save and later autofill them — same as `play.html`. Guarded because
 /// `PasswordCredential` exists only in Chromium-based browsers.
@@ -723,7 +748,7 @@ if (passFromUrl) {
 /// that its own auto-load could later misdirect. This is the same `isSameOriginTarget` invariant
 /// that already gates the page-load auto-load and the paste probe.
 function storeCredentials() {
-    if (window.PasswordCredential && $('password').value && isSameOriginTarget($('url').value)) {
+    if (window.PasswordCredential && !consoleConnection && $('password').value && isSameOriginTarget($('url').value)) {
         try {
             navigator.credentials.store(new PasswordCredential({
                 id: $('user').value,
@@ -2221,7 +2246,7 @@ function isSameOriginTarget(value) {
 /// because it never auto-contacts a server on open).
 async function autoLoadOnOpen() {
     if (openedLocally || !isSameOriginTarget($('url').value)) return;
-    if (window.PasswordCredential && !$('user').value && !$('password').value) {
+    if (window.PasswordCredential && !consoleConnection && !$('user').value && !$('password').value) {
         /// `navigator.credentials.get` is async, so the same-origin target and empty fields checked
         /// above can change while it is pending: the user could paste a cross-origin URL into `#url`
         /// or start typing their own credentials. Filling the saved same-origin login and then

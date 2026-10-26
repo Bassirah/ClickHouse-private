@@ -144,6 +144,29 @@ if (!document.getElementById('user').value) {
     }
 }
 
+/// Integration with the unified web console (`console.html`, served at `/console`). When this page is
+/// embedded by the console, the console owns the connection and returns the server URL and the
+/// credentials of the signed-in user, so that they never appear in the address bar or in storage.
+/// Returns `null` when the page is opened on its own.
+function getConsoleConnection() {
+    if (window.parent === window) return null;
+    let api = null;
+    try {
+        api = window.parent.clickhouseConsole;
+    } catch (e) {
+        /// Accessing a page of another origin throws: that parent is not the console.
+    }
+    return api ? api.getConnection(window) : null;
+}
+
+const console_connection = getConsoleConnection();
+if (console_connection) {
+    document.getElementById('url').value = console_connection.url;
+    document.getElementById('user').value = console_connection.user;
+    document.getElementById('password').value = console_connection.password;
+    document.getElementById('connection-params').style.display = 'none';
+}
+
 
 function formatValue(v) {
     if (v >= 1000000000000) { return (v / 1000000000000).toFixed(2) + 'T'; }

@@ -1,0 +1,1894 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1NCIgaGVpZ2h0PSI0OCIgdmlld0JveD0iMCAwIDExIDEwIj48c3R5bGU+LmJne2ZpbGw6I2ZmMH0ub3tmaWxsOiMwMDB9PC9zdHlsZT48cmVjdCBjbGFzcz0iYmciIHg9IjAiIHk9IjAiIHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiLz48cGF0aCBkPSJNMSwxIGgxIHY4IGgtMSB6IiBjbGFzcz0ibyIvPjxwYXRoIGQ9Ik0zLDEgaDEgdjggaC0xIHoiIGNsYXNzPSJvIi8+PHBhdGggZD0iTTUsMSBoMSB2OCBoLTEgeiIgY2xhc3M9Im8iLz48cGF0aCBkPSJNNywxIGgxIHY4IGgtMSB6IiBjbGFzcz0ibyIvPjxwYXRoIGQ9Ik05LDQuMjUgaDEgdjEuNSBoLTEgeiIgY2xhc3M9Im8iLz48L3N2Zz4K">
+<title>ClickHouse Console</title>
+<!--
+    Unified web console. Served by the server at `/console` (see `ConsoleWebUIRequestHandler`).
+
+    It is a login screen and a shell (header, sidebar, home page) around the other web UI pages,
+    which are embedded as same-origin frames. One registry (`COMPONENTS`) describes every
+    destination; the home page cards and the sidebar are both generated from it.
+
+    Credentials live only in the memory of this page (`session`). They are handed to embedded
+    panels without going through URLs or browser storage:
+    - native pages (`/dashboard`, `/merges`, ...) pull them via `window.parent.clickhouseConsole.getConnection`;
+    - `/webterminal` receives them via its `postMessage` protocol (`webterminal-credentials`);
+    - `/ui` (SQL Console) has no embedding API, so its own connection form is filled in.
+    Signing out destroys every frame, which ends their requests, timers, and WebSocket sessions.
+
+    This is a UI gate only: every request is authorized by the ClickHouse server with the
+    credentials of the signed-in user. The page and the embedded pages themselves are public.
+-->
+<style>
+:root
+{
+    color-scheme: light;
+    --bg: #ffffff;
+    --bg-subtle: #f6f7f9;
+    --surface: #ffffff;
+    --surface-hover: #f0f1f3;
+    --border: #d9dbe0;
+    --text: #161517;
+    --muted: #53575f;
+    --accent: #faff69;
+    --accent-text: #161517;
+    --accent-border: #c7cc00;
+    --selected: #ececec;
+    --focus: #1d5fd6;
+    --danger: #b3261e;
+    --danger-bg: #fdecea;
+    --success: #146c2e;
+    --success-bg: #e6f4ea;
+    --warning: #8a4b00;
+    --warning-bg: #fff4e0;
+    --info-bg: #eaf1fd;
+    --shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+    --sidebar-width: 15rem;
+    --header-height: 3.25rem;
+    font-family: Inter, -apple-system, "Segoe UI", Roboto, "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
+    font-size: 15px;
+}
+
+[data-theme="dark"]
+{
+    color-scheme: dark;
+    --bg: #1f1f1c;
+    --bg-subtle: #1a1a18;
+    --surface: #282828;
+    --surface-hover: #323232;
+    --border: #414141;
+    --text: #f2f2f2;
+    --muted: #b3b6bd;
+    --accent: #faff69;
+    --accent-text: #1f1f1c;
+    --accent-border: #faff69;
+    --selected: #3a3a36;
+    --focus: #8ab4ff;
+    --danger: #ff9b94;
+    --danger-bg: #3d1f1d;
+    --success: #7ee39a;
+    --success-bg: #1d3524;
+    --warning: #ffc078;
+    --warning-bg: #3a2c17;
+    --info-bg: #1f2c44;
+    --shadow: none;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); line-height: 1.45; }
+[hidden] { display: none !important; }
+a { color: inherit; }
+button, input { font: inherit; color: inherit; }
+h1, h2, h3, p { margin: 0; }
+code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; font-size: 0.93em; }
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.visually-hidden
+{
+    position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.skip-link
+{
+    position: absolute; left: 0.5rem; top: -3rem; z-index: 100; padding: 0.5rem 1rem;
+    background: var(--accent); color: var(--accent-text); border-radius: 4px;
+}
+.skip-link:focus { top: 0.5rem; }
+
+.icon { width: 1.25rem; height: 1.25rem; flex: none; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.icon-small { width: 0.9rem; height: 0.9rem; }
+
+.button
+{
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+    min-height: 2.25rem; padding: 0.35rem 0.9rem; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface); text-decoration: none; white-space: nowrap;
+}
+.button:hover { background: var(--surface-hover); }
+.button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent-border); font-weight: 600; }
+.button.primary:hover { filter: brightness(0.95); }
+.button:disabled { cursor: not-allowed; opacity: 0.6; }
+.icon-button
+{
+    display: inline-flex; align-items: center; justify-content: center; width: 2.25rem; height: 2.25rem;
+    border: 1px solid transparent; border-radius: 4px; background: none; cursor: pointer; padding: 0;
+}
+.icon-button:hover { background: var(--surface-hover); border-color: var(--border); }
+
+.message { padding: 0.65rem 0.8rem; border-radius: 4px; border: 1px solid; overflow-wrap: anywhere; }
+.message.error { color: var(--danger); background: var(--danger-bg); border-color: currentColor; }
+.message.warning { color: var(--warning); background: var(--warning-bg); border-color: currentColor; }
+.message.info { background: var(--info-bg); border-color: var(--border); }
+.message .detail { display: block; margin-top: 0.35rem; color: var(--text); font-size: 0.9em; white-space: pre-wrap; }
+
+.badge
+{
+    display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.05rem 0.5rem; border-radius: 999px;
+    font-size: 0.78rem; font-weight: 500; border: 1px solid var(--border); color: var(--muted); white-space: nowrap;
+}
+.badge.ok { color: var(--success); background: var(--success-bg); border-color: transparent; }
+.badge.bad { color: var(--danger); background: var(--danger-bg); border-color: transparent; }
+.badge.warn { color: var(--warning); background: var(--warning-bg); border-color: transparent; }
+.dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: currentColor; flex: none; }
+
+/* Login */
+
+#login-view { min-height: 100%; display: grid; place-items: center; padding: 1.5rem 1rem; background: var(--bg-subtle); }
+#login-theme { position: fixed; top: 0.75rem; right: 0.75rem; }
+.login-card
+{
+    width: 100%; max-width: 26.25rem; padding: 1.75rem; display: flex; flex-direction: column; gap: 1.1rem;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px; box-shadow: var(--shadow);
+}
+.login-title { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; text-align: center; }
+.login-title h1 { font-size: 1.35rem; font-weight: 600; }
+.login-title svg { width: 2.6rem; height: 2.3rem; }
+.login-title p { color: var(--muted); font-size: 0.9rem; }
+.field { display: flex; flex-direction: column; gap: 0.3rem; }
+.field label { font-size: 0.9rem; font-weight: 500; }
+.field input
+{
+    min-height: 2.4rem; padding: 0.4rem 0.65rem; border-radius: 4px;
+    border: 1px solid var(--border); background: var(--bg);
+}
+.field input[aria-invalid="true"] { border-color: var(--danger); }
+.field .hint { font-size: 0.82rem; color: var(--muted); }
+.login-footer { font-size: 0.82rem; color: var(--muted); text-align: center; }
+
+/* Shell */
+
+#shell
+{
+    height: 100%; display: grid;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+    grid-template-rows: var(--header-height) minmax(0, 1fr);
+    grid-template-areas: "header header" "sidebar main";
+}
+#shell.collapsed { --sidebar-width: 3.75rem; }
+
+#topbar
+{
+    grid-area: header; display: flex; align-items: center; gap: 0.5rem; padding: 0 0.75rem;
+    border-bottom: 1px solid var(--border); background: var(--bg-subtle); min-width: 0;
+}
+.brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.brand svg { width: 1.6rem; height: 1.4rem; }
+#topbar .spacer { flex: 1; }
+#connection-pill
+{
+    display: flex; align-items: center; gap: 0.45rem; min-width: 0; padding: 0.25rem 0.65rem;
+    border: 1px solid var(--border); border-radius: 999px; font-size: 0.85rem; background: var(--surface);
+}
+#connection-pill .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#connection-pill.ok .dot { color: var(--success); }
+#connection-pill.bad .dot { color: var(--danger); }
+#connection-pill.checking .dot { color: var(--muted); }
+#menu-button { display: none; }
+
+#sidebar
+{
+    grid-area: sidebar; overflow-y: auto; overflow-x: hidden; border-right: 1px solid var(--border);
+    background: var(--bg-subtle); padding: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem;
+}
+#sidebar h2
+{
+    font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); padding: 0.6rem 0.6rem 0.25rem;
+}
+#sidebar ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+#sidebar a
+{
+    display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.6rem; border-radius: 4px;
+    text-decoration: none; white-space: nowrap; min-height: 2.25rem;
+}
+#sidebar a:hover { background: var(--surface-hover); }
+#sidebar a[aria-current="page"] { background: var(--selected); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent-border); }
+#sidebar a .label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+#sidebar a.muted .label { color: var(--muted); }
+#sidebar a .state-dot { color: var(--muted); }
+#sidebar a .state-dot.bad { color: var(--danger); }
+#sidebar a .state-dot.warn { color: var(--warning); }
+#sidebar .collapse-row { margin-top: auto; border-top: 1px solid var(--border); padding-top: 0.5rem; }
+#shell.collapsed #sidebar h2 { height: 0; padding: 0; margin: 0.35rem 0; overflow: hidden; border-top: 1px solid var(--border); }
+#shell.collapsed #sidebar a { justify-content: center; padding: 0.45rem 0; }
+#shell.collapsed #sidebar a .label, #shell.collapsed #sidebar a .state-dot, #shell.collapsed #sidebar a .external { display: none; }
+#shell.collapsed #collapse-button .icon { transform: rotate(180deg); }
+
+#main { grid-area: main; position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+#main:focus { outline: none; }
+
+/* Home */
+
+#home-view { overflow-y: auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.75rem; }
+#home-view > * { max-width: 75rem; width: 100%; margin: 0 auto; }
+.page-title { font-size: 1.5rem; font-weight: 600; }
+.overview
+{
+    display: flex; flex-wrap: wrap; gap: 1rem 2rem; align-items: flex-start; padding: 1rem 1.25rem;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+}
+.overview dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.3rem 1rem; margin: 0; flex: 1 1 22rem; }
+.overview dt { color: var(--muted); }
+.overview dd { margin: 0; overflow-wrap: anywhere; }
+.overview dd .badge { white-space: normal; }
+.overview .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.overview .note { flex-basis: 100%; color: var(--muted); font-size: 0.85rem; }
+.category h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.75rem; }
+.cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(15.5rem, 1fr)); }
+.card
+{
+    height: 100%; display: flex; flex-direction: column; gap: 0.55rem; padding: 1rem;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+}
+.card-head { display: flex; align-items: center; gap: 0.6rem; }
+.card-head .icon { width: 1.6rem; height: 1.6rem; padding: 0.2rem; border-radius: 4px; background: var(--bg-subtle); }
+.card h3 { font-size: 1rem; font-weight: 600; }
+.card p { color: var(--muted); font-size: 0.9rem; flex: 1; }
+.card .status { font-size: 0.82rem; color: var(--muted); }
+.card-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+
+/* Panels */
+
+#panel-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#panel-bar
+{
+    display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0.75rem; min-height: 2.6rem;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+}
+#panel-title { font-size: 1rem; font-weight: 600; }
+#panel-bar .spacer { flex: 1; }
+#panel-notice { margin: 0.6rem 0.75rem 0; }
+#panel-state { overflow-y: auto; padding: 1.5rem; }
+#panel-state > div { max-width: 46rem; display: flex; flex-direction: column; gap: 0.9rem; }
+#panel-state h2 { font-size: 1.2rem; }
+#panel-state pre { margin: 0; padding: 0.75rem; overflow-x: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-subtle); }
+#frames { flex: 1; min-height: 0; position: relative; }
+.frame-host { position: absolute; inset: 0; }
+.frame-host iframe { width: 100%; height: 100%; border: 0; display: block; background: var(--bg); }
+.frame-overlay
+{
+    position: absolute; inset: 0; display: grid; place-items: center; background: var(--bg);
+    color: var(--muted); font-size: 0.95rem;
+}
+
+.spinner
+{
+    display: inline-block; width: 1em; height: 1em; border: 2px solid currentColor; border-right-color: transparent;
+    border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -0.15em;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+
+#sidebar-backdrop { display: none; }
+
+@media (max-width: 48rem)
+{
+    #shell, #shell.collapsed { grid-template-columns: minmax(0, 1fr); grid-template-areas: "header" "main"; --sidebar-width: 16rem; }
+    #menu-button { display: inline-flex; }
+    #collapse-button { display: none; }
+    .brand .brand-text { display: none; }
+    #connection-pill .text { max-width: 9rem; }
+    #sidebar
+    {
+        position: fixed; z-index: 20; top: var(--header-height); bottom: 0; left: 0; width: var(--sidebar-width);
+        transform: translateX(-100%); transition: transform 0.15s; visibility: hidden;
+    }
+    #shell.sidebar-open #sidebar { transform: none; visibility: visible; }
+    #shell.sidebar-open #sidebar-backdrop { display: block; position: fixed; z-index: 10; inset: var(--header-height) 0 0 0; background: rgb(0 0 0 / 0.4); }
+    #shell.collapsed #sidebar h2 { height: auto; padding: 0.6rem 0.6rem 0.25rem; border: 0; margin: 0; }
+    #shell.collapsed #sidebar a { justify-content: flex-start; padding: 0.45rem 0.6rem; }
+    #shell.collapsed #sidebar a .label, #shell.collapsed #sidebar a .state-dot, #shell.collapsed #sidebar a .external { display: inline; }
+    #home-view { padding: 1rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main" id="skip-link">Skip to content</a>
+
+<div id="login-view" hidden>
+    <button type="button" class="icon-button theme-toggle" id="login-theme"></button>
+    <form id="login-form" class="login-card" novalidate aria-labelledby="login-heading">
+        <div class="login-title">
+            <span id="login-logo"></span>
+            <h1 id="login-heading">ClickHouse Console</h1>
+            <p>Sign in with a ClickHouse user to open the SQL Console, dashboards, and diagnostics.</p>
+        </div>
+        <div id="login-notice" class="message info" role="status" hidden></div>
+        <div class="field">
+            <label for="login-url">ClickHouse HTTP URL</label>
+            <input id="login-url" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" required aria-describedby="login-url-hint">
+            <span class="hint" id="login-url-hint">The HTTP interface of the server, without credentials or query parameters.</span>
+        </div>
+        <div class="field">
+            <label for="login-user">Username</label>
+            <input id="login-user" name="username" type="text" autocomplete="username" spellcheck="false" autocapitalize="off" required>
+        </div>
+        <div class="field">
+            <label for="login-password">Password</label>
+            <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Enter password">
+        </div>
+        <div id="login-warning" class="message warning" hidden></div>
+        <div id="login-error" class="message error" role="alert" hidden></div>
+        <button id="login-submit" class="button primary" type="submit">Connect</button>
+        <p class="login-footer">Credentials are kept in this tab's memory only and are sent only to the server above.</p>
+    </form>
+</div>
+
+<div id="shell" hidden>
+    <header id="topbar">
+        <button type="button" class="icon-button" id="menu-button" aria-controls="sidebar" aria-expanded="false" aria-label="Show navigation"></button>
+        <a class="brand" href="/console/home" id="brand-link"><span id="brand-logo"></span><span class="brand-text">ClickHouse Console</span></a>
+        <span class="spacer"></span>
+        <div id="connection-pill" role="status" aria-live="polite"><span class="dot"></span><span class="text"></span></div>
+        <button type="button" class="icon-button" id="switch-button" aria-label="Switch connection" title="Switch connection or user"></button>
+        <button type="button" class="icon-button theme-toggle" id="shell-theme"></button>
+        <button type="button" class="button" id="logout-button">Sign out</button>
+    </header>
+    <nav id="sidebar" aria-label="Console navigation"></nav>
+    <div id="sidebar-backdrop"></div>
+    <main id="main" tabindex="-1">
+        <div id="home-view" hidden></div>
+        <div id="panel-view" hidden>
+            <div id="panel-bar">
+                <span id="panel-icon"></span>
+                <h1 id="panel-title" tabindex="-1"></h1>
+                <span id="panel-badges"></span>
+                <span class="spacer"></span>
+                <button type="button" class="button" id="panel-reload" hidden>Reload panel</button>
+                <a class="button" id="panel-standalone" target="_blank" rel="noopener noreferrer" hidden></a>
+            </div>
+            <div id="panel-notice" class="message" hidden></div>
+            <div id="panel-state" hidden></div>
+            <div id="frames"></div>
+        </div>
+    </main>
+</div>
+
+<script>
+'use strict';
+
+const $ = id => document.getElementById(id);
+const BASE_PATH = '/console';
+
+/// Small line icons, drawn on a 24x24 grid with `currentColor`.
+const ICONS = {
+    logo: '<svg viewBox="0 0 9 8" aria-hidden="true"><path d="M0,0 h1 v8 h-1 z M2,0 h1 v8 h-1 z M4,0 h1 v8 h-1 z M6,0 h1 v8 h-1 z M8,3.25 h1 v1.5 h-1 z" fill="var(--text)"/><path d="M0,7 h1 v1 h-1 z" fill="#f00"/></svg>',
+    home: '<path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/>',
+    sql: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/>',
+    dashboard: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+    clickstack: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',
+    terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10h1M11 10h6M7 14h10"/>',
+    binary: '<rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/>',
+    merges: '<path d="M6 4v5a4 4 0 0 0 4 4h4a4 4 0 0 1 4 4v3M18 4v5a4 4 0 0 1-4 4"/><circle cx="6" cy="4" r="1"/><circle cx="18" cy="4" r="1"/>',
+    schema: '<rect x="3" y="3" width="7" height="5" rx="1"/><rect x="14" y="16" width="7" height="5" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><path d="M6.5 8v10.5H14M10 5.5h4"/>',
+    jemalloc: '<rect x="6" y="6" width="12" height="12" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+    profile: '<path d="M4 6h10M4 12h16M4 18h7"/><circle cx="17" cy="6" r="2"/><circle cx="14" cy="18" r="2"/>',
+    source: '<path d="M8 6l-6 6 6 6M16 6l6 6-6 6"/>',
+    docs: '<path d="M4 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4zM20 4h-6a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6z"/>',
+    reference: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+    website: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    cloud: '<path d="M7 18h10a4 4 0 0 0 .5-8 6 6 0 0 0-11.5 1.5A3.5 3.5 0 0 0 7 18z"/>',
+    external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+    menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    collapse: '<path d="M15 6l-6 6 6 6"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+    switch: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+};
+
+function icon(name, extra_class) {
+    const span = document.createElement('span');
+    span.style.display = 'inline-flex';
+    if (name === 'logo') {
+        span.innerHTML = ICONS.logo;
+    } else {
+        span.innerHTML = `<svg class="icon${extra_class ? ' ' + extra_class : ''}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+    }
+    return span;
+}
+
+/// Administrator-configurable destinations, from `/console/config.json` (the `web_console` server
+/// configuration section). The defaults are the ones of the landing page at `/`.
+let config = {
+    source_code_url: 'https://github.com/ClickHouse/ClickHouse/',
+    documentation_url: 'https://clickhouse.com/docs/',
+    website_url: 'https://clickhouse.com/',
+    cloud_url: 'https://clickhouse.cloud/',
+    clickstack_url: '/clickstack/',
+};
+let config_error = null;
+
+const CATEGORIES = [
+    {id: 'home', title: 'Home'},
+    {id: 'workspace', title: 'Workspace'},
+    {id: 'diagnostics', title: 'Diagnostics'},
+    {id: 'resources', title: 'Resources'},
+];
+
+/// The navigation registry: the home page cards and the sidebar are generated from it.
+///
+/// `kind`:
+/// - `home`: the home page;
+/// - `panel`: a page of this server embedded in the main area (`src`);
+/// - `link`: an external destination opened in a new tab (`config_key` in `config`).
+/// `integration` says how the panel receives the connection (see the comment at the top).
+/// `keep_alive` panels stay loaded (hidden) when another destination is selected, so that unsaved
+/// queries, tabs, results, and terminal sessions survive; the others are unloaded, which stops their
+/// timers and requests, and are loaded again on demand.
+/// `probes` are queries that need the same privileges and system tables as the panel. They run with
+/// `LIMIT 0` once per session to tell restricted or unavailable panels apart before they are opened.
+/// `needs_internet` names third-party scripts that the page loads from a public CDN.
+const COMPONENTS = [
+    {id: 'home', category: 'home', kind: 'home', title: 'Home', icon: 'home',
+     description: 'Connection overview and panel launcher.'},
+
+    {id: 'sql', category: 'workspace', kind: 'panel', title: 'SQL Console', icon: 'sql', src: '/ui/',
+     integration: 'sql-console', keep_alive: true,
+     description: 'Write and run queries with tabs, history, and saved queries.'},
+    {id: 'dashboard', category: 'workspace', kind: 'panel', title: 'Dashboard', icon: 'dashboard', src: '/dashboard',
+     integration: 'native', keep_alive: true,
+     probes: ['SELECT 1 FROM system.dashboards LIMIT 0'],
+     description: 'Charts of server metrics, defined in system.dashboards.'},
+    {id: 'clickstack', category: 'workspace', kind: 'panel', title: 'ClickStack', icon: 'clickstack', config_key: 'clickstack_url',
+     integration: 'clickstack', keep_alive: true,
+     description: 'Observability for logs, traces, and metrics stored in ClickHouse.'},
+    {id: 'terminal', category: 'workspace', kind: 'panel', title: 'Web Terminal', icon: 'terminal', src: '/webterminal',
+     integration: 'webterminal', keep_alive: true,
+     description: 'An interactive clickhouse-client session running on the server.'},
+
+    {id: 'binary', category: 'diagnostics', kind: 'panel', title: 'Binary visualizer', icon: 'binary', src: '/binary',
+     integration: 'native', needs_internet: 'Leaflet from cdnjs.cloudflare.com',
+     probes: ['SELECT addressToSymbol(toUInt64(0)) LIMIT 0 SETTINGS allow_introspection_functions = 1'],
+     description: 'Map of the server binary by functions and source files.'},
+    {id: 'merges', category: 'diagnostics', kind: 'panel', title: 'Merges visualizer', icon: 'merges', src: '/merges',
+     integration: 'native',
+     probes: ['SELECT 1 FROM system.part_log LIMIT 0'],
+     description: 'Replay of inserts and merges of data parts from system.part_log.'},
+    {id: 'schema', category: 'diagnostics', kind: 'panel', title: 'Schema visualizer', icon: 'schema', src: '/schema',
+     integration: 'native',
+     probes: ['SELECT 1 FROM system.tables LIMIT 0', 'SELECT 1 FROM system.columns LIMIT 0'],
+     description: 'Graph of tables, views, and dictionaries with their dependencies.'},
+    {id: 'jemalloc', category: 'diagnostics', kind: 'panel', title: 'Jemalloc', icon: 'jemalloc', src: '/jemalloc',
+     integration: 'native', needs_internet: 'uPlot from cdn.jsdelivr.net',
+     probes: ['SELECT 1 FROM system.jemalloc_stats LIMIT 0'],
+     description: 'Memory allocator statistics and heap profiles.'},
+    {id: 'processors-profile', category: 'diagnostics', kind: 'panel', title: 'Processors profile', icon: 'profile', src: '/processors-profile',
+     integration: 'native',
+     probes: ['SELECT 1 FROM system.processors_profile_log LIMIT 0', 'SELECT 1 FROM system.query_log LIMIT 0'],
+     description: 'Time spent in each processor of a query pipeline.'},
+
+    {id: 'source', category: 'resources', kind: 'link', title: 'Source code', icon: 'source', config_key: 'source_code_url',
+     description: 'The ClickHouse source code repository.'},
+    {id: 'documentation', category: 'resources', kind: 'link', title: 'Documentation', icon: 'docs', config_key: 'documentation_url',
+     description: 'Guides and the complete ClickHouse documentation.'},
+    {id: 'reference', category: 'resources', kind: 'panel', title: 'Reference', icon: 'reference', src: '/docs',
+     integration: 'native', keep_alive: true,
+     probes: ['SELECT 1 FROM system.documentation LIMIT 0'],
+     description: 'Functions, settings, and engines of this server, from system.documentation.'},
+    {id: 'website', category: 'resources', kind: 'link', title: 'Website', icon: 'website', config_key: 'website_url',
+     description: 'The ClickHouse website.'},
+    {id: 'cloud', category: 'resources', kind: 'link', title: 'Cloud', icon: 'cloud', config_key: 'cloud_url',
+     description: 'ClickHouse Cloud, the managed service.'},
+];
+
+const COMPONENTS_BY_ID = new Map(COMPONENTS.map(c => [c.id, c]));
+
+/// Server-side availability of the routes of optional panels (`HEAD` requests, no credentials):
+/// `/webterminal` answers 403 when disabled by `enable_webterminal`, `/clickstack/` 404 when the
+/// build has no ClickStack bundle.
+const route_probes = new Map();
+
+/// The signed-in session, or `null`. Only this object holds the password.
+let session = null;
+let login_attempt = 0;
+
+/// Frames of loaded panels: id -> {component, host, iframe, overlay, state}.
+const frames = new Map();
+
+/// --- URL validation ---
+
+/// The same rules as the connection form of the SQL Console at `/ui`, except that the URL this page
+/// was loaded from is always accepted: the browser already talks to that server over that scheme.
+function validateServerURL(value) {
+    let url;
+    try {
+        url = new URL(value);
+    } catch (e) {
+        return {error: 'Enter a valid absolute HTTP or HTTPS URL.'};
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return {error: 'Use an absolute HTTP or HTTPS URL.'};
+    if (url.username || url.password) return {error: 'Do not include credentials in the URL.'};
+    if (url.search || url.hash || value.endsWith('?') || value.endsWith('#')) return {error: 'Do not include query parameters or fragments in the URL.'};
+    if (url.protocol === 'http:' && url.origin !== location.origin && !isLocalHost(url.hostname)) {
+        return {error: 'Use HTTPS for non-local ClickHouse endpoints.'};
+    }
+    const normalized = url.origin + url.pathname.replace(/\/+$/, '');
+    let warning = null;
+    if (url.protocol === 'http:' && !isLocalHost(url.hostname)) {
+        warning = 'This connection is not encrypted (HTTP): the password is sent to the server in clear text.';
+    }
+    return {url: normalized, origin: url.origin, warning};
+}
+
+function isLocalHost(hostname) {
+    return ['localhost', '127.0.0.1', '[::1]', '::1'].includes(hostname);
+}
+
+/// A configured destination: an absolute HTTP(S) URL or a path on this server. Anything else
+/// (`javascript:`, protocol-relative `//host`, ...) is rejected, so a configuration mistake cannot
+/// turn into a script or an unexpected redirect.
+function parseDestination(value) {
+    if (!value) return null;
+    if (value.startsWith('/') && !value.startsWith('//') && !value.includes('\\')) {
+        return {url: value, same_origin: true};
+    }
+    try {
+        const url = new URL(value);
+        if (url.protocol === 'http:' || url.protocol === 'https:') {
+            return {url: url.href, same_origin: url.origin === location.origin};
+        }
+    } catch (e) {
+        /// Reported as invalid below.
+    }
+    return {invalid: true};
+}
+
+/// --- ClickHouse HTTP requests ---
+
+function queryEndpoint(connection) {
+    const url = new URL(connection.url + '/');
+    if (new URL(connection.url).origin !== location.origin) url.searchParams.set('add_http_cors_header', '1');
+    return url.href;
+}
+
+/// Runs a query with the credentials in headers (never in the URL). Returns `{ok, data}` or
+/// `{ok: false, kind, message, detail}`, where `kind` is one of: `credentials`, `forbidden`,
+/// `missing`, `server`, `timeout`, `unreachable`, `tls`, `browser`, `aborted`.
+async function runQuery(connection, sql, signal, timeout_ms = 15000) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal.addEventListener('abort', abort);
+    let timed_out = false;
+    const timer = setTimeout(() => { timed_out = true; controller.abort(); }, timeout_ms);
+    try {
+        let response;
+        try {
+            response = await fetch(queryEndpoint(connection), {
+                method: 'POST',
+                body: sql,
+                headers: {
+                    'Content-Type': 'text/plain; charset=UTF-8',
+                    'X-ClickHouse-User': connection.user,
+                    'X-ClickHouse-Key': connection.password,
+                },
+                credentials: 'omit',
+                cache: 'no-store',
+                referrerPolicy: 'no-referrer',
+                signal: controller.signal,
+            });
+        } catch (e) {
+            if (signal.aborted) return {ok: false, kind: 'aborted'};
+            if (timed_out) {
+                return {ok: false, kind: 'timeout', message: `The server did not answer within ${timeout_ms / 1000} seconds.`};
+            }
+            return await diagnoseNetworkFailure(connection, signal);
+        }
+        const text = await response.text();
+        if (response.ok) {
+            return {ok: true, data: text ? JSON.parse(text).data : []};
+        }
+        return classifyServerError(response, text);
+    } finally {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+    }
+}
+
+function classifyServerError(response, text) {
+    const code = Number(response.headers.get('X-ClickHouse-Exception-Code') || (text.match(/Code: (\d+)/) || [])[1] || 0);
+    const detail = text.trim().split('\n')[0].slice(0, 500);
+    /// UNKNOWN_USER, WRONG_PASSWORD, REQUIRED_PASSWORD, AUTHENTICATION_FAILED.
+    if ([192, 193, 194, 516].includes(code) || (!code && response.status === 401)) {
+        return {ok: false, kind: 'credentials', code, message: 'The username or password is incorrect.', detail};
+    }
+    if (code === 195) {
+        return {ok: false, kind: 'forbidden', code, message: 'This user is not allowed to connect from your network address.', detail};
+    }
+    /// ACCESS_DENIED, READONLY, FUNCTION_NOT_ALLOWED (introspection functions are disabled).
+    if ([497, 164, 446].includes(code) || (!code && response.status === 403)) {
+        return {ok: false, kind: 'forbidden', code, message: 'The user does not have the required permissions.', detail};
+    }
+    /// UNKNOWN_TABLE, UNKNOWN_DATABASE, UNKNOWN_FUNCTION.
+    if ([60, 81, 46].includes(code)) {
+        return {ok: false, kind: 'missing', code, message: 'A required system table or function is not available on this server.', detail};
+    }
+    return {ok: false, kind: 'server', code, message: `The server returned an error (HTTP ${response.status}).`, detail};
+}
+
+/// Browsers report every network failure as the same `TypeError`, so tell the likely causes apart
+/// with what is observable: mixed content is decided by the URLs, and a `no-cors` request to `/ping`
+/// succeeds when the server is reachable but the real request was blocked by the CORS policy.
+async function diagnoseNetworkFailure(connection, signal) {
+    const target = new URL(connection.url);
+    if (location.protocol === 'https:' && target.protocol === 'http:') {
+        return {ok: false, kind: 'browser',
+            message: 'The browser blocks requests from this HTTPS page to an HTTP server (mixed content). Use an https:// URL.'};
+    }
+    let reachable = false;
+    try {
+        await fetch(connection.url + '/ping', {mode: 'no-cors', credentials: 'omit', cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(5000)])});
+        reachable = true;
+    } catch (e) {
+        if (signal.aborted) return {ok: false, kind: 'aborted'};
+    }
+    if (reachable && target.origin !== location.origin) {
+        return {ok: false, kind: 'browser',
+            message: `The server at ${target.origin} is reachable, but the browser blocked the response (CORS policy). `
+                + `Allow the origin ${location.origin} on that server, or open the console served by that server.`};
+    }
+    if (reachable) {
+        return {ok: false, kind: 'unreachable',
+            message: 'The server answers /ping, but the request failed. A proxy or a browser extension may be blocking it.'};
+    }
+    if (target.protocol === 'https:') {
+        return {ok: false, kind: 'tls',
+            message: `Cannot connect to ${target.origin}. The server is unreachable, or its TLS certificate is not trusted by this browser `
+                + `(browsers do not tell which). Open ${target.origin}/ping in a new tab: a certificate warning there means a TLS problem.`};
+    }
+    return {ok: false, kind: 'unreachable',
+        message: `Cannot connect to ${target.origin}. Check that the server is running and that the host and port are correct.`};
+}
+
+/// The connection check needs no privileges: it only calls functions.
+const CHECK_QUERY = 'SELECT currentUser() AS user, version() AS version, hostName() AS hostname FORMAT JSON';
+
+/// --- Theme ---
+
+/// The same `theme` key in `localStorage` as the landing page and the other web UI pages, so that
+/// the embedded pages open in the same theme.
+function currentTheme() {
+    return document.documentElement.getAttribute('data-theme');
+}
+
+function initTheme() {
+    let theme = null;
+    try {
+        theme = localStorage.getItem('theme');
+    } catch (e) {
+        /// Storage is disabled: use the system preference.
+    }
+    if (theme !== 'dark' && theme !== 'light') {
+        theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    applyTheme(theme);
+}
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    for (const button of document.querySelectorAll('.theme-toggle')) {
+        const next = theme === 'dark' ? 'light' : 'dark';
+        button.replaceChildren(icon(theme === 'dark' ? 'sun' : 'moon'));
+        button.setAttribute('aria-label', `Switch to ${next} theme`);
+        button.title = `Switch to ${next} theme`;
+    }
+}
+
+function toggleTheme() {
+    const theme = currentTheme() === 'dark' ? 'light' : 'dark';
+    applyTheme(theme);
+    try {
+        localStorage.setItem('theme', theme);
+    } catch (e) {
+        /// The choice is not remembered when storage is disabled.
+    }
+}
+
+/// --- Routing ---
+
+function componentPath(id) {
+    return `${BASE_PATH}/${id}`;
+}
+
+function loginPath(next) {
+    return `${BASE_PATH}/login` + (next ? `?next=${encodeURIComponent(next)}` : '');
+}
+
+/// Only an id of the registry is accepted as the destination after login, so it can never point
+/// outside of the console.
+function validNext(value) {
+    return value && value !== 'home' && COMPONENTS_BY_ID.has(value) ? value : null;
+}
+
+function parseRoute() {
+    const rest = location.pathname.slice(BASE_PATH.length).replace(/^\/+|\/+$/g, '');
+    if (rest === '') return {name: 'root'};
+    if (rest === 'login') return {name: 'login', next: validNext(new URLSearchParams(location.search).get('next'))};
+    if (COMPONENTS_BY_ID.has(rest)) return {name: 'component', id: rest};
+    return {name: 'not-found', path: rest};
+}
+
+function navigate(path, replace) {
+    if (replace) history.replaceState(null, '', path);
+    else if (path !== location.pathname + location.search) history.pushState(null, '', path);
+    render();
+}
+
+function render() {
+    let route = parseRoute();
+    if (!session) {
+        const next = route.name === 'login' ? route.next : (route.name === 'component' ? validNext(route.id) : null);
+        if (route.name !== 'login') history.replaceState(null, '', loginPath(next));
+        showLogin();
+        return;
+    }
+    if (route.name === 'root' || route.name === 'login') {
+        history.replaceState(null, '', componentPath('home'));
+        route = {name: 'component', id: 'home'};
+    }
+    showShell(route);
+}
+
+/// SPA navigation for the links of the shell. Modified clicks keep their default behavior.
+document.addEventListener('click', e => {
+    const a = e.target.closest('a[data-route]');
+    if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    closeMobileSidebar(false);
+    navigate(a.getAttribute('href'));
+});
+
+window.addEventListener('popstate', render);
+
+/// A page restored from the back/forward cache keeps its state in memory: after sign-out that is
+/// the signed-out state. Render again so the route matches it, and clear the password field in case
+/// the browser restored form values.
+window.addEventListener('pageshow', e => {
+    if (e.persisted) {
+        $('login-password').value = '';
+        render();
+    }
+});
+
+/// --- Login ---
+
+function showLogin() {
+    $('shell').hidden = true;
+    $('login-view').hidden = false;
+    $('skip-link').hidden = true;
+    document.title = 'Sign in · ClickHouse Console';
+    const url_input = $('login-url');
+    if (!url_input.value) url_input.value = location.origin;
+    if (!$('login-user').value) $('login-user').value = 'default';
+    const next = parseRoute().next;
+    if (next && !$('login-notice').dataset.persistent) {
+        showLoginNotice(`Sign in to open ${COMPONENTS_BY_ID.get(next).title}.`);
+    }
+    updateLoginWarning();
+    (url_input.value && $('login-user').value ? $('login-password') : url_input).focus();
+}
+
+function showLoginNotice(text, persistent) {
+    const notice = $('login-notice');
+    notice.textContent = text;
+    notice.hidden = !text;
+    if (persistent) notice.dataset.persistent = '1';
+    else delete notice.dataset.persistent;
+}
+
+function showLoginError(message, detail) {
+    const box = $('login-error');
+    box.replaceChildren(document.createTextNode(message));
+    if (detail) {
+        const span = document.createElement('span');
+        span.className = 'detail';
+        span.textContent = detail;
+        box.append(span);
+    }
+    box.hidden = false;
+}
+
+function updateLoginWarning() {
+    const result = validateServerURL($('login-url').value.trim());
+    $('login-warning').textContent = result.warning || '';
+    $('login-warning').hidden = !result.warning;
+}
+
+$('login-url').addEventListener('input', () => {
+    $('login-url').removeAttribute('aria-invalid');
+    updateLoginWarning();
+});
+
+$('login-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const submit = $('login-submit');
+    if (submit.disabled) return;
+
+    $('login-error').hidden = true;
+    const url_check = validateServerURL($('login-url').value.trim());
+    if (url_check.error) {
+        $('login-url').setAttribute('aria-invalid', 'true');
+        showLoginError(url_check.error);
+        $('login-url').focus();
+        return;
+    }
+    const user = $('login-user').value.trim();
+    if (!user) {
+        showLoginError('Enter a username.');
+        $('login-user').focus();
+        return;
+    }
+    const connection = {url: url_check.url, origin: url_check.origin, user, password: $('login-password').value};
+
+    const attempt = ++login_attempt;
+    submit.disabled = true;
+    submit.setAttribute('aria-busy', 'true');
+    submit.replaceChildren(Object.assign(document.createElement('span'), {className: 'spinner'}), document.createTextNode(' Connecting…'));
+    const controller = new AbortController();
+    const result = await runQuery(connection, CHECK_QUERY, controller.signal);
+    if (attempt !== login_attempt) return;
+    submit.disabled = false;
+    submit.removeAttribute('aria-busy');
+    submit.textContent = 'Connect';
+
+    if (!result.ok) {
+        showLoginError(result.message, result.detail);
+        if (result.kind === 'credentials') {
+            $('login-password').select();
+            $('login-password').focus();
+        }
+        return;
+    }
+
+    const info = result.data[0];
+    startSession(connection, info);
+    $('login-password').value = '';
+    showLoginNotice('');
+    navigate(parseRoute().next ? componentPath(parseRoute().next) : componentPath('home'), true);
+});
+
+/// --- Session ---
+
+function startSession(connection, info) {
+    session = {
+        ...connection,
+        server_user: info.user,
+        version: info.version,
+        hostname: info.hostname,
+        controller: new AbortController(),
+        status: {state: 'ok', verified_at: new Date(), message: null},
+        probes: new Map(),
+        status_timer: null,
+        checking: false,
+    };
+    session.status_timer = setInterval(() => {
+        if (document.visibilityState === 'visible') checkConnection();
+    }, 60000);
+    runProbes(session);
+}
+
+/// Ends the session: cancels the requests of the console, unloads every panel (which ends their
+/// requests, timers, and WebSocket sessions), and forgets the credentials.
+function endSession() {
+    if (!session) return;
+    session.controller.abort();
+    clearInterval(session.status_timer);
+    for (const id of [...frames.keys()]) destroyFrame(id);
+    /// ClickStack stores the connection the user entered in it (including the password) in the
+    /// session storage of this tab under this key.
+    try {
+        sessionStorage.removeItem('connections');
+    } catch (e) {
+        /// Storage is disabled, so ClickStack could not have stored anything either.
+    }
+    session = null;
+    $('login-password').value = '';
+    closeMobileSidebar(false);
+}
+
+function signOut() {
+    endSession();
+    showLoginNotice('You have signed out.', true);
+    navigate(loginPath(null), true);
+}
+
+function switchConnection() {
+    const previous = session ? `${session.user} at ${session.url}` : '';
+    endSession();
+    showLoginNotice(`Signed out of ${previous}. Sign in to another server or as another user. All panels were closed.`, true);
+    navigate(loginPath(null), true);
+}
+
+async function checkConnection() {
+    const current = session;
+    if (!current || current.checking) return;
+    current.checking = true;
+    renderConnectionStatus();
+    const result = await runQuery(current, CHECK_QUERY, current.controller.signal);
+    if (session !== current || result.kind === 'aborted') return;
+    current.checking = false;
+    if (result.ok) {
+        const info = result.data[0];
+        current.status = {state: 'ok', verified_at: new Date(), message: null};
+        current.server_user = info.user;
+        current.version = info.version;
+        current.hostname = info.hostname;
+    } else {
+        current.status = {state: result.kind === 'credentials' ? 'auth' : 'error', verified_at: current.status.verified_at,
+            failed_at: new Date(), message: result.message, detail: result.detail};
+    }
+    renderConnectionStatus();
+    if (parseRoute().id === 'home') renderHome();
+    else renderPanelNotice();
+}
+
+/// Run the probes of all panels concurrently; they are tiny `LIMIT 0` queries.
+async function runProbes(current) {
+    const probing = COMPONENTS.filter(c => c.probes);
+    for (const c of probing) current.probes.set(c.id, {state: 'checking'});
+    const route_checks = [probeRoute('/webterminal'), probeRoute(clickstackRoute())];
+    await Promise.all([...route_checks, ...probing.map(async c => {
+        let result = {ok: true};
+        for (const sql of c.probes) {
+            result = await runQuery(current, sql, current.controller.signal);
+            if (!result.ok) break;
+        }
+        if (session !== current || result.kind === 'aborted') return;
+        current.probes.set(c.id, result.ok ? {state: 'ok'} : {state: result.kind, message: result.message, detail: result.detail});
+        refreshComponentStates();
+    })]);
+    if (session === current) refreshComponentStates();
+}
+
+async function probeRoute(path) {
+    if (!path || route_probes.has(path)) return;
+    route_probes.set(path, {state: 'checking'});
+    try {
+        const response = await fetch(path, {method: 'HEAD', credentials: 'omit', cache: 'no-store'});
+        route_probes.set(path, {state: response.ok ? 'ok' : 'error', status: response.status});
+    } catch (e) {
+        route_probes.set(path, {state: 'error', status: 0});
+    }
+    refreshComponentStates();
+}
+
+function clickstackRoute() {
+    const destination = parseDestination(config.clickstack_url);
+    return destination && destination.same_origin && destination.url.startsWith('/') ? destination.url : null;
+}
+
+/// --- Component states ---
+
+/// What a component can do right now, for the cards, the sidebar, and the panel view:
+/// `status` is `available`, `checking`, `configure`, `restricted`, `unavailable`, or `unverified`;
+/// `action` is `Open`, `Configure`, `Details`, or null; `external` is set for new-tab destinations.
+function componentState(c) {
+    if (c.kind === 'home') return {status: 'available', action: 'Open', href: componentPath(c.id)};
+
+    if (c.kind === 'link') {
+        const destination = parseDestination(config[c.config_key]);
+        if (!destination) {
+            return {status: 'configure', action: 'Configure', href: componentPath(c.id),
+                reason: 'No address is configured for this destination.'};
+        }
+        if (destination.invalid) {
+            return {status: 'configure', action: 'Configure', href: componentPath(c.id),
+                reason: 'The configured address is not a valid HTTP(S) URL or server path.'};
+        }
+        return {status: 'available', action: 'Open', href: destination.url, external: !destination.same_origin};
+    }
+
+    if (c.integration === 'clickstack') {
+        const destination = parseDestination(config.clickstack_url);
+        if (!destination || destination.invalid) {
+            return {status: 'configure', action: 'Configure', href: componentPath(c.id),
+                reason: destination ? 'The configured ClickStack address is not a valid HTTP(S) URL or server path.'
+                    : 'ClickStack is not configured for this console.'};
+        }
+        if (!destination.same_origin) {
+            return {status: 'available', action: 'Open', href: destination.url, external: true,
+                note: 'Separate deployment with its own sign-in.'};
+        }
+        const route = route_probes.get(clickstackRoute());
+        if (route && route.state === 'error') {
+            return {status: 'unavailable', action: 'Details', href: componentPath(c.id),
+                reason: route.status === 404 ? 'This server build does not include the ClickStack bundle.'
+                    : `ClickStack did not load (HTTP ${route.status || 'request failed'}).`};
+        }
+        return {status: route && route.state === 'ok' ? 'available' : 'checking', action: 'Open', href: componentPath(c.id),
+            note: 'Uses its own connection settings: enter them in ClickStack on first use.'};
+    }
+
+    if (c.integration === 'webterminal') {
+        if (session && session.origin !== location.origin) {
+            return {status: 'unavailable', action: 'Details', href: componentPath(c.id),
+                reason: 'The Web Terminal runs on the server that serves this console, but you are connected to another server.'};
+        }
+        const route = route_probes.get('/webterminal');
+        if (route && route.state === 'error') {
+            return {status: 'unavailable', action: 'Details', href: componentPath(c.id),
+                reason: route.status === 403 ? 'Disabled on this server by the enable_webterminal server setting.'
+                    : `The Web Terminal is not available (HTTP ${route.status || 'request failed'}).`};
+        }
+        return {status: route && route.state === 'ok' ? 'available' : 'checking', action: 'Open', href: componentPath(c.id)};
+    }
+
+    const probe = session && c.probes ? session.probes.get(c.id) : null;
+    const base = {action: 'Open', href: componentPath(c.id)};
+    if (probe && probe.state === 'checking') return {...base, status: 'checking'};
+    if (probe && probe.state === 'forbidden') {
+        return {...base, status: 'restricted', action: 'Details', reason: 'Your user does not have the privileges this panel needs.', detail: probe.detail};
+    }
+    if (probe && probe.state === 'missing') {
+        return {...base, status: 'unavailable', action: 'Details', reason: 'A system table or function this panel needs is not available on this server.', detail: probe.detail};
+    }
+    if (probe && probe.state !== 'ok') {
+        return {...base, status: 'unverified', reason: probe.message, detail: probe.detail};
+    }
+    return {...base, status: 'available'};
+}
+
+const STATUS_BADGES = {
+    available: null,
+    checking: {text: 'Checking…', className: ''},
+    configure: {text: 'Not configured', className: 'warn'},
+    restricted: {text: 'Restricted', className: 'bad'},
+    unavailable: {text: 'Unavailable', className: 'bad'},
+    unverified: {text: 'Not verified', className: 'warn'},
+};
+
+function statusBadge(state) {
+    const spec = STATUS_BADGES[state.status];
+    if (!spec) return null;
+    const badge = document.createElement('span');
+    badge.className = `badge ${spec.className}`;
+    badge.textContent = spec.text;
+    return badge;
+}
+
+function refreshComponentStates() {
+    if (!session) return;
+    renderSidebar();
+    const route = parseRoute();
+    if (route.name !== 'component') return;
+    if (route.id === 'home') renderHome();
+    else if (!frames.has(route.id)) showPanel(COMPONENTS_BY_ID.get(route.id));
+}
+
+/// --- Shell ---
+
+function showShell(route) {
+    $('login-view').hidden = true;
+    $('shell').hidden = false;
+    $('skip-link').hidden = false;
+    renderConnectionStatus();
+    renderSidebar();
+
+    if (route.name === 'not-found') {
+        hideAllFrames();
+        $('home-view').hidden = true;
+        $('panel-view').hidden = false;
+        renderPanelBar(null, 'Page not found');
+        renderPanelState('Page not found', [paragraph(`There is no console page at ${location.pathname}.`)],
+            [routeLink('Go to Home', componentPath('home'), true)]);
+        document.title = 'Not found · ClickHouse Console';
+        return;
+    }
+
+    const c = COMPONENTS_BY_ID.get(route.id);
+    document.title = `${c.title} · ClickHouse Console`;
+    if (c.kind === 'home') {
+        hideAllFrames();
+        $('panel-view').hidden = true;
+        $('home-view').hidden = false;
+        renderHome();
+        focusHeading($('home-view').querySelector('h1'));
+    } else {
+        $('home-view').hidden = true;
+        $('panel-view').hidden = false;
+        showPanel(c);
+        focusHeading($('panel-title'));
+    }
+}
+
+/// Move the focus to the heading of the new page, so keyboard and screen reader users start there,
+/// but not when the user is working in the sidebar with the keyboard.
+function focusHeading(heading) {
+    if (heading && !$('sidebar').contains(document.activeElement)) heading.focus({preventScroll: true});
+}
+
+function renderConnectionStatus() {
+    if (!session) return;
+    const pill = $('connection-pill');
+    const status = session.status;
+    const where = `${session.server_user}@${new URL(session.url).host}`;
+    let text, state;
+    if (session.checking && status.state === 'ok') {
+        text = `${where} · checking…`;
+        state = 'checking';
+    } else if (status.state === 'ok') {
+        text = `${where} · connected`;
+        state = 'ok';
+    } else if (status.state === 'auth') {
+        text = `${where} · authentication failed`;
+        state = 'bad';
+    } else {
+        text = `${where} · connection lost`;
+        state = 'bad';
+    }
+    pill.className = state;
+    pill.querySelector('.text').textContent = text;
+    pill.title = status.state === 'ok'
+        ? `Connected to ${session.url} as ${session.server_user}. ClickHouse ${session.version}. Verified at ${formatTime(status.verified_at)}.`
+        : `${status.message} Failed at ${formatTime(status.failed_at)}.`;
+}
+
+function formatTime(date) {
+    if (!date) return 'never';
+    const pad = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function routeLink(text, href, primary) {
+    const a = document.createElement('a');
+    a.className = primary ? 'button primary' : 'button';
+    a.href = href;
+    a.dataset.route = '';
+    a.textContent = text;
+    return a;
+}
+
+function externalLink(text, href, primary) {
+    const a = document.createElement('a');
+    a.className = primary ? 'button primary' : 'button';
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.append(document.createTextNode(text), icon('external', 'icon-small'), visuallyHidden(' (opens in a new tab)'));
+    return a;
+}
+
+function visuallyHidden(text) {
+    const span = document.createElement('span');
+    span.className = 'visually-hidden';
+    span.textContent = text;
+    return span;
+}
+
+function paragraph(text) {
+    const p = document.createElement('p');
+    p.textContent = text;
+    return p;
+}
+
+/// The destination of a component, the same for its card and its sidebar entry.
+function destinationLink(c, state, text, primary) {
+    if (state.external) return externalLink(text, state.href, primary);
+    return routeLink(text, state.href, primary);
+}
+
+function renderSidebar() {
+    const nav = $('sidebar');
+    const route = parseRoute();
+    const active = route.name === 'component' ? route.id : null;
+    const fragment = document.createDocumentFragment();
+    for (const category of CATEGORIES) {
+        const heading = document.createElement('h2');
+        heading.id = `nav-${category.id}`;
+        heading.textContent = category.title;
+        const list = document.createElement('ul');
+        list.setAttribute('aria-labelledby', heading.id);
+        for (const c of COMPONENTS.filter(c => c.category === category.id)) {
+            const state = componentState(c);
+            const a = document.createElement('a');
+            a.href = state.href;
+            a.dataset.component = c.id;
+            a.title = c.title;
+            if (state.external) {
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+            } else {
+                a.dataset.route = '';
+            }
+            if (c.id === active) a.setAttribute('aria-current', 'page');
+            const label = document.createElement('span');
+            label.className = 'label';
+            label.textContent = c.title;
+            a.append(icon(c.icon), label);
+            if (state.external) a.append(icon('external', 'icon-small external'), visuallyHidden(' (opens in a new tab)'));
+            const badge = STATUS_BADGES[state.status];
+            if (badge && state.status !== 'checking') {
+                a.classList.add('muted');
+                const dot = document.createElement('span');
+                dot.className = `dot state-dot ${badge.className}`;
+                a.append(dot, visuallyHidden(` (${badge.text.toLowerCase()})`));
+            }
+            const item = document.createElement('li');
+            item.append(a);
+            list.append(item);
+        }
+        fragment.append(heading, list);
+    }
+    const collapse_row = document.createElement('div');
+    collapse_row.className = 'collapse-row';
+    const collapse = document.createElement('button');
+    collapse.type = 'button';
+    collapse.id = 'collapse-button';
+    collapse.className = 'icon-button';
+    const collapsed = $('shell').classList.contains('collapsed');
+    collapse.setAttribute('aria-expanded', String(!collapsed));
+    collapse.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    collapse.title = collapse.getAttribute('aria-label');
+    collapse.append(icon('collapse'));
+    collapse.addEventListener('click', toggleSidebarCollapsed);
+    collapse_row.append(collapse);
+    fragment.append(collapse_row);
+    const had_focus = nav.contains(document.activeElement) ? document.activeElement.dataset.component || document.activeElement.id : null;
+    nav.replaceChildren(fragment);
+    if (had_focus) {
+        const target = nav.querySelector(`[data-component="${had_focus}"]`) || $(had_focus);
+        if (target) target.focus();
+    }
+}
+
+function toggleSidebarCollapsed() {
+    const collapsed = $('shell').classList.toggle('collapsed');
+    try {
+        localStorage.setItem('console.sidebar-collapsed', collapsed ? '1' : '0');
+    } catch (e) {
+        /// Not remembered when storage is disabled.
+    }
+    renderSidebar();
+    $('collapse-button').focus();
+}
+
+function openMobileSidebar() {
+    $('shell').classList.add('sidebar-open');
+    $('menu-button').setAttribute('aria-expanded', 'true');
+    $('menu-button').setAttribute('aria-label', 'Hide navigation');
+    const current = $('sidebar').querySelector('[aria-current="page"]') || $('sidebar').querySelector('a');
+    if (current) current.focus();
+}
+
+function closeMobileSidebar(restore_focus) {
+    if (!$('shell').classList.contains('sidebar-open')) return;
+    $('shell').classList.remove('sidebar-open');
+    $('menu-button').setAttribute('aria-expanded', 'false');
+    $('menu-button').setAttribute('aria-label', 'Show navigation');
+    if (restore_focus) $('menu-button').focus();
+}
+
+$('menu-button').addEventListener('click', () => {
+    if ($('shell').classList.contains('sidebar-open')) closeMobileSidebar(true);
+    else openMobileSidebar();
+});
+$('sidebar-backdrop').addEventListener('click', () => closeMobileSidebar(true));
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeMobileSidebar(true);
+});
+
+/// --- Home ---
+
+function renderHome() {
+    const view = $('home-view');
+    const had_focus = view.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
+    const title = document.createElement('h1');
+    title.className = 'page-title';
+    title.tabIndex = -1;
+    title.dataset.focusKey = 'title';
+    title.textContent = 'Home';
+    view.replaceChildren(title, renderOverview());
+
+    if (config_error) {
+        const warning = document.createElement('div');
+        warning.className = 'message warning';
+        warning.textContent = `The console configuration could not be loaded (${config_error}); default destinations are shown.`;
+        view.append(warning);
+    }
+
+    for (const category of CATEGORIES.filter(category => category.id !== 'home')) {
+        const section = document.createElement('section');
+        section.className = 'category';
+        section.setAttribute('aria-labelledby', `home-${category.id}`);
+        const heading = document.createElement('h2');
+        heading.id = `home-${category.id}`;
+        heading.textContent = category.title;
+        const list = document.createElement('ul');
+        list.className = 'cards';
+        for (const c of COMPONENTS.filter(c => c.category === category.id)) list.append(renderCard(c));
+        section.append(heading, list);
+        view.append(section);
+    }
+    if (had_focus) {
+        const target = view.querySelector(`[data-focus-key="${had_focus}"]`);
+        if (target) target.focus();
+    }
+}
+
+function renderOverview() {
+    const box = document.createElement('section');
+    box.className = 'overview';
+    box.setAttribute('aria-label', 'Connection');
+    const list = document.createElement('dl');
+    const add = (term, value) => {
+        const dt = document.createElement('dt');
+        dt.textContent = term;
+        const dd = document.createElement('dd');
+        if (typeof value === 'string') dd.textContent = value;
+        else dd.append(value);
+        list.append(dt, dd);
+    };
+    const status = session.status;
+    const badge = document.createElement('span');
+    if (status.state === 'ok') {
+        badge.className = 'badge ok';
+        badge.append(Object.assign(document.createElement('span'), {className: 'dot'}),
+            document.createTextNode(`Connected, verified at ${formatTime(status.verified_at)}`));
+    } else {
+        badge.className = 'badge bad';
+        badge.append(Object.assign(document.createElement('span'), {className: 'dot'}),
+            document.createTextNode(`${status.state === 'auth' ? 'Authentication failed' : 'Connection lost'} at ${formatTime(status.failed_at)}`));
+    }
+    add('Status', badge);
+    add('Server', session.url);
+    add('Database user', session.server_user);
+    add('ClickHouse version', session.version);
+    add('Host name', session.hostname);
+    box.append(list);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const check = document.createElement('button');
+    check.type = 'button';
+    check.className = 'button';
+    check.dataset.focusKey = 'check';
+    check.textContent = session.checking ? 'Checking…' : 'Check connection';
+    check.disabled = session.checking;
+    check.addEventListener('click', checkConnection);
+    const change = document.createElement('button');
+    change.type = 'button';
+    change.className = 'button';
+    change.textContent = 'Switch connection';
+    change.addEventListener('click', switchConnection);
+    actions.append(check, change);
+    box.append(actions);
+
+    if (status.state !== 'ok') {
+        const message = document.createElement('div');
+        message.className = 'message error note';
+        message.textContent = status.state === 'auth'
+            ? `${status.message} The password may have changed: switch connection to sign in again.`
+            : status.message;
+        if (status.detail) message.append(Object.assign(document.createElement('span'), {className: 'detail', textContent: status.detail}));
+        box.append(message);
+    }
+    box.append(Object.assign(document.createElement('p'), {className: 'note',
+        textContent: 'The credentials are kept in the memory of this tab only. Reloading the page or signing out discards them. '
+            + 'Each panel runs its queries as this user, and the server enforces its privileges.'}));
+    return box;
+}
+
+function renderCard(c) {
+    const state = componentState(c);
+    const item = document.createElement('li');
+    const card = document.createElement('article');
+    card.className = 'card';
+    card.dataset.component = c.id;
+    card.setAttribute('aria-labelledby', `card-${c.id}`);
+
+    const head = document.createElement('div');
+    head.className = 'card-head';
+    const title = document.createElement('h3');
+    title.id = `card-${c.id}`;
+    title.textContent = c.title;
+    head.append(icon(c.icon), title);
+    const description = paragraph(c.description);
+
+    const foot = document.createElement('div');
+    foot.className = 'card-foot';
+    const badges = document.createElement('span');
+    const badge = statusBadge(state);
+    if (badge) badges.append(badge);
+    if (state.external) {
+        const external = document.createElement('span');
+        external.className = 'badge';
+        external.textContent = 'External';
+        badges.append(external);
+    }
+    if (c.needs_internet) {
+        const internet = document.createElement('span');
+        internet.className = 'badge warn';
+        internet.textContent = 'Needs Internet';
+        internet.title = `Loads ${c.needs_internet}.`;
+        badges.append(internet);
+    }
+    const action = destinationLink(c, state, state.action, state.status === 'available' || state.status === 'unverified');
+    action.dataset.focusKey = `card-${c.id}`;
+    action.setAttribute('aria-describedby', `card-${c.id}`);
+    foot.append(badges, action);
+
+    card.append(head, description);
+    const status_text = state.reason || state.note;
+    if (status_text) card.append(Object.assign(document.createElement('p'), {className: 'status', textContent: status_text}));
+    card.append(foot);
+    item.append(card);
+    return item;
+}
+
+/// --- Panels ---
+
+function hideAllFrames() {
+    for (const [id, entry] of frames) {
+        if (entry.component.keep_alive) entry.host.hidden = true;
+        else destroyFrame(id);
+    }
+}
+
+function renderPanelBar(c, title) {
+    $('panel-icon').replaceChildren(c ? icon(c.icon) : '');
+    $('panel-title').textContent = title;
+    const badges = $('panel-badges');
+    badges.replaceChildren();
+    if (c && c.needs_internet) {
+        const internet = document.createElement('span');
+        internet.className = 'badge warn';
+        internet.textContent = 'Needs Internet';
+        internet.title = `Loads ${c.needs_internet}.`;
+        badges.append(internet);
+    }
+    $('panel-reload').hidden = true;
+    $('panel-standalone').hidden = true;
+}
+
+function renderPanelState(title, body, actions) {
+    const box = $('panel-state');
+    const inner = document.createElement('div');
+    const heading = document.createElement('h2');
+    heading.textContent = title;
+    inner.append(heading, ...body);
+    if (actions && actions.length) {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '0.5rem';
+        row.style.flexWrap = 'wrap';
+        row.append(...actions);
+        inner.append(row);
+    }
+    box.replaceChildren(inner);
+    box.hidden = false;
+}
+
+function renderPanelNotice() {
+    const notice = $('panel-notice');
+    const route = parseRoute();
+    if (!session || route.name !== 'component' || route.id === 'home') {
+        notice.hidden = true;
+        return;
+    }
+    const entry = frames.get(route.id);
+    const status = session.status;
+    let message = null, kind = 'warning';
+    if (entry && entry.notice) {
+        ({message, kind} = entry.notice);
+    } else if (status.state !== 'ok') {
+        message = `${status.state === 'auth' ? 'Authentication failed' : 'Connection to the server lost'} at ${formatTime(status.failed_at)}: `
+            + `${status.message} The panel may not work until the connection is restored.`;
+        kind = 'error';
+    }
+    notice.className = `message ${kind}`;
+    notice.textContent = message || '';
+    notice.hidden = !message;
+}
+
+function showPanel(c) {
+    for (const [id, entry] of frames) {
+        if (id === c.id) continue;
+        if (entry.component.keep_alive) entry.host.hidden = true;
+        else destroyFrame(id);
+    }
+    const state = componentState(c);
+    renderPanelBar(c, c.title);
+    $('panel-state').hidden = true;
+
+    if (c.kind === 'link' || state.external) {
+        renderExternalState(c, state);
+        renderPanelNotice();
+        return;
+    }
+
+    const entry = frames.get(c.id);
+    if (!entry && state.status !== 'available' && !(state.status === 'unverified')) {
+        if (state.status === 'checking') {
+            renderPanelState(`Checking ${c.title}…`, [paragraph('Checking whether this panel is available for your user.')]);
+        } else {
+            renderUnavailableState(c, state);
+        }
+        renderPanelNotice();
+        return;
+    }
+    openFrame(c);
+}
+
+function renderExternalState(c, state) {
+    if (state.status === 'available') {
+        renderPanelState(c.title, [
+            paragraph(c.description),
+            paragraph(`This destination is outside of this console: ${state.href}. It opens in a new tab, `
+                + 'and no credentials, queries, or database names are sent to it.'),
+        ], [externalLink(`Open ${c.title}`, state.href, true)]);
+        return;
+    }
+    renderConfigureState(c, state);
+}
+
+function renderConfigureState(c, state) {
+    const key = c.config_key;
+    const example = c.integration === 'clickstack' ? '/clickstack/' : (config[key] || 'https://docs.example.internal/');
+    const pre = document.createElement('pre');
+    pre.textContent = `<clickhouse>\n    <web_console>\n        <${key}>${example}</${key}>\n    </web_console>\n</clickhouse>`;
+    renderPanelState(`${c.title} is not configured`, [
+        paragraph(state.reason),
+        paragraph('An administrator can set the address in the server configuration, for example in a file under config.d. '
+            + 'Use a path on this server (embedded in the console) or an absolute HTTP(S) URL (opened in a new tab). '
+            + 'The change applies after the configuration is reloaded.'),
+        pre,
+    ], [routeLink('Back to Home', componentPath('home'))]);
+}
+
+function renderUnavailableState(c, state) {
+    if (state.status === 'configure') {
+        renderConfigureState(c, state);
+        return;
+    }
+    const body = [paragraph(state.reason)];
+    if (state.detail) {
+        const detail = document.createElement('pre');
+        detail.textContent = state.detail;
+        body.push(paragraph('The server answered:'), detail);
+    }
+    const actions = [routeLink('Back to Home', componentPath('home'))];
+    if (state.status === 'restricted') {
+        body.push(paragraph('Ask an administrator to grant the privileges, or sign in as another user. '
+            + 'You can still open the panel: the server checks every query and rejects those you are not allowed to run.'));
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'button';
+        open.textContent = 'Open anyway';
+        open.addEventListener('click', () => {
+            $('panel-state').hidden = true;
+            openFrame(c);
+        });
+        actions.unshift(open);
+    }
+    renderPanelState(state.status === 'restricted' ? `${c.title} is restricted` : `${c.title} is unavailable`, body, actions);
+}
+
+function frameSource(c) {
+    if (c.integration === 'clickstack') return parseDestination(config.clickstack_url).url;
+    return c.src;
+}
+
+function openFrame(c) {
+    let entry = frames.get(c.id);
+    if (!entry) entry = createFrame(c);
+    entry.host.hidden = false;
+    $('panel-reload').hidden = false;
+    const standalone = $('panel-standalone');
+    standalone.href = frameSource(c);
+    standalone.replaceChildren(document.createTextNode('Standalone page'), icon('external', 'icon-small'), visuallyHidden(' (opens in a new tab and asks for credentials separately)'));
+    standalone.title = 'Open the page outside of the console. It asks for credentials separately.';
+    standalone.hidden = false;
+    if (c.integration === 'webterminal' && entry.loaded) postToTerminal(entry, {type: 'webterminal-refit', focus: false});
+    renderPanelNotice();
+}
+
+function createFrame(c) {
+    const host = document.createElement('div');
+    host.className = 'frame-host';
+    host.dataset.component = c.id;
+    const iframe = document.createElement('iframe');
+    iframe.title = c.title;
+    iframe.referrerPolicy = 'no-referrer';
+    const overlay = document.createElement('div');
+    overlay.className = 'frame-overlay';
+    overlay.setAttribute('role', 'status');
+    overlay.append(Object.assign(document.createElement('span'), {className: 'spinner'}), document.createTextNode(`  Loading ${c.title}…`));
+    host.append(iframe, overlay);
+    const entry = {component: c, host, iframe, overlay, loaded: false, notice: null, session};
+    frames.set(c.id, entry);
+    iframe.addEventListener('load', () => onFrameLoad(entry));
+    iframe.src = frameSource(c);
+    $('frames').append(host);
+    return entry;
+}
+
+function destroyFrame(id) {
+    const entry = frames.get(id);
+    if (!entry) return;
+    frames.delete(id);
+    entry.destroyed = true;
+    /// Removing the frame unloads its page, which closes its WebSocket and aborts its requests and
+    /// timers. Do not navigate it to `about:blank` first: that would add an entry to the history.
+    entry.host.remove();
+}
+
+function reloadFrame(id) {
+    const c = COMPONENTS_BY_ID.get(id);
+    destroyFrame(id);
+    openFrame(c);
+}
+
+$('panel-reload').addEventListener('click', () => {
+    const route = parseRoute();
+    if (route.name === 'component') reloadFrame(route.id);
+});
+
+function onFrameLoad(entry) {
+    if (entry.destroyed || entry.session !== session || !session) return;
+    const c = entry.component;
+    let path = null;
+    try {
+        path = entry.iframe.contentWindow.location.pathname;
+    } catch (e) {
+        /// A cross-origin document: the panel navigated away from this server.
+    }
+    const expected = new URL(frameSource(c), location.href).pathname.replace(/\/+$/, '');
+    if (path === null || !(path === expected || path.startsWith(expected + '/') || path.startsWith(expected + '?'))) {
+        /// The page inside the panel navigated elsewhere, e.g. the SQL Console's own "Logout" goes to `/`.
+        destroyFrame(c.id);
+        if (parseRoute().id === c.id) {
+            const message = c.integration === 'sql-console'
+                ? 'The SQL Console session ended (it was signed out inside the panel).'
+                : `${c.title} navigated away from its page.`;
+            renderPanelState(message, [paragraph('Reload the panel to start it again with the current connection.')], [reloadButton(c)]);
+        }
+        return;
+    }
+    entry.loaded = true;
+    if (c.integration === 'sql-console') {
+        signInSQLConsole(entry);
+        return;
+    }
+    if (c.integration === 'webterminal') {
+        postToTerminal(entry, {type: 'webterminal-hello'});
+        postToTerminal(entry, {type: 'webterminal-credentials', user: session.user, password: session.password});
+    }
+    entry.overlay.remove();
+}
+
+function reloadButton(c) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button primary';
+    button.textContent = 'Reload panel';
+    button.addEventListener('click', () => {
+        $('panel-state').hidden = true;
+        reloadFrame(c.id);
+    });
+    return button;
+}
+
+function setFrameNotice(entry, message, kind) {
+    entry.notice = message ? {message, kind} : null;
+    if (parseRoute().id === entry.component.id) renderPanelNotice();
+}
+
+/// --- Integration: native pages ---
+
+/// The contract with the native pages (`dashboard.html`, `merges.html`, ...): a page embedded by the
+/// console calls `window.parent.clickhouseConsole.getConnection(window)` synchronously at startup.
+/// The connection is returned only to the frames of native panels created by this console and only
+/// while signed in, so the password never travels through a URL, a message, or storage.
+Object.defineProperty(window, 'clickhouseConsole', {
+    value: Object.freeze({
+        version: 1,
+        getConnection(panel_window) {
+            if (!session) return null;
+            for (const entry of frames.values()) {
+                if (entry.component.integration === 'native' && entry.session === session && entry.iframe.contentWindow === panel_window) {
+                    return Object.freeze({url: session.url, user: session.user, password: session.password});
+                }
+            }
+            return null;
+        },
+    }),
+});
+
+/// --- Integration: Web Terminal ---
+
+function postToTerminal(entry, message) {
+    if (entry.iframe.contentWindow) entry.iframe.contentWindow.postMessage(message, location.origin);
+}
+
+window.addEventListener('message', e => {
+    if (e.origin !== location.origin || !e.data || typeof e.data.type !== 'string') return;
+    const entry = frames.get('terminal');
+    if (!entry || e.source !== entry.iframe.contentWindow) return;
+    if (e.data.type === 'webterminal-escape') {
+        /// The terminal captures every key; Escape is how keyboard users leave it.
+        const link = $('sidebar').querySelector('[aria-current="page"]');
+        if (link) link.focus();
+    } else if (e.data.type === 'webterminal-closed') {
+        destroyFrame('terminal');
+        if (parseRoute().id === 'terminal') {
+            renderPanelState('The terminal session ended', [paragraph('The clickhouse-client session was closed.')], [reloadButton(COMPONENTS_BY_ID.get('terminal'))]);
+        }
+    }
+});
+
+/// --- Integration: SQL Console ---
+
+/// The SQL Console (`/ui`, from the `contrib/sql-console` bundle) keeps its connection in memory and has
+/// no API to receive one, so the console fills in its connection form, identified by its `data-testid`
+/// attributes, and submits it, as the user would. If the form changes in a future version, this fails
+/// visibly with a notice, and the user can still sign in in the panel itself.
+const SQL_CONSOLE_SELECTORS = {
+    url: '[data-testid="standalone-url-input"]',
+    user: '[data-testid="standalone-username-input"]',
+    password: '[data-testid="standalone-password-input"]',
+    connect: '[data-testid="standalone-connect-button"]',
+    connected: '[data-testid="standalone-console-layout"], [data-testid="standalone-home-page"]',
+};
+
+function waitFor(doc, predicate, timeout_ms) {
+    return new Promise(resolve => {
+        const found = predicate();
+        if (found) {
+            resolve(found);
+            return;
+        }
+        const observer = new MutationObserver(() => {
+            const result = predicate();
+            if (result) {
+                observer.disconnect();
+                clearTimeout(timer);
+                resolve(result);
+            }
+        });
+        const timer = setTimeout(() => {
+            observer.disconnect();
+            resolve(null);
+        }, timeout_ms);
+        observer.observe(doc, {childList: true, subtree: true, attributes: true, characterData: true});
+    });
+}
+
+function findInput(doc, selector) {
+    const element = doc.querySelector(selector);
+    if (!element) return null;
+    return element.matches('input') ? element : element.querySelector('input');
+}
+
+/// React tracks the value of controlled inputs, so set it through the native setter and dispatch
+/// `input`, which is what typing does.
+function setInputValue(input, value) {
+    const view = input.ownerDocument.defaultView;
+    Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, 'value').set.call(input, value);
+    input.dispatchEvent(new view.Event('input', {bubbles: true}));
+}
+
+async function signInSQLConsole(entry) {
+    const current = session;
+    const doc = entry.iframe.contentDocument;
+    const fail = message => {
+        if (entry.destroyed) return;
+        entry.overlay.remove();
+        setFrameNotice(entry, `Automatic sign-in to the SQL Console did not succeed: ${message}. You can sign in with the form in the panel.`, 'warning');
+    };
+
+    const form = await waitFor(doc, () => doc.querySelector(SQL_CONSOLE_SELECTORS.connected) || doc.querySelector(SQL_CONSOLE_SELECTORS.connect), 20000);
+    if (entry.destroyed || session !== current) return;
+    if (!form) return fail('its connection form did not appear');
+    if (form.matches(SQL_CONSOLE_SELECTORS.connected)) {
+        entry.overlay.remove();
+        return;
+    }
+    const inputs = [findInput(doc, SQL_CONSOLE_SELECTORS.url), findInput(doc, SQL_CONSOLE_SELECTORS.user), findInput(doc, SQL_CONSOLE_SELECTORS.password)];
+    if (inputs.includes(null)) return fail('its connection form has an unexpected layout');
+    setInputValue(inputs[0], current.url);
+    setInputValue(inputs[1], current.user);
+    setInputValue(inputs[2], current.password);
+    /// Let React apply the state updates before clicking, so the click handler sees the new values.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    if (entry.destroyed || session !== current) return;
+    const button = doc.querySelector(SQL_CONSOLE_SELECTORS.connect);
+    button.click();
+
+    /// Success shows the console layout. Failure re-enables the button and shows an error under the
+    /// fields. The button is still enabled right after the click, before React re-renders, so a
+    /// failure counts only after the connecting state was seen.
+    let seen_connecting = false;
+    const outcome = await waitFor(doc, () => {
+        if (doc.querySelector(SQL_CONSOLE_SELECTORS.connected)) return 'connected';
+        const connect = doc.querySelector(SQL_CONSOLE_SELECTORS.connect);
+        if (!connect) return null;
+        if (connect.disabled) seen_connecting = true;
+        else if (seen_connecting) return 'failed';
+        return null;
+    }, 30000);
+    if (entry.destroyed || session !== current) return;
+    if (outcome === 'connected') {
+        entry.overlay.remove();
+        setFrameNotice(entry, null);
+        return;
+    }
+    /// Do not leave the password in the form after a failure.
+    const password_input = findInput(doc, SQL_CONSOLE_SELECTORS.password);
+    if (password_input) setInputValue(password_input, '');
+    if (outcome === null) return fail('it did not finish connecting within 30 seconds');
+    const error = sqlConsoleErrorText(doc);
+    fail(error ? `it reported: "${error}"` : 'it reported an error');
+}
+
+/// The error of the SQL Console form is a paragraph next to the fields.
+function sqlConsoleErrorText(doc) {
+    const url = doc.querySelector(SQL_CONSOLE_SELECTORS.url);
+    const fields = url && url.closest('[data-testid="container"]');
+    const error = fields && fields.querySelector(':scope > p');
+    return error ? error.textContent.trim().slice(0, 300) : '';
+}
+
+/// --- Startup ---
+
+$('logout-button').addEventListener('click', signOut);
+$('switch-button').addEventListener('click', switchConnection);
+$('switch-button').append(icon('switch'));
+$('menu-button').append(icon('menu'));
+$('login-logo').append(icon('logo'));
+$('brand-logo').append(icon('logo'));
+$('brand-link').dataset.route = '';
+for (const button of document.querySelectorAll('.theme-toggle')) button.addEventListener('click', toggleTheme);
+initTheme();
+try {
+    if (localStorage.getItem('console.sidebar-collapsed') === '1') $('shell').classList.add('collapsed');
+} catch (e) {
+    /// Storage is disabled: start expanded.
+}
+
+document.addEventListener('visibilitychange', () => {
+    /// Re-check after the tab was in the background, when the periodic check was skipped.
+    if (document.visibilityState === 'visible' && session && Date.now() - (session.status.verified_at || 0) > 60000) checkConnection();
+});
+
+async function loadConfig() {
+    try {
+        const response = await fetch(`${BASE_PATH}/config.json`, {credentials: 'omit', cache: 'no-store'});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        config = {...config, ...await response.json()};
+    } catch (e) {
+        config_error = e.message;
+    }
+}
+
+loadConfig().then(() => {
+    render();
+});
+</script>
+</body>
+</html>

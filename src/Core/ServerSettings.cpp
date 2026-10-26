@@ -2212,6 +2212,8 @@ void ServerSettings::checkUnknownSettings(const Poco::Util::AbstractConfiguratio
         "http_options_response",
         "http_server_default_response",
         "http_forbid_headers",
+        /// Destinations of the web console at `/console` (`ConsoleWebUIRequestHandler`).
+        "web_console",
         "remote_url_allow_hosts",
         "http_handlers",
         "arrowflight",

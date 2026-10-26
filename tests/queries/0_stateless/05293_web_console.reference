@@ -1,0 +1,34 @@
+--- every path under /console serves the page (client-side routing)
+/console 200 1
+/console/ 200 1
+/console/login 200 1
+/console/sql 200 1
+/console/merges 200 1
+/console/login?next=merges 200 1
+/console/unknown 200 1
+HEAD 200
+--- sibling paths are not taken over
+/consolex 404
+--- the page is not cached, not framed by other sites, and loads nothing external
+Cache-Control: no-store
+X-Frame-Options: DENY
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+frame-ancestors 'none'
+script-src 'unsafe-inline';
+0
+--- destinations come from the server configuration, with defaults
+Content-Type: application/json; charset=UTF-8
+clickstack_url /clickstack/
+cloud_url https://clickhouse.cloud/
+documentation_url https://clickhouse.com/docs/
+source_code_url https://github.com/ClickHouse/ClickHouse/
+website_url https://clickhouse.com/
+--- the embedded pages implement the integration contract of the console
+/dashboard 1
+/binary 1
+/merges 1
+/schema 1
+/jemalloc 1
+/processors-profile 1
+/docs 1
