@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 namespace DB
@@ -16,5 +17,11 @@ void parallelSyncFiles(const std::vector<WriteBufferFromFileBase *> & files);
 /// Same, but takes MergeTreeWriterStream pointers (each stream contains plain_file and marks_file
 /// that are synced together).
 void parallelSyncFiles(const std::vector<const MergeTreeWriterStream *> & streams);
+
+/// Opens each file on the local filesystem by its path and calls fsync on it, in parallel.
+/// Used to make durable the files that were already written and closed.
+/// If the fsync of a file fails, the file is remembered, and every later attempt to sync it
+/// (or its hardlink) by this function fails as well.
+void parallelSyncPaths(const std::vector<std::string> & paths);
 
 }
