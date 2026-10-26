@@ -35,11 +35,14 @@
 #include <Parsers/isDiskFunction.h>
 #include <Parsers/parseQuery.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
+#include <Storages/NamedCollectionsHelpers.h>
 #include <Storages/StorageProxy.h>
 #include <Storages/StorageReplicatedMergeTree.h>
 #include <Storages/StorageTableProxy.h>
 #include <Storages/TableZnodeInfo.h>
 #include <Common/CurrentMetrics.h>
+#include <Common/FailPoint.h>
+#include <Common/NamedCollections/NamedCollectionsFactory.h>
 #include <Common/PoolId.h>
 #include <Common/escapeForFileName.h>
 #include <Common/logger_useful.h>
@@ -84,6 +87,11 @@ namespace ErrorCodes
     extern const int UNEXPECTED_NODE_IN_ZOOKEEPER;
     extern const int UNKNOWN_TABLE;
     extern const int QUERY_IS_TOO_LARGE;
+}
+
+namespace FailPoints
+{
+    extern const char database_ordinary_load_table_pause[];
 }
 
 namespace DatabaseMetadataDiskSetting
@@ -721,6 +729,23 @@ void DatabaseOrdinary::loadTableLazy(
         return table;
     };
 
+    /// A lazy proxy does not build the storage, so the engine arguments are never resolved and the named
+    /// collection the definition uses stays unregistered: `DROP NAMED COLLECTION` would then succeed and
+    /// break the table at its first access, and a `DETACH` of the table would have no dependency to move
+    /// to the list of the detached ones. Register it straight from the metadata instead. The dependency
+    /// is registered again when the proxy is materialized, which is harmless.
+    if (query.storage && query.storage->engine && query.storage->engine->arguments)
+    {
+        if (auto collection_name = tryGetUsedNamedCollectionName(query.storage->engine->name, query.storage->engine->arguments->children))
+            NamedCollectionFactory::instance().addDependency(*collection_name, table_id);
+
+        /// The table function target of a `Remote` table can reference collections of its own, see
+        /// `registerStorageRemote`.
+        const auto & engine_name = query.storage->engine->name;
+        if (engine_name == "Remote" || engine_name == "RemoteSecure")
+            addNestedTableFunctionNamedCollectionDependencies(query.storage->engine->arguments, table_id);
+    }
+
     auto proxy = std::make_shared<StorageTableProxy>(
         table_id, std::move(get_nested), std::move(columns));
 
@@ -745,6 +770,10 @@ LoadTaskPtr DatabaseOrdinary::loadTableFromMetadataAsync(
         [this, local_context, file_path, name, ast, mode](AsyncLoader &, const LoadJobPtr &)
         {
             SCOPE_EXIT(TransactionManager::decreaseAsyncTablesLoadingJobNumber(););
+            /// The tables of the `system` database are loaded synchronously at startup, pausing them would
+            /// keep the server from starting.
+            if (name.database != DatabaseCatalog::SYSTEM_DATABASE)
+                FailPointInjection::pauseFailPoint(FailPoints::database_ordinary_load_table_pause);
             loadTableFromMetadata(local_context, file_path, name, ast, mode);
         });
 
