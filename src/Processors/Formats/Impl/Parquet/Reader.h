@@ -350,9 +350,12 @@ struct Reader
         /// this row group, so its data is neither prefetched nor decoded.
         bool served_from_cache = false;
         /// The column is written to the columns cache, which makes the row group read in whole chunks
-        /// unless they would take too much memory, but the length of its strings is not in the metadata.
+        /// unless they would take too much memory, but the length of its strings is not in the metadata,
+        /// or only the total for the row group is, which bounds a chunk too loosely.
         /// So its dictionary is decoded in the `Dictionary` stage, before the row group is split into
-        /// row subgroups, to estimate the size of a chunk, see `intersectColumnIndexResultsAndInitSubgroups`.
+        /// row subgroups, to bound the size of a chunk, see `intersectColumnIndexResultsAndInitSubgroups`.
+        /// Only if the dictionary pages of the row group decoded early are small together: they are read before
+        /// `PREWHERE`, even if no row needs the column, see `initColumnsCache`.
         bool decode_dictionary_early = false;
 
         /// Prefetches.
@@ -762,6 +765,11 @@ struct Reader
 
     /// Guess how much memory ColumnSubchunk::{column, arrays_offsets} will use, per row.
     double estimateColumnMemoryBytesPerRow(const ColumnChunk & column, const RowGroup & row_group, const PrimitiveColumnInfo & column_info) const;
+    /// An upper bound of the memory that the decoded column takes in any chunk of the columns cache of the row group
+    /// (see `COLUMNS_CACHE_CHUNK_ROWS`). Dictionary-encoded strings whose length is not in the metadata are bounded by the
+    /// longest value of the dictionary, not by the average one: the rows may repeat a long value much more often than
+    /// the others. Meaningless if `decodedSizeIsUnknown`.
+    double estimateMaxColumnMemoryBytesOfChunk(const ColumnChunk & column, const RowGroup & row_group, const PrimitiveColumnInfo & column_info) const;
     /// Whether `estimateColumnMemoryBytesPerRow` can only guess: the column is of dictionary-encoded strings, the
     /// metadata has no length of the strings, and the dictionary is not decoded.
     bool decodedSizeIsUnknown(const ColumnChunk & column, const PrimitiveColumnInfo & column_info) const;
