@@ -499,7 +499,11 @@ CancellationCode StorageAlias::killPartMoveToShard(const UUID & task_uuid)
 
 void StorageAlias::updateExternalDynamicMetadataIfExists(ContextPtr local_context)
 {
-    resolveStorageProxyLoading(getTargetTable())->updateExternalDynamicMetadataIfExists(local_context);
+    /// A lazy-load target is not materialized here: the refresh is also asked for by `DESCRIBE`, which must not load
+    /// it, and the stand-in forwards the refresh only to a table that is already materialized. `ALTER ... UPDATE/DELETE`
+    /// through the alias validates the mutation against the state refreshed here and `mutate` of the target executes it
+    /// against the same state without refreshing it, so `InterpreterAlterQuery` materializes the target itself first.
+    getTargetTable()->updateExternalDynamicMetadataIfExists(local_context);
 }
 
 std::optional<QueryPipeline> StorageAlias::distributedWrite(const ASTInsertQuery & query, ContextPtr local_context)
