@@ -220,14 +220,28 @@ public:
         const ActionsDAG::Node * predicate,
         ContextPtr context);
 
-    /// Apply snapshot, virtual-column, min-max, partition and statistics filters before range analysis.
+    /// Loading statistics costs a few reads per data part, so they pay off only for a read of at least
+    /// `min_marks_per_part` marks for each part whose statistics are not in memory yet.
+    /// Returns the number of marks to compare with the read, zero if no statistics would be loaded.
+    static size_t getMinMarksToUseStatistics(size_t min_marks_per_part, size_t parts_to_load_statistics);
+
+    /// Whether fewer than `limit` marks of the parts are left to read after the primary key analysis.
+    /// Stops the analysis as soon as `limit` marks are found, and bounds the analysis of each part,
+    /// so the answer is false when it cannot be established cheaply. Always false if `limit` is zero.
+    static bool hasFewerMarksToReadThan(
+        const RangesInDataParts & parts,
+        const StorageMetadataPtr & metadata_snapshot,
+        const ConditionTemplate<KeyCondition>::Ptr & key_condition,
+        size_t limit,
+        const Settings & settings,
+        LoggerPtr log);
+
+    /// Apply snapshot, virtual-column, min-max and partition filters before range analysis.
     static RangesInDataParts filterParts(
         const RangesInDataParts & parts,
         const ReadFromMergeTree::Indexes & indexes,
         const StorageMetadataPtr & metadata_snapshot,
         const MergeTreeData & data,
-        const SelectQueryInfo & query_info,
-        const MergeTreeData::MutationsSnapshotPtr & mutations_snapshot,
         const ContextPtr & context,
         const PartitionIdToMaxBlock * max_block_numbers_to_read,
         LoggerPtr log,
@@ -249,11 +263,16 @@ public:
 
     /// Filter parts using column statistics.
     /// Returns filtered parts and updates index_stats with statistics pruning info.
+    /// Loading statistics costs a few reads per part, so it is skipped if `key_condition` leaves fewer than
+    /// `min_marks_per_part_to_use_statistics` marks to read per part whose statistics are not in memory
+    /// (see `getMinMarksToUseStatistics` and `hasFewerMarksToReadThan`).
     static RangesInDataParts filterPartsByStatistics(
         const RangesInDataParts & parts,
         const StorageMetadataPtr & metadata_snapshot,
         const SelectQueryInfo & query_info,
         const MergeTreeData::MutationsSnapshotPtr & mutations_snapshot,
+        const ConditionTemplate<KeyCondition>::Ptr & key_condition,
+        size_t min_marks_per_part_to_use_statistics,
         const ContextPtr & context,
         LoggerPtr log,
         ReadFromMergeTree::IndexStats & index_stats);
