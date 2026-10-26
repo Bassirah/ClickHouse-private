@@ -2,9 +2,11 @@
 
 #include <Access/Common/AccessFlags.h>
 #include <Access/DefinerDependencies.h>
+#include <Client/Connection.h>
 #include <Client/ConnectionPool.h>
 #include <Client/ConnectionPoolWithFailover.h>
 #include <Columns/ColumnString.h>
+#include <Core/Protocol.h>
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeMap.h>
@@ -13,6 +15,7 @@
 #include <IO/ReadHelpers.h>
 #include <Interpreters/Cluster.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/InternalTextLogsQueue.h>
 #include <Interpreters/ProcessList.h>
 #include <Interpreters/QueryLog.h>
 #include <Interpreters/executeQuery.h>
@@ -21,7 +24,6 @@
 #include <Processors/Executors/CompletedPipelineExecutor.h>
 #include <Processors/Executors/PullingPipelineExecutor.h>
 #include <Processors/Sinks/SinkToStorage.h>
-#include <QueryPipeline/RemoteQueryExecutor.h>
 #include <Storages/QueryRunnerSettings.h>
 #include <Storages/StorageFactory.h>
 #include <Common/CurrentMetrics.h>
@@ -29,8 +31,10 @@
 #include <Common/DateLUT.h>
 #include <Common/Exception.h>
 #include <Common/LoggingHelpers.h>
+#include <Common/ProfileEvents.h>
 #include <Common/QueryScope.h>
 #include <Common/SettingsChanges.h>
+#include <Common/SilkFiberMutex.h>
 #include <Common/Stopwatch.h>
 #include <Common/ThreadPool.h>
 #include <Common/assert_cast.h>
@@ -40,6 +44,8 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <limits>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -47,12 +53,28 @@
 #include <set>
 #include <unordered_set>
 
+#include "config.h"
+
+#if USE_SILK
+#include <Client/SilkConnectionPool.h>
+#include <IO/SilkStreamSocketFactory.h>
+#include <Common/SilkFiberScheduler.h>
+
+#include <silk/fibers/future.h>
+#endif
+
 
 namespace CurrentMetrics
 {
+    extern const Metric QueryRunnerPendingQueries;
     extern const Metric QueryRunnerThreads;
     extern const Metric QueryRunnerThreadsActive;
     extern const Metric QueryRunnerThreadsScheduled;
+}
+
+namespace ProfileEvents
+{
+    extern const Event DistributedShardsSkipped;
 }
 
 namespace DB
@@ -60,7 +82,6 @@ namespace DB
 
 namespace Setting
 {
-    extern const SettingsUInt64 distributed_connections_pool_size;
     extern const SettingsURI format_avro_schema_registry_url;
     extern const SettingsLoadBalancing load_balancing;
     extern const SettingsString log_comment;
@@ -68,22 +89,36 @@ namespace Setting
     extern const SettingsMilliseconds log_queries_min_query_duration_ms;
     extern const SettingsLogQueriesType log_queries_min_type;
     extern const SettingsBool log_query_settings;
+    extern const SettingsBool skip_unavailable_shards;
+    extern const SettingsSkipUnavailableShardsMode skip_unavailable_shards_mode;
 }
 
 namespace QueryRunnerSetting
 {
     extern const QueryRunnerSettingsString cluster;
-    extern const QueryRunnerSettingsUInt64 max_queue_size;
+    extern const QueryRunnerSettingsUInt64 connection_pool_size;
+    extern const QueryRunnerSettingsUInt64 max_pending_queries;
     extern const QueryRunnerSettingsQueryRunnerMode mode;
+    extern const QueryRunnerSettingsWorkerKind scheduler;
     extern const QueryRunnerSettingsString shard;
     extern const QueryRunnerSettingsNonZeroUInt64 threads;
 }
 
 namespace ErrorCodes
 {
+    extern const int ALL_CONNECTION_TRIES_FAILED;
     extern const int BAD_ARGUMENTS;
+    extern const int LOGICAL_ERROR;
     extern const int NOT_IMPLEMENTED;
+    extern const int SUPPORT_IS_DISABLED;
+    extern const int SYSTEM_ERROR;
+    extern const int UNKNOWN_DATABASE;
+    extern const int UNKNOWN_PACKET_FROM_SERVER;
+    extern const int UNKNOWN_TABLE;
     extern const int USER_EXPIRED;
+#if USE_SILK
+    extern const int CANNOT_SCHEDULE_TASK;
+#endif
 }
 
 namespace
@@ -146,6 +181,7 @@ struct QueryRunnerJobOrigin
     String current_user;
     String initial_user;
     String authenticated_user;
+    Settings settings;
 };
 
 class PrefixLatch
@@ -206,21 +242,14 @@ public:
         cv.notify_all();
     }
 
-    void wait(const QueryStatusPtr & query_status)
+    template <typename Rep, typename Period>
+    bool wait(const std::chrono::duration<Rep, Period> & timeout)
     {
         std::unique_lock lock(mutex);
-        while (!cv.wait_for(lock, poll_interval, [this] { return remaining == 0; }))
-        {
-            if (query_status)
-            {
-                query_status->checkTimeLimit();
-            }
-        }
+        return cv.wait_for(lock, timeout, [this] { return remaining == 0; });
     }
 
 private:
-    static constexpr std::chrono::milliseconds poll_interval{100};
-
     std::mutex mutex;
     std::condition_variable cv;
     size_t remaining;
@@ -245,6 +274,7 @@ private:
     PrefixLatch & pending;
     const std::shared_ptr<CountDownLatch> batch;
     const UInt64 seq;
+    CurrentMetrics::Increment pending_queries_increment{CurrentMetrics::QueryRunnerPendingQueries};
 };
 
 struct QueryRunnerJob
@@ -256,119 +286,250 @@ struct QueryRunnerJob
     std::shared_ptr<QueryRunnerJobCompletion> completion;
 };
 
-/// Used to cancel the remote queries and unblock the dispatcher's workers on shutdown.
-/// Cancelling is required because otherwise server shutdown would be blocked on
-/// queries being executed on other clusters - arbitrarily long.
-class RemoteQueryExecutorRegistry
+static bool shouldSkipShard(const Settings & settings, int exception_code, bool received_data)
 {
-public:
-    bool tryAdd(RemoteQueryExecutor * executor)
-    {
-        std::lock_guard lock(mutex);
-        if (finished)
-            return false;
-        executors.insert(executor);
+    if (!settings[Setting::skip_unavailable_shards])
+        return false;
+
+    if (exception_code == ErrorCodes::ALL_CONNECTION_TRIES_FAILED)
         return true;
-    }
 
-    void remove(RemoteQueryExecutor * executor)
+    if (exception_code == ErrorCodes::LOGICAL_ERROR)
+        return false;
+
+    switch (settings[Setting::skip_unavailable_shards_mode])
     {
-        std::lock_guard lock(mutex);
-        executors.erase(executor);
+        case SkipUnavailableShardsMode::UNAVAILABLE:
+            return false;
+        case SkipUnavailableShardsMode::UNAVAILABLE_OR_TABLE_MISSING:
+            return exception_code == ErrorCodes::UNKNOWN_TABLE || exception_code == ErrorCodes::UNKNOWN_DATABASE;
+        case SkipUnavailableShardsMode::UNAVAILABLE_OR_EXCEPTION_BEFORE_PROCESSING:
+            return !received_data;
     }
-
-    void cancelAll()
-    {
-        std::lock_guard lock(mutex);
-        finished = true;
-        for (auto * executor : executors)
-        {
-            try
-            {
-                executor->cancel();
-            }
-            catch (...)
-            {
-                tryLogCurrentException(getLogger("QueryRunner"), "Failed to cancel a remote query executor");
-            }
-        }
-    }
-
-private:
-    std::mutex mutex;
-    bool finished TSA_GUARDED_BY(mutex) = false;
-    std::unordered_set<RemoteQueryExecutor *> executors TSA_GUARDED_BY(mutex);
-};
-
-class RegisteredRemoteQueryExecutor
-{
-public:
-    template <typename... Args>
-    static std::optional<RegisteredRemoteQueryExecutor> tryCreate(RemoteQueryExecutorRegistry & registry, Args &&... args)
-    {
-        auto executor = std::make_unique<RemoteQueryExecutor>(std::forward<Args>(args)...);
-        if (!registry.tryAdd(executor.get()))
-            return std::nullopt;
-        return RegisteredRemoteQueryExecutor(registry, std::move(executor));
-    }
-
-    RegisteredRemoteQueryExecutor(RegisteredRemoteQueryExecutor &&) = default;
-
-    ~RegisteredRemoteQueryExecutor()
-    {
-        if (executor)
-            registry.remove(executor.get());
-    }
-
-    RemoteQueryExecutor * operator->() const { return executor.get(); }
-
-private:
-    RegisteredRemoteQueryExecutor(RemoteQueryExecutorRegistry & registry_, std::unique_ptr<RemoteQueryExecutor> executor_)
-        : registry(registry_), executor(std::move(executor_))
-    {
-    }
-
-    RemoteQueryExecutorRegistry & registry;
-    std::unique_ptr<RemoteQueryExecutor> executor;
-};
+}
 
 class QueryRunnerDispatcher : WithContext
 {
+    class RemoteQueryExecutor
+    {
+    public:
+        RemoteQueryExecutor(IConnectionPool::Entry connection_, const QueryRunnerJob & job, ContextPtr context_)
+            : connection(std::move(connection_))
+            , query(job.query)
+            , context(std::move(context_))
+            , timeouts(ConnectionTimeouts::getTCPTimeoutsWithFailover(job.origin->settings))
+        {
+        }
+
+        ~RemoteQueryExecutor()
+        {
+            std::lock_guard lock(mutex);
+            if (sent_query && !finished)
+                connection->disconnect();
+        }
+
+        void execute()
+        {
+            {
+                std::lock_guard lock(mutex);
+                if (was_cancelled)
+                    return;
+
+                ClientInfo query_client_info = context->getClientInfo();
+                query_client_info.query_kind = ClientInfo::QueryKind::INITIAL_QUERY;
+                connection->sendQuery(
+                    timeouts, query, {}, "", QueryProcessingStage::Complete, &context->getSettingsRef(), &query_client_info, false, {}, {});
+                sent_query = true;
+            }
+
+            while (true)
+            {
+                std::lock_guard lock(mutex);
+                if (was_cancelled)
+                {
+                    connection->disconnect();
+                    finished = true;
+                    return;
+                }
+
+                Packet packet = connection->receivePacket();
+                switch (packet.type)
+                {
+                    case Protocol::Server::Data:
+                        if (packet.block.rows() > 0)
+                            got_data = true;
+                        break;
+
+                    case Protocol::Server::Exception:
+                        finished = true;
+                        packet.exception->rethrow();
+                        break;
+
+                    case Protocol::Server::EndOfStream:
+                        finished = true;
+                        return;
+
+                    case Protocol::Server::Log:
+                        if (auto log_queue = CurrentThread::getInternalTextLogsQueue())
+                            log_queue->pushBlock(std::move(packet.block));
+                        break;
+
+                    case Protocol::Server::ProfileEvents:
+                        if (auto profile_queue = CurrentThread::getInternalProfileEventsQueue())
+                            if (!profile_queue->emplace(std::move(packet.block)))
+                                throw Exception(ErrorCodes::SYSTEM_ERROR, "Could not push into profile queue");
+                        break;
+
+                    case Protocol::Server::Progress:
+                    case Protocol::Server::ProfileInfo:
+                    case Protocol::Server::Totals:
+                    case Protocol::Server::Extremes:
+                    case Protocol::Server::TimezoneUpdate:
+                        break;
+
+                    default:
+                        connection->disconnect();
+                        finished = true;
+                        throw Exception(
+                            ErrorCodes::UNKNOWN_PACKET_FROM_SERVER, "Unknown packet {} from server {}", packet.type, connection->getDescription());
+                }
+            }
+        }
+
+        void cancel()
+        {
+            std::lock_guard lock(mutex);
+            if (was_cancelled || finished)
+                return;
+
+            was_cancelled = true;
+            if (sent_query && connection->isConnected())
+                connection->sendCancel();
+        }
+
+        bool isCancelled() const
+        {
+            std::lock_guard lock(mutex);
+            return was_cancelled;
+        }
+
+        bool receivedData() const
+        {
+            std::lock_guard lock(mutex);
+            return got_data;
+        }
+
+    private:
+        IConnectionPool::Entry connection;
+        const String query;
+        const ContextPtr context;
+        const ConnectionTimeouts timeouts;
+
+        mutable Silk::FiberMutex mutex;
+        bool sent_query TSA_GUARDED_BY(mutex) = false;
+        bool finished TSA_GUARDED_BY(mutex) = false;
+        bool was_cancelled TSA_GUARDED_BY(mutex) = false;
+        bool got_data TSA_GUARDED_BY(mutex) = false;
+    };
+
+    /// Used to cancel the remote queries and unblock the dispatcher's workers on shutdown.
+    /// Cancelling is required because otherwise server shutdown would be blocked on
+    /// queries being executed on other clusters - arbitrarily long.
+    class RemoteQueryExecutorRegistry
+    {
+    public:
+        bool tryAdd(const std::shared_ptr<RemoteQueryExecutor> & executor)
+        {
+            std::lock_guard lock(mutex);
+            if (finished)
+                return false;
+            executors.insert(executor);
+            return true;
+        }
+
+        void remove(const std::shared_ptr<RemoteQueryExecutor> & executor)
+        {
+            std::lock_guard lock(mutex);
+            executors.erase(executor);
+        }
+
+        void cancelAll()
+        {
+            std::unordered_set<std::shared_ptr<RemoteQueryExecutor>> snapshot;
+            {
+                std::lock_guard lock(mutex);
+                finished = true;
+                snapshot.swap(executors);
+            }
+            for (const auto & executor : snapshot)
+            {
+                try
+                {
+                    executor->cancel();
+                }
+                catch (...)
+                {
+                    tryLogCurrentException(getLogger("QueryRunner"), "Failed to cancel a remote query executor");
+                }
+            }
+        }
+
+    private:
+        std::mutex mutex;
+        bool finished TSA_GUARDED_BY(mutex) = false;
+        std::unordered_set<std::shared_ptr<RemoteQueryExecutor>> executors TSA_GUARDED_BY(mutex);
+    };
+
+    class RegisteredRemoteQueryExecutor
+    {
+    public:
+        template <typename... Args>
+        static std::optional<RegisteredRemoteQueryExecutor> tryCreate(RemoteQueryExecutorRegistry & registry, Args &&... args)
+        {
+            auto executor = std::make_shared<RemoteQueryExecutor>(std::forward<Args>(args)...);
+            if (!registry.tryAdd(executor))
+                return std::nullopt;
+            return RegisteredRemoteQueryExecutor(registry, std::move(executor));
+        }
+
+        RegisteredRemoteQueryExecutor(RegisteredRemoteQueryExecutor &&) = default;
+
+        ~RegisteredRemoteQueryExecutor()
+        {
+            if (executor)
+                registry.remove(executor);
+        }
+
+        RemoteQueryExecutor * operator->() const { return executor.get(); }
+
+    private:
+        RegisteredRemoteQueryExecutor(RemoteQueryExecutorRegistry & registry_, std::shared_ptr<RemoteQueryExecutor> executor_)
+            : registry(registry_), executor(std::move(executor_))
+        {
+        }
+
+        RemoteQueryExecutorRegistry & registry;
+        std::shared_ptr<RemoteQueryExecutor> executor;
+    };
+
 public:
     QueryRunnerDispatcher(
         ContextPtr global_context_,
         const String & cluster_name_,
         ShardSelector shard_selector_,
-        UInt64 num_threads_,
-        UInt64 max_queue_size_,
         LoggerPtr log_)
         : WithContext(global_context_)
         , cluster_name(cluster_name_)
         , shard_selector(shard_selector_)
-        , max_queue_size(max_queue_size_)
         , log(log_)
-        , pool(
-              CurrentMetrics::QueryRunnerThreads,
-              CurrentMetrics::QueryRunnerThreadsActive,
-              CurrentMetrics::QueryRunnerThreadsScheduled,
-              num_threads_,
-              0,
-              num_threads_ + max_queue_size_)
     {
         client_info.client_name = String(client_name);
         client_info.setInitialQuery();
     }
 
-    void submit(QueryRunnerJob job)
-    {
-        if (pool.trySchedule([this, scheduled_job = std::move(job)] { runJob(scheduled_job); }))
-            return;
+    virtual ~QueryRunnerDispatcher() = default;
 
-        if (shutdown_called)
-            LOG_WARNING(log, "The table is shutting down, discarding the query");
-        else
-            LOG_ERROR(LogFrequencyLimiter(log, 5), "Cannot schedule the query (max_queue_size = {}), discarding it", max_queue_size);
-    }
+    virtual void submit(QueryRunnerJob job) = 0;
 
     PrefixLatch & getPending() { return pending; }
 
@@ -382,19 +543,28 @@ public:
         if (shutdown_called.exchange(true))
             return;
 
-        pool.finish();
         cluster_executors.cancelAll();
-        pool.wait();
+        shutdownImpl();
     }
 
-private:
+protected:
     void runJob(const QueryRunnerJob & job)
     {
-        setThreadName(ThreadName::QUERY_RUNNER);
+        if (shutdown_called)
+        {
+            LOG_WARNING(log, "The table is shutting down, discarding the query");
+            return;
+        }
 
         try
         {
-            executeJob(job);
+            auto job_context = makeJobContext(job);
+            QueryScope query_scope = QueryScope::create(job_context);
+
+            if (cluster_name.empty())
+                executeLocally(job, job_context);
+            else
+                executeOnCluster(job, job_context);
         }
         catch (...)
         {
@@ -402,19 +572,10 @@ private:
         }
     }
 
-    void executeJob(const QueryRunnerJob & job)
-    {
-        if (shutdown_called)
-            return;
+    virtual ConnectionPoolPtr createConnectionPool(const Cluster::Address & address, const String & database) = 0;
 
-        auto job_context = makeJobContext(job);
-        QueryScope query_scope = QueryScope::create(job_context);
-
-        if (cluster_name.empty())
-            executeLocally(job, job_context);
-        else
-            executeOnCluster(job, job_context);
-    }
+private:
+    virtual void shutdownImpl() = 0;
 
     ContextMutablePtr makeJobContext(const QueryRunnerJob & job) const
     {
@@ -445,7 +606,7 @@ private:
             /// DEFINER/NONE cases (a no-op).
             job_context->setUser(*job.origin->user_id, job.origin->external_roles, job.origin->authentication_grants, job.origin->authentication_valid_until);
         }
-        if (job.origin->roles)
+        if (job.origin->user_id && job.origin->roles)
         {
             chassert(cluster_name.empty());
             /// These are the session's *effective* current roles, which already include the external
@@ -532,23 +693,7 @@ private:
         ConnectionPoolPtrs replica_pools;
         replica_pools.reserve(addresses.size());
         for (const auto & address : addresses)
-            replica_pools.push_back(ConnectionPoolFactory::instance().get(
-                static_cast<unsigned>(settings[Setting::distributed_connections_pool_size]),
-                address.host_name,
-                address.port,
-                database.empty() ? address.default_database : database,
-                address.user,
-                address.password,
-                address.proto_send_chunked,
-                address.proto_recv_chunked,
-                address.quota_key,
-                address.cluster,
-                address.cluster_secret,
-                String(client_name),
-                address.compression,
-                address.secure,
-                address.bind_host,
-                address.priority));
+            replica_pools.push_back(createConnectionPool(address, database));
 
         const auto connection_pool = std::make_shared<ConnectionPoolWithFailover>(std::move(replica_pools), settings[Setting::load_balancing]);
         pools.emplace(std::pair{shard_num, database}, connection_pool);
@@ -586,44 +731,44 @@ private:
 
     void executeOnShard(UInt64 shard_num, const QueryRunnerJob & job, ContextMutablePtr job_context)
     {
-        const auto timeouts = ConnectionTimeouts::getTCPTimeoutsWithFailover(job_context->getSettingsRef());
-        auto connection = getPool(shard_num, job.database)->get(timeouts, getContext()->getSettingsRef());
-
-        /// The remote server runs the job as an initial query and applies its binary type encoding settings to the wire,
-        /// so this connection reads what the remote writes and writes what the remote reads.
-        /// The remote checks the job's Avro schema registry URL against its own allowlist, not against this server's.
-        Settings wire_settings = job_context->getSettingsCopy();
-        wire_settings[Setting::format_avro_schema_registry_url] = "";
-        auto format_settings = getFormatSettings(job_context, wire_settings);
-        std::swap(format_settings.native.encode_types_in_binary_format, format_settings.native.decode_types_in_binary_format);
-        connection->setFormatSettings(format_settings);
-
-        auto registered = RegisteredRemoteQueryExecutor::tryCreate(cluster_executors, *connection, job.query, std::make_shared<const Block>(), job_context);
-        if (!registered)
-            return;
-        auto & executor = *registered;
-
         const auto query_start_time = std::chrono::system_clock::now();
         Stopwatch watch;
-
-        logClusterQuery(job, job_context, query_start_time, QueryLogElementType::QUERY_START, 0);
+        std::optional<RegisteredRemoteQueryExecutor> executor;
 
         try
         {
-            executor->sendQuery(ClientInfo::QueryKind::INITIAL_QUERY);
+            const auto timeouts = ConnectionTimeouts::getTCPTimeoutsWithFailover(job.origin->settings);
+            auto connection = getPool(shard_num, job.database)->getMany(timeouts, job.origin->settings, PoolMode::GET_ONE, {}, false).front();
 
-            while (!executor->readBlock().empty())
-                ;
+            /// The remote server runs the job as an initial query and applies its binary type encoding settings to the wire,
+            /// so this connection reads what the remote writes and writes what the remote reads.
+            /// The remote checks the job's Avro schema registry URL against its own allowlist, not against this server's.
+            Settings wire_settings = job_context->getSettingsCopy();
+            wire_settings[Setting::format_avro_schema_registry_url] = "";
+            auto format_settings = getFormatSettings(job_context, wire_settings);
+            std::swap(format_settings.native.encode_types_in_binary_format, format_settings.native.decode_types_in_binary_format);
+            connection->setFormatSettings(format_settings);
 
-            executor->finish();
+            auto registered = RegisteredRemoteQueryExecutor::tryCreate(cluster_executors, std::move(connection), job, job_context);
+            if (!registered)
+                return;
+            executor.emplace(std::move(*registered));
+
+            logClusterQuery(job, job_context, query_start_time, QueryLogElementType::QUERY_START, 0);
+            (*executor)->execute();
         }
         catch (...)
         {
             logClusterQuery(job, job_context, query_start_time, QueryLogElementType::EXCEPTION_WHILE_PROCESSING, watch.elapsedMilliseconds());
-            throw;
+            if (!shouldSkipShard(job.origin->settings, getCurrentExceptionCode(), executor && (*executor)->receivedData()))
+                throw;
+
+            LOG_WARNING(log, "Skipping shard {} due to `skip_unavailable_shards_mode` setting: {}", shard_num, getCurrentExceptionMessage(false));
+            ProfileEvents::increment(ProfileEvents::DistributedShardsSkipped);
+            return;
         }
 
-        if (!executor->isCancelled())
+        if (!(*executor)->isCancelled())
             logClusterQuery(job, job_context, query_start_time, QueryLogElementType::QUERY_FINISH, watch.elapsedMilliseconds());
     }
 
@@ -634,7 +779,7 @@ private:
         const QueryLogElementType type,
         const UInt64 duration_ms) const
     {
-        const auto & settings = job_context->getSettingsRef();
+        const auto & settings = job.origin->settings;
         if (!settings[Setting::log_queries] || type < settings[Setting::log_queries_min_type])
             return;
 
@@ -660,12 +805,12 @@ private:
             element.query_duration_ms = duration_ms;
             element.query = query_for_logging;
             element.current_database = job.database;
-            element.log_comment = settings[Setting::log_comment];
+            element.log_comment = job_context->getSettingsRef()[Setting::log_comment];
             element.client_info = job_context->getClientInfo();
             element.is_internal = true;
 
             if (settings[Setting::log_query_settings])
-                element.query_settings = settings.changedToFlatMap(/* show_secrets */ false);
+                element.query_settings = job_context->getSettingsRef().changedToFlatMap(/* show_secrets */ false);
 
             if (type == QueryLogElementType::EXCEPTION_WHILE_PROCESSING)
             {
@@ -675,23 +820,207 @@ private:
         });
     }
 
-    static constexpr std::string_view client_name = "QueryRunner";
-
     const String cluster_name;
     const ShardSelector shard_selector;
     ClientInfo client_info;
-    const size_t max_queue_size;
-    LoggerPtr log;
     PrefixLatch pending;
-    ThreadPool pool;
-
-    std::atomic<bool> shutdown_called = false;
 
     std::mutex pools_mutex;
     std::map<std::pair<UInt64, String>, ConnectionPoolWithFailoverPtr> pools TSA_GUARDED_BY(pools_mutex);
 
     RemoteQueryExecutorRegistry cluster_executors;
+
+protected:
+    static constexpr std::string_view client_name = "QueryRunner";
+
+    LoggerPtr log;
+
+    std::atomic<bool> shutdown_called = false;
 };
+
+class QueryRunnerThreadPoolDispatcher : public QueryRunnerDispatcher
+{
+public:
+    QueryRunnerThreadPoolDispatcher(
+        ContextPtr global_context_,
+        const String & cluster_name_,
+        ShardSelector shard_selector_,
+        UInt64 num_threads_,
+        UInt64 max_pending_queries_,
+        UInt64 connection_pool_size_,
+        LoggerPtr log_)
+        : QueryRunnerDispatcher(global_context_, cluster_name_, shard_selector_, log_)
+        , max_pending_queries(max_pending_queries_)
+        , connection_pool_size(connection_pool_size_)
+        , pool(
+              CurrentMetrics::QueryRunnerThreads,
+              CurrentMetrics::QueryRunnerThreadsActive,
+              CurrentMetrics::QueryRunnerThreadsScheduled,
+              max_pending_queries_ ? std::min(num_threads_, max_pending_queries_) : num_threads_,
+              0,
+              max_pending_queries_)
+    {
+    }
+
+    void submit(QueryRunnerJob job) override
+    {
+        if (pool.trySchedule([this, scheduled_job = std::move(job)]
+            {
+                setThreadName(ThreadName::QUERY_RUNNER);
+                runJob(scheduled_job);
+            }))
+            return;
+
+        if (shutdown_called)
+            LOG_WARNING(log, "The table is shutting down, discarding the query");
+        else
+            LOG_ERROR(LogFrequencyLimiter(log, 5), "Too many pending queries (max_pending_queries = {}), discarding the query", max_pending_queries);
+    }
+
+private:
+    void shutdownImpl() override
+    {
+        pool.finish();
+        pool.wait();
+    }
+
+    ConnectionPoolPtr createConnectionPool(const Cluster::Address & address, const String & database) override
+    {
+        return ConnectionPoolFactory::instance().get(
+            static_cast<unsigned>(connection_pool_size),
+            address.host_name,
+            address.port,
+            database.empty() ? address.default_database : database,
+            address.user,
+            address.password,
+            address.proto_send_chunked,
+            address.proto_recv_chunked,
+            address.quota_key,
+            address.cluster,
+            address.cluster_secret,
+            String(client_name),
+            address.compression,
+            address.secure,
+            address.bind_host,
+            address.priority);
+    }
+
+    const size_t max_pending_queries;
+    const size_t connection_pool_size;
+    ThreadPool pool;
+};
+
+#if USE_SILK
+
+class QueryRunnerFiberDispatcher : public QueryRunnerDispatcher
+{
+public:
+    QueryRunnerFiberDispatcher(
+        ContextPtr global_context_,
+        const String & cluster_name_,
+        ShardSelector shard_selector_,
+        UInt64 max_pending_queries_,
+        UInt64 connection_pool_size_,
+        LoggerPtr log_)
+        : QueryRunnerDispatcher(global_context_, cluster_name_, shard_selector_, log_)
+        , max_pending_queries(max_pending_queries_)
+        , connection_pool_size(connection_pool_size_)
+    {
+    }
+
+    void submit(QueryRunnerJob job) override
+    {
+        std::lock_guard lock(futures_mutex);
+
+        if (fibers_finished)
+        {
+            LOG_WARNING(log, "The table is shutting down, discarding the query");
+            return;
+        }
+
+        /// Reap finished fibers.
+        for (auto it = futures.begin(); it != futures.end();)
+        {
+            int error = 0;
+            if (it->isSet(&error))
+            {
+                it = futures.erase(it);
+                if (error)
+                    LOG_ERROR(LogFrequencyLimiter(log, 5), "QueryRunner fiber finished with error code {}.", error);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        if (max_pending_queries && futures.size() >= max_pending_queries)
+        {
+            LOG_ERROR(LogFrequencyLimiter(log, 5), "Too many pending queries (max_pending_queries = {}), discarding the query", max_pending_queries);
+            return;
+        }
+
+        auto & future = futures.emplace_back();
+        try
+        {
+            const int error = Silk::spawn(
+                [this, fiber_job = std::move(job)]() -> int
+                {
+                    runJob(fiber_job);
+                    return 0;
+                },
+                future);
+            if (error)
+                throw Exception(ErrorCodes::CANNOT_SCHEDULE_TASK, "Cannot spawn a fiber to execute the query (error code: {})", error);
+        }
+        catch (...)
+        {
+            futures.pop_back();
+            throw;
+        }
+    }
+
+private:
+    void shutdownImpl() override
+    {
+        std::lock_guard lock(futures_mutex);
+        fibers_finished = true;
+        for (auto & future : futures)
+            future.wait();
+        futures.clear();
+    }
+
+    ConnectionPoolPtr createConnectionPool(const Cluster::Address & address, const String & database) override
+    {
+        return std::make_shared<Silk::ConnectionPool>(
+            static_cast<unsigned>(connection_pool_size),
+            address.host_name,
+            address.port,
+            database.empty() ? address.default_database : database,
+            address.user,
+            address.password,
+            address.proto_send_chunked,
+            address.proto_recv_chunked,
+            address.quota_key,
+            address.cluster,
+            address.cluster_secret,
+            String(client_name),
+            address.compression,
+            address.secure,
+            address.bind_host,
+            address.priority,
+            Silk::streamSocketFactory());
+    }
+
+    const UInt64 max_pending_queries;
+    const UInt64 connection_pool_size;
+
+    std::mutex futures_mutex;
+    std::list<silk::FiberFuture> futures TSA_GUARDED_BY(futures_mutex);
+    bool fibers_finished TSA_GUARDED_BY(futures_mutex) = false;
+};
+
+#endif
 
 
 class QueryRunnerSink : public SinkToStorage
@@ -758,10 +1087,20 @@ public:
         }
 
         if (batch)
-            batch->wait(query_status);
+        {
+            while (!batch->wait(poll_interval))
+            {
+                if (query_status)
+                {
+                    query_status->checkTimeLimit();
+                }
+            }
+        }
     }
 
 private:
+    static constexpr std::chrono::milliseconds poll_interval{100};
+
     QueryRunnerDispatcher & dispatcher;
     const bool synchronous;
     std::shared_ptr<const QueryRunnerJobOrigin> origin;
@@ -797,22 +1136,45 @@ StorageQueryRunner::StorageQueryRunner(
                 "SQL SECURITY and DEFINER have no effect in the cluster mode and cannot be used together with the 'cluster' setting of the QueryRunner engine");
 
         storage_metadata.setSQLSecurity(sql_security_->as<ASTSQLSecurity &>());
-
-        if (storage_metadata.sql_security_type == SQLSecurityType::DEFINER)
-            DefinerDependencies::instance().addDependency(*storage_metadata.definer, table_id_);
     }
     else if (cluster_name.empty())
         storage_metadata.sql_security_type = SQLSecurityType::INVOKER;
 
     setInMemoryMetadata(storage_metadata);
 
-    dispatcher = std::make_unique<QueryRunnerDispatcher>(
-        getContext(),
-        cluster_name,
-        parseShardSelector(settings[QueryRunnerSetting::shard]),
-        settings[QueryRunnerSetting::threads],
-        settings[QueryRunnerSetting::max_queue_size],
-        log);
+    if (settings[QueryRunnerSetting::scheduler] == WorkerKind::FIBERS)
+    {
+        if (cluster_name.empty())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "The 'fibers' scheduler of the QueryRunner engine requires the 'cluster' setting");
+#if USE_SILK
+        if (!Silk::isFiberSchedulerInitialized())
+            throw Exception(
+                ErrorCodes::SUPPORT_IS_DISABLED,
+                "The 'fibers' scheduler of the QueryRunner engine requires the 'enable_silk_runtime' server setting");
+
+        dispatcher = std::make_unique<QueryRunnerFiberDispatcher>(
+            getContext(),
+            cluster_name,
+            parseShardSelector(settings[QueryRunnerSetting::shard]),
+            settings[QueryRunnerSetting::max_pending_queries],
+            settings[QueryRunnerSetting::connection_pool_size],
+            log);
+#else
+        throw Exception(ErrorCodes::SUPPORT_IS_DISABLED, "The 'fibers' scheduler of the QueryRunner engine requires a build with silk");
+#endif
+    }
+    else
+        dispatcher = std::make_unique<QueryRunnerThreadPoolDispatcher>(
+            getContext(),
+            cluster_name,
+            parseShardSelector(settings[QueryRunnerSetting::shard]),
+            settings[QueryRunnerSetting::threads],
+            settings[QueryRunnerSetting::max_pending_queries],
+            settings[QueryRunnerSetting::connection_pool_size],
+            log);
+
+    if (storage_metadata.sql_security_type == SQLSecurityType::DEFINER)
+        DefinerDependencies::instance().addDependency(*storage_metadata.definer, table_id_);
 }
 
 StorageQueryRunner::~StorageQueryRunner() = default;
@@ -843,6 +1205,7 @@ SinkToStoragePtr StorageQueryRunner::write(const ASTPtr & /*query*/, const Stora
             .current_user = {},
             .initial_user = {},
             .authenticated_user = inserter.authenticated_user,
+            .settings = local_context->getSettingsCopy(),
         });
     }
     else
@@ -859,6 +1222,7 @@ SinkToStoragePtr StorageQueryRunner::write(const ASTPtr & /*query*/, const Stora
                     .current_user = inserter.current_user,
                     .initial_user = inserter.initial_user,
                     .authenticated_user = inserter.authenticated_user,
+                    .settings = local_context->getSettingsCopy(),
                 });
                 break;
             case SQLSecurityType::DEFINER:
@@ -871,6 +1235,7 @@ SinkToStoragePtr StorageQueryRunner::write(const ASTPtr & /*query*/, const Stora
                     .current_user = *metadata_snapshot->definer,
                     .initial_user = *metadata_snapshot->definer,
                     .authenticated_user = inserter.authenticated_user,
+                    .settings = local_context->getSettingsCopy(),
                 });
                 break;
             case SQLSecurityType::NONE:
@@ -883,6 +1248,7 @@ SinkToStoragePtr StorageQueryRunner::write(const ASTPtr & /*query*/, const Stora
                     .current_user = {},
                     .initial_user = {},
                     .authenticated_user = inserter.authenticated_user,
+                    .settings = local_context->getSettingsCopy(),
                 });
                 break;
         }
@@ -963,10 +1329,6 @@ void registerStorageQueryRunner(StorageFactory & factory)
         if (num_threads > 1024)
             throw Exception(ErrorCodes::BAD_ARGUMENTS, "The 'threads' setting of the QueryRunner engine must be in the range [1, 1024], got {}", num_threads);
 
-        const UInt64 max_queue_size = settings[QueryRunnerSetting::max_queue_size];
-        if (max_queue_size < 1)
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "The 'max_queue_size' setting of the QueryRunner engine must be at least 1");
-
         const String & cluster_name = settings[QueryRunnerSetting::cluster];
         const ShardSelector shard_selector = parseShardSelector(settings[QueryRunnerSetting::shard]);
 
@@ -985,6 +1347,15 @@ void registerStorageQueryRunner(StorageFactory & factory)
                     "The 'shard' setting of the QueryRunner engine must be in the range [1, {}] for cluster '{}', got {}",
                     cluster->getShardsInfo().size(), cluster_name, shard_selector.fixed_shard_num);
         }
+
+        if (settings[QueryRunnerSetting::connection_pool_size] < 1 || settings[QueryRunnerSetting::connection_pool_size] > std::numeric_limits<unsigned>::max())
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "The 'connection_pool_size' setting of the QueryRunner engine must be in the range [1, {}], got {}",
+                std::numeric_limits<unsigned>::max(), settings[QueryRunnerSetting::connection_pool_size].value);
+
+        if (settings[QueryRunnerSetting::scheduler] == WorkerKind::FIBERS && settings[QueryRunnerSetting::threads].changed)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "The 'threads' setting of the QueryRunner engine does not apply to the 'fibers' scheduler");
 
         validateColumns(args.columns);
 
