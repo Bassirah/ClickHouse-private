@@ -30,6 +30,8 @@ The home page and the sidebar list the same destinations:
 | Resources | Reference | `/docs` | Console integration contract. |
 | Administration | Users, Roles & Permissions, Component Access, Profiles & Quotas, Audit Activity | `/console/admin-*` | Pages of the console itself (see [Administration](#administration)). |
 
+When a panel opens, the console header and sidebar hide, so that the panel, with its own navigation, uses the whole window. To return to the console navigation, select **Console** (the arrow at the start of the panel bar); select the same button again to hide it. The console navigation stays visible for that panel until you select another one. Home, the [Administration](#administration) pages, and the messages shown instead of a panel (for example when it is restricted or not configured) always show the console navigation. In the Web Terminal, Escape moves the keyboard focus to the **Console** button.
+
 Each panel has a refreshable address under `/console`, for example `/console/merges`. The browser's Back and Forward buttons move between panels. The pages keep working on their own at their original paths.
 
 After sign-in, the console runs a `LIMIT 0` query for each diagnostic panel with the privileges that panel needs. A panel is marked:
