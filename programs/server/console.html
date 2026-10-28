@@ -271,6 +271,7 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 }
 #panel-title { font-size: 1rem; font-weight: 600; }
 #panel-bar .spacer { flex: 1; }
+#console-toggle { padding: 0.35rem 0.6rem; gap: 0.3rem; }
 #panel-notice { margin: 0.6rem 0.75rem 0; }
 #panel-state { overflow-y: auto; padding: 1.5rem; }
 #panel-state > div { max-width: 46rem; display: flex; flex-direction: column; gap: 0.9rem; }
@@ -396,6 +397,12 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
     .kv { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
     .kv dd { margin-bottom: 0.4rem; }
 }
+
+/* Focus mode: an open component gets the whole window, with its own navigation. The console header and
+   sidebar come back with the arrow in the panel bar (`#console-toggle`). After the media query, so that it
+   also applies to narrow screens. */
+#shell.focus, #shell.focus.collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "main"; }
+#shell.focus #topbar, #shell.focus #sidebar, #shell.focus #sidebar-backdrop { display: none; }
 </style>
 </head>
 <body>
@@ -446,6 +453,7 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
         <div id="home-view" hidden></div>
         <div id="panel-view" hidden>
             <div id="panel-bar">
+                <button type="button" class="button" id="console-toggle" aria-controls="sidebar" hidden></button>
                 <span id="panel-icon"></span>
                 <h1 id="panel-title" tabindex="-1"></h1>
                 <span id="panel-badges"></span>
@@ -489,6 +497,7 @@ const ICONS = {
     external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
     collapse: '<path d="M15 6l-6 6 6 6"/>',
+    maximize: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
     moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
     switch: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
@@ -1055,6 +1064,8 @@ function endSession() {
     }
     session = null;
     admin_page = null;
+    console_navigation_for = null;
+    leaveFocusMode();
     closeDialog();
     $('admin-view').replaceChildren();
     $('login-password').value = '';
@@ -1261,8 +1272,11 @@ function showShell(route) {
     $('skip-link').hidden = false;
     renderConnectionStatus();
     renderSidebar();
+    /// The console navigation shown with the arrow stays only for the component it was shown on.
+    if (route.name !== 'component' || route.id !== console_navigation_for) console_navigation_for = null;
 
     if (route.name === 'not-found') {
+        leaveFocusMode();
         hideAllFrames();
         $('home-view').hidden = true;
         $('admin-view').hidden = true;
@@ -1278,6 +1292,7 @@ function showShell(route) {
     document.title = `${route.sub ? route.sub + ' · ' : ''}${c.title} · ClickHouse Console`;
     if (c.kind !== 'admin') admin_page = null;
     if (c.kind === 'home') {
+        leaveFocusMode();
         hideAllFrames();
         $('panel-view').hidden = true;
         $('admin-view').hidden = true;
@@ -1285,6 +1300,7 @@ function showShell(route) {
         renderHome();
         focusHeading($('home-view').querySelector('h1'));
     } else if (c.kind === 'admin') {
+        leaveFocusMode();
         hideAllFrames();
         $('panel-view').hidden = true;
         $('home-view').hidden = true;
@@ -1632,6 +1648,45 @@ function renderCard(c) {
 
 /// --- Panels ---
 
+/// --- Focus mode ---
+
+/// While a component's page is shown, the console header and sidebar are hidden, so the component has
+/// the whole window and its own navigation. The arrow at the start of the panel bar brings the console
+/// navigation back; it then stays visible for that component until another component is selected.
+/// Pages of the console itself (Home, Administration, and the states of components that have no page)
+/// always show the console navigation.
+let console_navigation_for = null;
+
+function setFocusMode(on) {
+    const shell = $('shell');
+    if (on) closeMobileSidebar(false);
+    const changed = shell.classList.contains('focus') !== on;
+    shell.classList.toggle('focus', on);
+    const toggle = $('console-toggle');
+    toggle.replaceChildren(on ? icon('collapse') : icon('maximize'), on ? document.createTextNode('Console') : visuallyHidden('Hide the console navigation'));
+    toggle.title = on ? 'Show the console navigation (header and sidebar)' : 'Hide the console navigation: give the component the whole window';
+    toggle.setAttribute('aria-expanded', String(!on));
+    if (!changed) return;
+    /// The terminal sizes itself to its frame; tell it when the frame size changes.
+    const terminal = frames.get('terminal');
+    if (terminal && terminal.loaded && !terminal.host.hidden) postToTerminal(terminal, {type: 'webterminal-refit', focus: false});
+}
+
+/// Shows the console navigation, without the arrow: for the pages of the console itself.
+function leaveFocusMode() {
+    $('console-toggle').hidden = true;
+    setFocusMode(false);
+}
+
+$('console-toggle').addEventListener('click', () => {
+    const route = parseRoute();
+    const on = !$('shell').classList.contains('focus');
+    console_navigation_for = on ? null : route.id;
+    setFocusMode(on);
+    /// Keep the keyboard focus on the arrow, which stays in place in both modes.
+    $('console-toggle').focus();
+});
+
 function hideAllFrames() {
     for (const [id, entry] of frames) {
         if (entry.component.keep_alive) entry.host.hidden = true;
@@ -1655,7 +1710,10 @@ function renderPanelBar(c, title) {
     $('panel-standalone').hidden = true;
 }
 
+/// A page of the console in place of a component (checking, restricted, not configured, ...): the
+/// component has no navigation of its own, so the console navigation stays.
 function renderPanelState(title, body, actions) {
+    leaveFocusMode();
     const box = $('panel-state');
     const inner = document.createElement('div');
     const heading = document.createElement('h2');
@@ -1794,6 +1852,8 @@ function openFrame(c) {
     let entry = frames.get(c.id);
     if (!entry) entry = createFrame(c);
     entry.host.hidden = false;
+    $('console-toggle').hidden = false;
+    setFocusMode(console_navigation_for !== c.id);
     $('panel-reload').hidden = false;
     const standalone = $('panel-standalone');
     standalone.href = frameSource(c);
@@ -1927,8 +1987,9 @@ window.addEventListener('message', e => {
     const entry = frames.get('terminal');
     if (!entry || e.source !== entry.iframe.contentWindow) return;
     if (e.data.type === 'webterminal-escape') {
-        /// The terminal captures every key; Escape is how keyboard users leave it.
-        const link = $('sidebar').querySelector('[aria-current="page"]');
+        /// The terminal captures every key; Escape is how keyboard users leave it: to the sidebar, or to
+        /// the arrow that shows it in focus mode.
+        const link = $('shell').classList.contains('focus') ? $('console-toggle') : $('sidebar').querySelector('[aria-current="page"]');
         if (link) link.focus();
     } else if (e.data.type === 'webterminal-closed') {
         destroyFrame('terminal');
