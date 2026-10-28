@@ -45,6 +45,14 @@
     --accent-text: #161517;
     --accent-border: #c7cc00;
     --selected: #ececec;
+    /* Buttons, as in the SQL Console (click-ui): the main action is the black `primary` button, the others
+       are outlined. Shared by the built-in web UI pages. */
+    --primary-bg: #302e32;
+    --primary-hover: #43464c;
+    --primary-active: #161517;
+    --primary-text: #ffffff;
+    --primary-border: #302e32;
+    --border-hover: #c3c6cc;
     --focus: #1d5fd6;
     --danger: #b3261e;
     --danger-bg: #fdecea;
@@ -74,6 +82,8 @@
     --accent-text: #1f1f1c;
     --accent-border: #faff69;
     --selected: #3a3a36;
+    --primary-border: #53575f;
+    --border-hover: #53575f;
     --focus: #8ab4ff;
     --danger: #ff9b94;
     --danger-bg: #3d1f1d;
@@ -105,7 +115,7 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 .skip-link
 {
     position: absolute; left: 0.5rem; top: -3rem; z-index: 100; padding: 0.5rem 1rem;
-    background: var(--accent); color: var(--accent-text); border-radius: 4px;
+    background: var(--primary-bg); color: var(--primary-text); border-radius: 4px;
 }
 .skip-link:focus { top: 0.5rem; }
 
@@ -118,16 +128,19 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
     min-height: 2.25rem; padding: 0.35rem 0.9rem; border-radius: 4px; cursor: pointer;
     border: 1px solid var(--border); background: var(--surface); text-decoration: none; white-space: nowrap;
 }
-.button:hover { background: var(--surface-hover); }
-.button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent-border); font-weight: 600; }
-.button.primary:hover { filter: brightness(0.95); }
+.button:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+.button:active { background: var(--selected); }
+.button.primary { background: var(--primary-bg); color: var(--primary-text); border-color: var(--primary-border); font-weight: 600; }
+.button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+.button.primary:active { background: var(--primary-active); border-color: var(--primary-active); }
 .button:disabled { cursor: not-allowed; opacity: 0.6; }
 .icon-button
 {
     display: inline-flex; align-items: center; justify-content: center; width: 2.25rem; height: 2.25rem;
     border: 1px solid transparent; border-radius: 4px; background: none; cursor: pointer; padding: 0;
 }
-.icon-button:hover { background: var(--surface-hover); border-color: var(--border); }
+.icon-button:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+.icon-button:active { background: var(--selected); }
 
 .message { padding: 0.65rem 0.8rem; border-radius: 4px; border: 1px solid; overflow-wrap: anywhere; }
 .message.error { color: var(--danger); background: var(--danger-bg); border-color: currentColor; }
@@ -337,6 +350,8 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .button.small { min-height: 1.9rem; padding: 0.15rem 0.6rem; font-size: 0.85rem; }
 .button.danger { color: var(--danger); border-color: currentColor; }
 .button.danger.primary { background: var(--danger); color: var(--bg); border-color: var(--danger); }
+.button.danger.primary:hover { background: var(--danger); border-color: var(--danger); filter: brightness(0.92); }
+.button.danger:hover:not(.primary) { background: var(--danger-bg); border-color: currentColor; }
 .actions-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 pre.code
 {
@@ -536,8 +551,9 @@ const CATEGORIES = [
     {id: 'home', title: 'Home'},
     {id: 'workspace', title: 'Workspace'},
     {id: 'diagnostics', title: 'Diagnostics'},
-    {id: 'resources', title: 'Resources'},
     {id: 'administration', title: 'Administration'},
+    /// Last: links to documentation and other sites, at the bottom of the sidebar.
+    {id: 'resources', title: 'Resources'},
 ];
 
 /// The navigation registry: the home page cards and the sidebar are generated from it.
@@ -1235,10 +1251,11 @@ const STATUS_BADGES = {
 };
 
 /// Destinations not listed in the sidebar and on the home page: administration pages the user cannot
-/// use, and components the console policy does not allow. Their routes still explain why.
+/// use, components the console policy does not allow, and components the user has no privileges for
+/// (their probe query is denied). Their routes still explain why, and offer to open restricted ones.
 function isListed(c) {
     const state = componentState(c);
-    return state.status !== 'hidden' && state.status !== 'denied';
+    return state.status !== 'hidden' && state.status !== 'denied' && state.status !== 'restricted';
 }
 
 function statusBadge(state) {
@@ -1763,6 +1780,11 @@ function showPanel(c) {
     renderPanelBar(c, c.title);
     $('panel-state').hidden = true;
 
+    if (state.status === 'denied') {
+        renderUnavailableState(c, state);
+        renderPanelNotice();
+        return;
+    }
     if (c.kind === 'link' || state.external) {
         renderExternalState(c, state);
         renderPanelNotice();
@@ -1854,6 +1876,7 @@ function openFrame(c) {
     entry.host.hidden = false;
     $('console-toggle').hidden = false;
     setFocusMode(console_navigation_for !== c.id);
+    if (c.integration === 'clickstack') showClickStackNotice();
     $('panel-reload').hidden = false;
     const standalone = $('panel-standalone');
     standalone.href = frameSource(c);
@@ -1878,6 +1901,7 @@ function createFrame(c) {
     host.append(iframe, overlay);
     const entry = {component: c, host, iframe, overlay, loaded: false, notice: null, session};
     frames.set(c.id, entry);
+    if (c.integration === 'clickstack') hideClickStackBanner();
     iframe.addEventListener('load', () => onFrameLoad(entry));
     iframe.src = frameSource(c);
     $('frames').append(host);
@@ -1998,6 +2022,55 @@ window.addEventListener('message', e => {
         }
     }
 });
+
+/// --- Integration: ClickStack ---
+
+/// ClickStack shows a banner across its pages ("This is not recommended for production use ...") until it
+/// is closed with its button, which stores `"closed"` (JSON) under this key of the local storage of the
+/// origin. The console closes it the same way, before ClickStack loads, and shows the message in a popup
+/// instead, so that the banner does not take space in the panel.
+const CLICKSTACK_BANNER_KEY = 'clickstack-banner-state';
+const CLICKSTACK_NOTICE_KEY = 'console.clickstack-notice';
+const CLICKSTACK_DOCS_URL = 'https://clickhouse.com/docs/use-cases/observability/clickstack/getting-started';
+
+function hideClickStackBanner() {
+    try {
+        localStorage.setItem(CLICKSTACK_BANNER_KEY, JSON.stringify('closed'));
+    } catch (e) {
+        /// Storage is disabled: ClickStack cannot store its own state either, and shows the banner.
+    }
+}
+
+/// Shows the message of the banner the first time ClickStack is opened after signing in, unless the user
+/// asked not to see it again.
+function showClickStackNotice() {
+    if (session.clickstack_notice_shown) return;
+    session.clickstack_notice_shown = true;
+    let dismissed = false;
+    try {
+        dismissed = localStorage.getItem(CLICKSTACK_NOTICE_KEY) === 'dismissed';
+    } catch (e) {
+        /// Storage is disabled: show the message on each sign-in.
+    }
+    if (dismissed) return;
+    const again = checkbox('Do not show this again', false);
+    const docs = h('a', {href: CLICKSTACK_DOCS_URL, target: '_blank', rel: 'noopener noreferrer'}, 'ClickStack Docs', visuallyHidden(' (opens in a new tab)'));
+    const ok = button('OK', closeDialog, {className: 'primary'});
+    ok.autofocus = true;
+    openDialog('About ClickStack in ClickHouse', [
+        paragraph('This is not recommended for production use and is lacking core ClickStack features such as alerts and saved searches.'),
+        h('p', {}, 'For a proper experience, visit the ', docs, '.'),
+        h('p', {className: 'note'}, 'ClickStack uses its own connection settings: enter them in ClickStack on first use.'),
+        again.element,
+    ], [ok], {onclose: () => {
+        if (!again.input.checked) return;
+        try {
+            localStorage.setItem(CLICKSTACK_NOTICE_KEY, 'dismissed');
+        } catch (e) {
+            /// Not remembered when storage is disabled.
+        }
+    }});
+}
 
 /// --- Integration: SQL Console ---
 
@@ -2437,11 +2510,20 @@ const COMPONENT_NATIVE = {
     'processors-profile': {view_data: {privileges: [['SELECT', 'system', 'processors_profile_log'], ['SELECT', 'system', 'query_log']]}},
     reference: {view_data: {privileges: [['SELECT', 'system', 'documentation']]}},
 };
+for (const c of COMPONENTS.filter(c => c.kind === 'link')) {
+    COMPONENT_NATIVE[c.id] = {integration: 'An external website. The policy only lists or hides the link in the console: '
+        + 'anyone who knows the address can still visit it.'};
+}
 
-/// The components the policy governs: the panels. Home, the links, and the administration pages are not
-/// governed: the links are public, and the administration pages follow the privileges of the user, so a
-/// policy mistake cannot lock the platform administrators out of this page.
-const POLICY_COMPONENTS = COMPONENTS.filter(c => c.kind === 'panel');
+/// The components the policy governs: the panels and the links of Resources. Home and the administration
+/// pages are not governed: the administration pages follow the privileges of the user, so a policy mistake
+/// cannot lock the platform administrators out of this page.
+const POLICY_COMPONENTS = COMPONENTS.filter(c => c.kind === 'panel' || c.kind === 'link');
+
+/// The capabilities that apply to a component: a link can only be opened.
+function capabilitiesOf(c) {
+    return c.kind === 'link' ? CAPABILITIES.slice(0, 1) : CAPABILITIES;
+}
 
 async function loadPolicy(current) {
     const db = current.admin.db;
@@ -2457,12 +2539,17 @@ async function loadPolicy(current) {
 }
 
 /// The capabilities that the policy rows give to a user with the given roles: for each component and
-/// capability, whether it is allowed and which rows allow it. Rules only allow; no row means not allowed.
+/// capability, whether it is allowed and which rows allow it. Rules only allow: for a component that has
+/// rules, no rule for the user means not allowed. A component that no rule mentions yet, such as one added
+/// to the console after the policy was set up, is not governed and stays open to everyone.
 function effectivePolicy(rows, user, roles) {
+    const governed = new Set(rows.map(row => row.component));
     const result = {};
     for (const c of POLICY_COMPONENTS) {
         result[c.id] = {};
-        for (const capability of CAPABILITIES) result[c.id][capability.key] = {allowed: false, sources: []};
+        for (const capability of CAPABILITIES) {
+            result[c.id][capability.key] = governed.has(c.id) ? {allowed: false, sources: []} : {allowed: true, sources: ['no rules yet (open to everyone)']};
+        }
     }
     for (const row of rows) {
         const applies = row.subject_type === 'all' || (row.subject_type === 'user' && row.subject === user)
@@ -2482,10 +2569,12 @@ function effectivePolicy(rows, user, roles) {
 /// The policy decision for a panel of the signed-in user, or null when the panel is not restricted by it.
 /// When the policy exists but cannot be read, the governed panels are not listed (fail closed).
 function policyDecision(c) {
-    if (!session || c.kind !== 'panel') return null;
+    if (!session || (c.kind !== 'panel' && c.kind !== 'link')) return null;
     const policy = session.admin.policy;
     const href = componentPath(c.id);
-    if (policy.state === 'checking') return {status: 'checking', action: 'Open', href};
+    /// While the policy loads, panels wait; links to public sites stay usable, and disappear if the policy
+    /// turns out to hide them.
+    if (policy.state === 'checking') return c.kind === 'link' ? null : {status: 'checking', action: 'Open', href};
     if (policy.state === 'unreadable' || policy.state === 'error') {
         return {status: 'denied', action: 'Details', href,
             reason: `The console access policy could not be read (${policy.message}), so the components it governs are not shown.`};
@@ -3946,6 +4035,7 @@ function renderUserComponents(panel, ctx) {
         return dataTable([
             {title: 'Component', render: c => c.title},
             ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
+                if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note'}, 'n/a');
                 const allowed = at_login[c.id][capability.key];
                 const with_set_role = all[c.id][capability.key];
                 if (allowed.allowed) return badge('Allowed', 'ok', `By ${allowed.sources.join(', ')}.`);
@@ -4328,6 +4418,7 @@ function renderRoleComponents(panel, ctx) {
     put(box, dataTable([
         {title: 'Component', render: c => c.title},
         ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
+            if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note'}, 'n/a');
             const row = rows.find(r => r.component === c.id);
             return row && row[capability.key] ? badge('Allowed', 'ok') : '—';
         }})),
@@ -4508,7 +4599,7 @@ async function setupDialog() {
         const quoted = quoteIdentifier(db);
         const correlation_id = crypto.randomUUID();
         const seed = POLICY_COMPONENTS.map(component => JSON.stringify({subject_type: 'all', subject: '', component: component.id,
-            open: true, view_data: true, run_queries: true, administer: false}));
+            open: true, view_data: component.kind === 'panel', run_queries: component.kind === 'panel', administer: false}));
         const steps = [
             {description: `Create the database ${db}`, sql: `CREATE DATABASE IF NOT EXISTS ${quoted}`},
             ...Object.entries(ADMIN_TABLES).map(([table, ddl]) => ({description: `Create the table ${db}.${table}`,
@@ -4565,13 +4656,21 @@ function renderPolicyMatrix(page, container, subject) {
     const rows = admin.policy.rows || [];
     const editable = admin.can.write_policy;
     const current = new Map(rows.filter(row => row.subject_type === subject.type && row.subject === subject.name).map(row => [row.component, row]));
+    /// Components that no rule mentions are open to everyone: for all users, show them allowed, so that
+    /// saving turns that into a rule. For a role or user, nothing is set for them yet.
+    const governed = new Set(rows.map(row => row.component));
+    const initially = (c, key) => {
+        const row = current.get(c.id);
+        if (row) return !!row[key];
+        return subject.type === 'all' && !governed.has(c.id) && (key === 'open' || (c.kind === 'panel' && key !== 'administer'));
+    };
     const boxes = new Map();
     const native_cells = new Map();
     const table = dataTable([
-        {title: 'Component', render: c => h('strong', {}, c.title)},
+        {title: 'Component', render: c => [h('strong', {}, c.title), h('div', {className: 'note'}, CATEGORIES.find(category => category.id === c.category).title)]},
         ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
-            const row = current.get(c.id);
-            const input = h('input', {type: 'checkbox', checked: !!(row && row[capability.key]), disabled: !editable,
+            if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note', title: 'Does not apply: a link can only be opened.'}, '—');
+            const input = h('input', {type: 'checkbox', checked: initially(c, capability.key), disabled: !editable,
                 'aria-label': `${capability.title} ${c.title}`});
             input.addEventListener('change', () => {
                 /// The other capabilities need Open, and Open is cleared together with them.
@@ -4582,7 +4681,9 @@ function renderPolicyMatrix(page, container, subject) {
             boxes.set(c.id, {...boxes.get(c.id), [capability.key]: input});
             return input;
         }})),
-        {title: 'Enforced outside the console by', className: 'enforced', render: c => componentEnforcement(c)},
+        {title: 'Enforced outside the console by', className: 'enforced', render: c => [
+            governed.has(c.id) ? null : h('div', {}, badge('No rules yet: open to everyone', 'warn')),
+            componentEnforcement(c)]},
         ...(subject.type === 'all' ? [] : [{title: 'Native privileges', className: 'enforced', render: c => {
             const cell = h('div', {}, h('span', {className: 'note'}, '…'));
             native_cells.set(c.id, cell);
@@ -4594,10 +4695,10 @@ function renderPolicyMatrix(page, container, subject) {
         const changes = [];
         for (const c of POLICY_COMPONENTS) {
             const set = boxes.get(c.id);
-            const values = Object.fromEntries(CAPABILITIES.map(capability => [capability.key, set[capability.key].checked]));
-            const before = current.get(c.id);
-            const unchanged = before ? CAPABILITIES.every(capability => !!before[capability.key] === values[capability.key])
-                : CAPABILITIES.every(capability => !values[capability.key]);
+            const values = Object.fromEntries(CAPABILITIES.map(capability => [capability.key, !!(set[capability.key] && set[capability.key].checked)]));
+            /// Compared with what the matrix showed at first, which for a component without rules is the
+            /// default (open to everyone for all users).
+            const unchanged = CAPABILITIES.every(capability => (initially(c, capability.key) && capabilitiesOf(c).includes(capability)) === values[capability.key]);
             if (!unchanged) changes.push({component: c, values});
         }
         if (!changes.length) {
