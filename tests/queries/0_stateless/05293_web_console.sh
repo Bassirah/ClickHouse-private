@@ -8,7 +8,7 @@ CUR_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BASE="${CLICKHOUSE_PORT_HTTP_PROTO}://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT_HTTP}"
 
 echo "--- every path under /console serves the page (client-side routing)"
-for path in /console /console/ /console/login /console/sql /console/merges '/console/login?next=merges' /console/unknown; do
+for path in /console /console/ /console/login /console/sql /console/merges '/console/login?next=merges' /console/unknown /console/admin-users/alice; do
     BODY=$(${CLICKHOUSE_CURL} -sS -w '\n%{http_code}' "${BASE}${path}")
     echo "${path} $(echo "$BODY" | tail -n1) $(echo "$BODY" | grep -c '<title>ClickHouse Console</title>')"
 done
