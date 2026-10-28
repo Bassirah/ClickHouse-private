@@ -7,78 +7,92 @@
     <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.21/dist/uPlot.iife.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
     <style>
+        /* The design of the other built-in web UIs: the dark theme has the colors of the SQL Console (`/ui`),
+           the light theme those of the web console (`/console`). */
         :root {
-            --color: black;
-            --background-color-1: #00CCFF;
-            --background: linear-gradient(to bottom, var(--background-color-1), #00D0D0);
-            --chart-background: white;
-            --shadow-color: rgba(0, 0, 0, 0.25);
-            --moving-shadow-color: rgba(0, 0, 0, 0.5);
-            --input-shadow-color: rgba(0, 255, 0, 1);
-            --error-color: red;
-            --global-error-color: white;
-            --legend-background: rgba(255, 255, 0, 0.75);
-            --title-color: #666;
-            --text-color: black;
-            --edit-title-background: #FEE;
-            --edit-title-border: #F88;
-            --button-background-color: #FFCB80;
-            --button-text-color: black;
-            --new-chart-background-color: #EEE;
-            --new-chart-text-color: black;
-            --param-background-color: #EEE;
-            --param-text-color: black;
-            --input-background: white;
-            --chart-button-hover-color: red;
+            color-scheme: light;
+            --bg: #f6f7f9;
+            --surface: #ffffff;
+            --surface-hover: #f0f1f3;
+            --border: #d9dbe0;
+            --text: #161517;
+            --muted: #53575f;
+            --accent: #faff69;
+            --accent-text: #161517;
+            --accent-border: #c7cc00;
+            --focus: #1d5fd6;
+            --danger: #b3261e;
+            /* Buttons, as in the SQL Console: the main action is black, the others are outlined. */
+            --primary-bg: #302e32;
+            --primary-hover: #43464c;
+            --primary-active: #161517;
+            --primary-text: #ffffff;
+            --primary-border: #302e32;
+            --border-hover: #c3c6cc;
+            --pressed: #e6e7ea;
+            --moving-shadow-color: rgba(0, 0, 0, 0.25);
+            /* Used by the script. */
+            --text-color: var(--text);
+            --global-error-color: var(--danger);
+            --legend-background: rgba(255, 255, 255, 0.92);
         }
 
         [data-theme="dark"] {
-            --color: white;
-            --background-color-1: #151C2C;
-            --background: var(--background-color-1);
-            --chart-background: #1b2834;
-            --shadow-color: rgba(0, 0, 0, 0);
-            --moving-shadow-color: rgba(255, 255, 255, 0.25);
-            --input-shadow-color: rgba(255, 128, 0, 0.25);
-            --error-color: #F66;
-            --legend-background: rgba(0, 96, 128, 0.75);
-            --title-color: white;
-            --text-color: white;
-            --edit-title-background: #364f69;
-            --edit-title-border: #333;
-            --button-background-color: orange;
-            --button-text-color: black;
-            --new-chart-background-color: #666;
-            --new-chart-text-color: white;
-            --param-background-color: #666;
-            --param-text-color: white;
-            --input-background: #364f69;
-            --chart-button-hover-color: #F40;
+            color-scheme: dark;
+            --bg: #1f1f1c;
+            --surface: #282828;
+            --surface-hover: #323232;
+            --border: #414141;
+            --text: #f2f2f2;
+            --muted: #b3b6bd;
+            --accent: #faff69;
+            --accent-text: #1f1f1c;
+            --accent-border: #faff69;
+            --focus: #8ab4ff;
+            --danger: #ff9b94;
+            --primary-border: #53575f;
+            --border-hover: #53575f;
+            --pressed: #3a3a36;
+            --moving-shadow-color: rgba(0, 0, 0, 0.6);
+            --legend-background: rgba(40, 40, 40, 0.92);
         }
 
         * {
             box-sizing: border-box;
         }
         html, body {
-            color: var(--color);
+            color: var(--text);
             height: 100%;
             overflow: auto;
             margin: 0;
         }
         body {
-            font-family: Liberation Sans, DejaVu Sans, sans-serif, Noto Color Emoji, Apple Color Emoji, Segoe UI Emoji;
-            padding: 1rem;
+            font-family: Inter, -apple-system, "Segoe UI", Roboto, "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.45;
+            padding: 0 1rem 1rem;
             overflow-x: hidden;
-            background: var(--background);
+            background: var(--bg);
             display: grid;
             grid-template-columns: auto;
             grid-template-rows: fit-content(10%) auto;
         }
-        input {
-            /* iPad, Safari */
-            border-radius: 0;
+        input, button, textarea {
+            font: inherit;
+            color: var(--text);
             margin: 0;
         }
+        svg.icon {
+            width: 1.1rem;
+            height: 1.1rem;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex: none;
+        }
+
         #charts
         {
             height: 100%;
@@ -89,183 +103,194 @@
         .chart {
             flex: 1 1 40rem;
             min-height: 16rem;
-            background: var(--chart-background);
-            box-shadow: 1px 1px 0 var(--shadow-color);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
             overflow: hidden;
             position: relative;
         }
-
         .chart-maximized {
             flex: 1 100%;
             height: 75vh
         }
-
         .chart-moving {
             z-index: 11;
-            box-shadow: 0 0 2rem var(--moving-shadow-color);
+            border-color: var(--border-hover);
+            box-shadow: 0 0.5rem 2rem var(--moving-shadow-color);
         }
-
         .chart-displaced {
             opacity: 75%;
             filter: blur(1px);
         }
-
         .chart > div { position: absolute; }
 
+        /* Toolbar, like the tab bar of the SQL Console. */
         .inputs {
-            height: auto;
-            width: 100%;
-
-            font-size: 14pt;
-
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            margin: 0 -1rem 1rem;
+            padding: 0.6rem 1rem;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
             display: flex;
             flex-flow: column nowrap;
-            justify-content: center;
-
-            position: sticky;
-            top: -1rem;
-            margin-top: -1rem;
-            margin-left: -1rem;
-            margin-right: -1rem;
-            border-top: 1rem solid var(--background-color-1);
-            border-left: 1rem solid var(--background-color-1);
-            border-right: 1rem solid var(--background-color-1);
-            box-sizing: content-box;
-            z-index: 1000;
-            background: var(--background-color-1);
+            gap: 0.5rem;
         }
-
-        #user {
-            margin-right: 0.25rem;
-            width: 50%;
-        }
-        #password {
-            width: 49.5%;
-        }
-
-        #username-password {
-            width: 100%;
-
+        form {
             display: flex;
-            flex-flow: row nowrap;
+            flex-direction: column;
+            gap: 0.5rem;
         }
-
-        .inputs #chart-params {
-            display: block;
-        }
-
         #connection-params {
-            margin-bottom: 0.5rem;
             display: grid;
-            grid-template-columns: 69.77% 30%;
-            column-gap: 0.25rem;
+            grid-template-columns: minmax(0, 7fr) minmax(0, 3fr);
+            gap: 0.5rem;
         }
-
-        .inputs input {
-            box-shadow: 1px 1px 0 var(--shadow-color);
-            padding: 0.25rem;
-        }
-
-        #chart-params input {
-            margin-right: 0.25rem;
-        }
-
-        #chart-params .param {
-            width: 6%;
-            font-family: monospace;
-        }
-
-        input {
-            font-family: Liberation Sans, DejaVu Sans, sans-serif, Noto Color Emoji, Apple Color Emoji, Segoe UI Emoji;
-            outline: none;
-            border: none;
-            font-size: 14pt;
-            background-color: var(--input-background);
-            color: var(--text-color);
-        }
-
-        .themes {
-            float: right;
-            font-size: 20pt;
-            gap: 0.3rem;
-
+        #username-password {
             display: flex;
-            justify-content: center;
+            gap: 0.5rem;
         }
-
-        #toggle-dark, #toggle-light {
-            padding-right: 0.5rem;
-            user-select: none;
-            cursor: pointer;
+        #user, #password {
+            flex: 1;
+            min-width: 0;
         }
-
-        #toggle-dark:hover, #toggle-light:hover {
-            display: inline-block;
-            transform: translate(1px, 1px);
-            filter: brightness(125%);
+        #button-options {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem;
         }
-
-        #add, #add-metrics, #reload, #edit, #search {
-            padding: 0.25rem 0.5rem;
-            text-align: center;
-            font-weight: bold;
-            user-select: none;
-            cursor: pointer;
-            background: var(--new-chart-background-color);
-            color: var(--new-chart-text-color);
-            float: right;
-            margin-right: 1rem !important;
-            margin-left: 0rem;
-            margin-bottom: 1rem;
-            height: 3ex;
+        #button-options .spacer {
+            flex: 1;
         }
-
-        #add:hover, #add-metrics:hover, #reload:hover, #edit:hover, #search:hover {
-            background: var(--button-background-color);
+        #search-span {
+            display: flex;
+            gap: 0.5rem;
+            flex: 1 1 20rem;
+            max-width: 34rem;
         }
-
         #search-query {
-            float: right;
-            width: 36%;
+            flex: 1;
+            min-width: 0;
+        }
+
+        input[type="text"], input[type="password"] {
+            height: 2rem;
+            padding: 0 0.6rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--bg);
+            outline: none;
+        }
+        input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
+            border-color: var(--focus);
+            box-shadow: 0 0 0 1px var(--focus);
+        }
+        :focus-visible {
+            outline: 2px solid var(--focus);
+            outline-offset: 1px;
+        }
+
+        /* Buttons, like those of the SQL Console: outlined, and black for the main action. */
+        #add, #add-metrics, #reload, #edit, #search, .edit-cancel, .edit-confirm, .theme-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            height: 2rem;
+            padding: 0 0.8rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--surface);
+            color: var(--text);
+            font-weight: 500;
+            white-space: nowrap;
+            user-select: none;
+            cursor: pointer;
+        }
+        #add-metrics:hover, #reload:hover, #edit:hover, #search:hover, .edit-cancel:hover, .theme-button:hover {
+            background: var(--surface-hover);
+            border-color: var(--border-hover);
+        }
+        #add-metrics:active, #reload:active, #edit:active, #search:active, .edit-cancel:active, .theme-button:active {
+            background: var(--pressed);
+        }
+        #add, .edit-confirm {
+            background: var(--primary-bg);
+            color: var(--primary-text);
+            border-color: var(--primary-border);
+            font-weight: 600;
+        }
+        #add:hover, .edit-confirm:hover:not(:disabled) {
+            background: var(--primary-hover);
+            border-color: var(--primary-hover);
+        }
+        #add:active, .edit-confirm:active:not(:disabled) {
+            background: var(--primary-active);
+            border-color: var(--primary-active);
+        }
+        #edit, .theme-button {
+            width: 2rem;
+            padding: 0;
+        }
+        .themes {
+            display: inline-flex;
+        }
+        /* Offer the theme that is not active. */
+        [data-theme="dark"] #toggle-dark, :root:not([data-theme="dark"]) #toggle-light {
+            display: none;
+        }
+
+        /* Query parameters: a label joined to its value. */
+        #chart-params {
+            flex-basis: 100%;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        #chart-params:empty {
+            display: none;
+        }
+        #chart-params .nowrap {
+            display: inline-flex;
+        }
+        form .param_name {
+            display: inline-flex;
+            align-items: center;
+            height: 2rem;
+            padding: 0 0.6rem;
+            font-size: 0.85rem;
+            color: var(--muted);
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            border-right: 0;
+            border-radius: 4px 0 0 4px;
+        }
+        #chart-params .param {
+            /* The script sets the width from the length of the value: keep the padding outside of it. */
+            box-sizing: content-box;
+            height: calc(2rem - 2px);
+            min-width: 6ch;
+            border-radius: 0 4px 4px 0;
+            font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+            font-size: 0.85rem;
         }
 
         #global-error {
-            align-self: center;
-            width: 60%;
-            padding: .5rem;
-
             color: var(--global-error-color);
-
-            display: flex;
-            flex-flow: row nowrap;
-            justify-content: center;
         }
-
-        form {
-            display: inline;
-        }
-
-        form .param_name {
-            font-size: 14pt;
-            padding: 0.25rem;
-            background: var(--param-background-color);
-            color: var(--param-text-color);
-            display: inline-block;
-            box-shadow: 1px 1px 0 var(--shadow-color);
-            margin-bottom: 0.5rem;
-        }
-
-        input:focus {
-            box-shadow: 0 0 1rem var(--input-shadow-color);
+        #global-error:empty {
+            display: none;
         }
 
         .title {
             left: 50%;
-            top: 0.25em;
+            top: 0.5rem;
             transform: translate(-50%, 0);
-            font-size: 16pt;
-            font-weight: bold;
-            color: var(--title-color);
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+            white-space: nowrap;
             z-index: 10;
         }
 
@@ -273,18 +298,26 @@
             cursor: pointer;
             display: none;
             position: absolute;
-            top: 0.25rem;
-            right: 0.25rem;
-            font-size: 200%;
-            color: #888;
+            top: 0.35rem;
+            right: 0.35rem;
+            color: var(--muted);
             z-index: 10;
         }
         .chart-buttons a {
-            margin-right: 0.25rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.9rem;
+            height: 1.9rem;
+            border-radius: 4px;
             user-select: none;
         }
         .chart-buttons a:hover {
-            color: var(--chart-button-hover-color);
+            background: var(--surface-hover);
+            color: var(--text);
+        }
+        .chart-buttons a.delete:hover {
+            color: var(--danger);
         }
 
         .query-editor {
@@ -295,115 +328,78 @@
             position: absolute;
             width: 100%;
             height: 100%;
+            background: var(--surface);
         }
-
         .query-error {
             display: none;
             z-index: 10;
             position: absolute;
-            color: var(--error-color);
+            color: var(--danger);
             padding: 2rem;
             top: 2rem;
         }
 
         textarea {
-            padding: 0.5rem;
+            padding: 0.6rem;
             outline: none;
-            border: none;
-            font-size: 12pt;
-            background: var(--chart-background);
-            color: var(--text-color);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+            font-size: 13px;
+            background: var(--surface);
             resize: none;
         }
-
         .query-editor textarea {
             grid-row: 1;
             grid-column: 1 / span 2;
             z-index: 11;
-            border-bottom: 1px solid var(--edit-title-border);
-            margin: 0;
+            border: 0;
+            border-bottom: 1px solid var(--border);
+            border-radius: 0;
         }
-
         .query-editor input {
             grid-row: 2;
-            padding: 0.5rem;
+            height: 2.5rem;
+            border-radius: 0;
+            border-width: 0;
         }
-
-        .edit-title {
-            background: var(--edit-title-background);
+        .query-editor .edit-title {
+            background: var(--bg);
+            font-weight: 600;
         }
-
-        .edit-confirm {
-            background: var(--button-background-color);
-            color: var(--button-text-color);
-            font-weight: bold;
-            cursor: pointer;
-        }
-        .edit-confirm:hover {
-            filter: contrast(125%);
-        }
-
-        .edit-cancel {
-            cursor: pointer;
-            background: var(--new-chart-background-color);
-        }
-        .edit-cancel:hover {
-            filter: contrast(125%);
+        .query-editor .edit-confirm {
+            padding: 0 1.25rem;
         }
 
         .nowrap {
             white-space: pre;
         }
 
-        #mass-editor {
+        #mass-editor, #metrics-editor {
             display: none;
             grid-template-columns: auto fit-content(10%) fit-content(10%);
             grid-template-rows: auto fit-content(10%);
-            row-gap: 1rem;
-            column-gap: 1rem;
+            gap: 1rem;
         }
-
-        #mass-editor-textarea {
+        #mass-editor-textarea, #metrics-editor-textarea {
             width: 100%;
             height: 100%;
             grid-row: 1;
             grid-column: 1 / span 3;
         }
-
-        #mass-editor input {
-            padding: 0.5rem;
+        #mass-editor input, #metrics-editor input[type="submit"] {
+            height: 2.25rem;
+            padding: 0 1rem;
         }
-
         #mass-editor-message {
             color: var(--global-error-color);
         }
-
-        #metrics-editor {
-            display: none;
-            grid-template-columns: auto fit-content(10%) fit-content(10%);
-            grid-template-rows: auto fit-content(10%);
-            row-gap: 1rem;
-            column-gap: 1rem;
-        }
-
-        #metrics-editor-textarea {
-            width: 100%;
-            height: 100%;
-            grid-row: 1;
-            grid-column: 1 / span 3;
-        }
-
-        #metrics-editor input[type="submit"] {
-            padding: 0.5rem;
-        }
-
         #metrics-editor input[type="submit"]:disabled {
             opacity: 0.5;
             cursor: default;
         }
-
         #metrics-editor-message {
-            color: var(--text-color);
+            color: var(--text);
         }
 
         #charts > div:only-child .display-only-if-more-than-one-chart {
@@ -413,11 +409,15 @@
         .u-series {
             line-height: 0.8;
         }
-
         .u-series.footer {
             font-size: 8px;
             padding-top: 0;
             margin-top: 0;
+        }
+        .u-legend {
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
         }
 
         /* Source: https://cdn.jsdelivr.net/npm/uplot@1.6.21/dist/uPlot.min.css
@@ -438,12 +438,13 @@
             </div>
         </div>
         <div id="button-options">
-            <span class="nowrap themes"><span id="toggle-dark">🌚</span><span id="toggle-light">🌞</span></span>
-            <input id="edit" type="button" value="✎">
+            <span id="search-span" class="nowrap"><input id="search-query" name="search" list="search-options" type="text" spellcheck="false" aria-label="Dashboard" placeholder="Dashboard name or query"><datalist id="search-options"></datalist><input id="search" type="button" value="Open" title="Run query to obtain list of charts from ClickHouse. Either select dashboard name or write your own query"></span>
+            <span class="spacer"></span>
+            <input id="reload" type="button" value="Reload">
             <input id="add-metrics" type="button" value="Add charts from metrics">
             <input id="add" type="button" value="Add chart">
-            <input id="reload" type="button" value="Reload">
-            <span id="search-span" class="nowrap"><input id="search" type="button" value="🔎" title="Run query to obtain list of charts from ClickHouse. Either select dashboard name or write your own query"><input id="search-query" name="search" list="search-options" type="text" spellcheck="false"><datalist id="search-options"></datalist></span>
+            <button id="edit" type="button" title="Edit all charts as JSON" aria-label="Edit all charts as JSON"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/></svg></button>
+            <span class="themes"><button id="toggle-dark" class="theme-button" type="button" title="Dark theme" aria-label="Dark theme"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg></button><button id="toggle-light" class="theme-button" type="button" title="Light theme" aria-label="Light theme"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button></span>
             <div id="chart-params"></div>
         </div>
     </form>
@@ -596,15 +597,28 @@ function generatePalette(numColors) {
 
 let theme = 'light';
 
-function setTheme(new_theme) {
+/// `remember`: store the choice, shared with the other web UI pages. Without a stored choice, the page
+/// follows the system preference, like the web console.
+function setTheme(new_theme, remember = true) {
     theme = new_theme;
     document.documentElement.setAttribute('data-theme', theme);
-    window.localStorage.setItem('theme', theme);
+    if (remember) window.localStorage.setItem('theme', theme);
     drawAll();
 }
 
 document.getElementById('toggle-light').addEventListener('click', e => setTheme('light'));
 document.getElementById('toggle-dark').addEventListener('click', e => setTheme('dark'));
+
+/// A line icon for the buttons of a chart, drawn with the text color (the font glyphs used before are
+/// missing on systems without emoji fonts).
+function chartIcon(paths) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'icon');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = paths;
+    return svg;
+}
 
 /// uPlot objects will go here.
 let plots = [];
@@ -789,8 +803,8 @@ function insertChart(i) {
     edit_buttons.className = 'chart-buttons';
 
     let move = document.createElement('a');
-    let move_text = document.createTextNode('✥');
-    move.appendChild(move_text);
+    move.appendChild(chartIcon('<path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/>'));
+    move.title = 'Move';
 
     let drag_state = {
         is_dragging: false,
@@ -873,8 +887,8 @@ function insertChart(i) {
     move.addEventListener('touchstart', (e) => e.preventDefault());
 
     let maximize = document.createElement('a');
-    let maximize_text = document.createTextNode('🗖');
-    maximize.appendChild(maximize_text);
+    maximize.appendChild(chartIcon('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'));
+    maximize.title = 'Maximize or restore';
 
     maximize.addEventListener('click', e => {
         const idx = getCurrentIndex();
@@ -883,8 +897,8 @@ function insertChart(i) {
     });
 
     let edit = document.createElement('a');
-    let edit_text = document.createTextNode('✎');
-    edit.appendChild(edit_text);
+    edit.appendChild(chartIcon('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>'));
+    edit.title = 'Edit query';
 
     function editStart() {
         query_editor.style.display = 'grid';
@@ -897,8 +911,9 @@ function insertChart(i) {
     }
 
     let trash = document.createElement('a');
-    let trash_text = document.createTextNode('✕');
-    trash.appendChild(trash_text);
+    trash.appendChild(chartIcon('<path d="M6 6l12 12M18 6L6 18"/>'));
+    trash.title = 'Remove chart';
+    trash.className = 'delete';
     trash.addEventListener('click', e => {
         const idx = getCurrentIndex();
         if (plots[idx]) {
@@ -1566,10 +1581,10 @@ async function draw(idx, chart, url_params, query) {
 
     const color_rotate = Math.abs(stringHash(query));
 
-    const line_color = theme != 'dark' ? generateColor(0.75, 0.14, (21 + color_rotate) % 360) : generateColor(0.53, 0.07, (56 + color_rotate) % 360);
-    const fill_color = theme != 'dark' ? generateColor(0.96, 0.02, (21 + color_rotate) % 360) : generateColor(0.36, 0.07, (56 + color_rotate) % 360);
-    const grid_color = theme != 'dark' ? "#eeeedd" : "#2c3235";
-    const axes_color = theme != 'dark' ? "#2c3235" : "#c7d0d9";
+    const line_color = theme != 'dark' ? generateColor(0.75, 0.14, (21 + color_rotate) % 360) : generateColor(0.78, 0.13, (56 + color_rotate) % 360);
+    const fill_color = theme != 'dark' ? generateColor(0.96, 0.02, (21 + color_rotate) % 360) : generateColor(0.38, 0.06, (56 + color_rotate) % 360);
+    const grid_color = theme != 'dark' ? "#e6e7ea" : "#363636";
+    const axes_color = theme != 'dark' ? "#53575f" : "#b3b6bd";
 
     let sync = uPlot.sync("sync");
 
@@ -1702,7 +1717,7 @@ new ResizeObserver(resize).observe(document.body);
 /// The buttons stay clickable while loading: pressing Reload again cancels the in-flight queries and restarts.
 function setButtonsLoading(loading) {
     document.getElementById('reload').value = loading ? 'Reloading…' : 'Reload';
-    document.getElementById('search').value = loading ? '…' : '🔎';
+    document.getElementById('search').value = loading ? '…' : 'Open';
 }
 
 let reload_epoch = 0;
@@ -1872,6 +1887,8 @@ async function start() {
         let new_theme = window.localStorage.getItem('theme');
         if (new_theme && new_theme != theme) {
             setTheme(new_theme);
+        } else if (!new_theme && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            setTheme('dark', false);
         } else {
             drawAll();
         }

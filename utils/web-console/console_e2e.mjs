@@ -102,6 +102,8 @@ async function waitForHome(page) {
 /// Clicks a control of the console header or sidebar. While a component is open, they are hidden (focus
 /// mode), so first press the arrow that shows them, as a user would.
 async function clickConsole(page, selector) {
+    /// A message of the console (such as the ClickStack notice on its first opening) is acknowledged first.
+    if (await page.evaluate(() => document.getElementById('admin-dialog').open)) await page.click('#admin-dialog .dialog-actions button.primary');
     if (await page.evaluate(() => document.getElementById('shell').classList.contains('focus'))) await page.click('#console-toggle');
     await page.click(selector);
 }
@@ -374,17 +376,24 @@ await test('Theme: the toggle applies to the console and to panels opened after 
     await context.close();
 });
 
-await test('Restricted diagnostic panel: shown as restricted and the server still enforces permissions', async () => {
+await test('Restricted diagnostic panel: hidden from the user, and the server still enforces permissions', async () => {
     const {context, page} = await newContext();
     await page.goto(`${BASE}/console`);
     await login(page, LIMITED_USER, LIMITED_PASSWORD);
     await waitForHome(page);
-    await waitUntil(page, () => document.querySelector('.card[data-component="merges"] .badge')?.textContent === 'Restricted');
-    await waitUntil(page, () => document.querySelector('.card[data-component="binary"] .badge')?.textContent === 'Restricted');
-    await waitUntil(page, () => !document.querySelector('.card[data-component="schema"] .badge.bad'));
+    /// Components whose probe query the server denies are neither cards nor sidebar entries.
+    await waitUntil(page, () => !document.querySelector('.card[data-component="merges"]') && !document.querySelector('.card[data-component="binary"]'));
+    check(!(await page.$('#sidebar a[data-component="merges"]')) && !(await page.$('#sidebar a[data-component="binary"]')), 'restricted components in the sidebar');
+    await waitUntil(page, () => !!document.querySelector('.card[data-component="schema"]') && !document.querySelector('.card[data-component="schema"] .badge.bad'));
+    check(!!(await page.$('#sidebar a[data-component="schema"]')), 'an allowed component is missing from the sidebar');
+    check(!(await page.textContent('#home-view')).includes('Restricted'), 'a Restricted badge is shown');
     await screenshot(page, '06-restricted-home');
-    await page.click('.card[data-component="merges"] .card-foot a');
-    await page.waitForSelector('#panel-state:not([hidden])');
+    /// Its address still explains the restriction.
+    await page.goto(`${BASE}/console/merges`);
+    await login(page, LIMITED_USER, LIMITED_PASSWORD);
+    await page.waitForURL(`${BASE}/console/merges`);
+    /// The privileges are checked first ("Checking ..."), then the restriction is explained.
+    await waitUntil(page, () => document.getElementById('panel-state').textContent.includes('restricted'));
     const state = await page.textContent('#panel-state');
     check(state.includes('restricted') && state.includes('SELECT ON system.part_log'), `state: ${state}`);
     await page.click('text=Open anyway');
@@ -626,6 +635,52 @@ await test('Focus mode: an open component hides the console navigation until the
     await page.goBack();
     await page.waitForURL(`${BASE}/console/dashboard`);
     check((await mode()).focus, 'Back to a component does not hide the console navigation');
+    await context.close();
+});
+
+await test('ClickStack: its banner message is a popup on the first opening after sign-in', async () => {
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await waitUntil(page, () => !['Checking…'].includes(document.querySelector('.card[data-component="clickstack"] .badge')?.textContent));
+    if (await page.evaluate(() => document.querySelector('.card[data-component="clickstack"] .badge')?.textContent === 'Unavailable')) {
+        console.log('      skipped: this server build has no ClickStack bundle');
+        await context.close();
+        return;
+    }
+    await page.click('.card[data-component="clickstack"] .card-foot a');
+    await page.waitForSelector('#admin-dialog[open]');
+    const text = await page.textContent('#admin-dialog');
+    check(text.includes('not recommended for production use') && text.includes('ClickStack Docs'), `popup: ${text}`);
+    check(await page.getAttribute('#admin-dialog a', 'href') === 'https://clickhouse.com/docs/use-cases/observability/clickstack/getting-started', 'docs link');
+    check(await page.evaluate(() => document.activeElement.textContent) === 'OK', 'focus not on OK');
+    await screenshot(page, '12-clickstack-notice');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    check(await page.evaluate(() => localStorage.getItem('clickstack-banner-state')) === '"closed"', 'ClickStack banner not closed');
+    /// ClickStack itself no longer shows the banner.
+    await page.waitForSelector('.frame-host[data-component="clickstack"] .frame-overlay', {state: 'detached', timeout: 60000});
+    await waitUntil(frameOf(page, '/clickstack'), () => document.body && document.body.innerText.length > 0, null, {timeout: 60000});
+    check(!(await frameOf(page, '/clickstack').evaluate(() => document.body.innerText.includes('not recommended for production use'))), 'the banner is still in ClickStack');
+    /// Once per sign-in.
+    await clickConsole(page, '#sidebar a[data-component="home"]');
+    await page.click('.card[data-component="clickstack"] .card-foot a');
+    await page.waitForTimeout(500);
+    check(!(await page.evaluate(() => document.getElementById('admin-dialog').open)), 'shown again in the same sign-in');
+    /// After signing in again it is shown again, unless the user asked not to.
+    await clickConsole(page, '#logout-button');
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await page.click('.card[data-component="clickstack"] .card-foot a');
+    await page.waitForSelector('#admin-dialog[open]');
+    await page.check('#admin-dialog input[type="checkbox"]');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await clickConsole(page, '#logout-button');
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await page.click('.card[data-component="clickstack"] .card-foot a');
+    await page.waitForTimeout(500);
+    check(!(await page.evaluate(() => document.getElementById('admin-dialog').open)), 'shown although dismissed');
     await context.close();
 });
 

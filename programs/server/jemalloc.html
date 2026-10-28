@@ -7,45 +7,66 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.21/dist/uPlot.min.css">
     <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.21/dist/uPlot.iife.min.js"></script>
     <style>
+        /* The design of the other built-in web UIs: the dark theme has the colors of the SQL Console (`/ui`),
+           the light theme those of the web console (`/console`). */
         :root {
-            --color: black;
-            --background: #f5f5f5;
-            --card-background: white;
-            --border-color: #ddd;
-            --header-background: #FCFF74;
-            --header-text: black;
-            --shadow-color: rgba(0, 0, 0, 0.1);
-            --metric-value-color: black;
-            --error-color: #dc3545;
-            --success-color: #28a745;
-            --warning-color: #b58900;
-            --table-header-bg: #f8f9fa;
-            --table-hover-bg: #f1f1f1;
-            --btn-primary-bg: black;
-            --btn-primary-color: white;
+            color-scheme: light;
+            --color: #161517;
+            --muted: #53575f;
+            --background: #f6f7f9;
+            --card-background: #ffffff;
+            --surface-hover: #f0f1f3;
+            --border-color: #d9dbe0;
+            --header-background: #ffffff;
+            --header-text: #161517;
+            --shadow-color: rgba(0, 0, 0, 0.06);
+            --metric-value-color: #161517;
+            --error-color: #b3261e;
+            --success-color: #146c2e;
+            --warning-color: #8a4b00;
+            --table-header-bg: #f6f7f9;
+            --table-hover-bg: #f0f1f3;
+            /* Buttons, as in the SQL Console: the main action is black, the others are outlined. */
+            --btn-primary-bg: #302e32;
+            --btn-primary-color: #ffffff;
+            --btn-primary-hover: #43464c;
+            --btn-primary-active: #161517;
+            --btn-primary-border: #302e32;
+            --border-hover: #c3c6cc;
+            --pressed: #e6e7ea;
+            --accent-border: #c7cc00;
+            --focus: #1d5fd6;
         }
         [data-theme="dark"] {
-            --color: white;
-            --background: #151C2C;
-            --card-background: #1b2834;
-            --border-color: #444;
-            --header-background: #2a2a2a;
-            --header-text: #FCFF74;
+            color-scheme: dark;
+            --color: #f2f2f2;
+            --muted: #b3b6bd;
+            --background: #1f1f1c;
+            --card-background: #282828;
+            --surface-hover: #323232;
+            --border-color: #414141;
+            --header-background: #282828;
+            --header-text: #f2f2f2;
             --shadow-color: rgba(0, 0, 0, 0.3);
-            --metric-value-color: #FCFF74;
-            --error-color: #F66;
-            --success-color: #4ade80;
-            --warning-color: #facc15;
-            --table-header-bg: #2a3f5f;
-            --table-hover-bg: #2a3f5f;
-            --btn-primary-bg: #FCFF74;
-            --btn-primary-color: black;
+            --metric-value-color: #faff69;
+            --error-color: #ff9b94;
+            --success-color: #7ee39a;
+            --warning-color: #ffc078;
+            --table-header-bg: #232320;
+            --table-hover-bg: #323232;
+            --btn-primary-border: #53575f;
+            --border-hover: #53575f;
+            --pressed: #3a3a36;
+            --accent-border: #faff69;
+            --focus: #8ab4ff;
         }
         * {
             box-sizing: border-box;
         }
         body {
-            font-family: Liberation Sans, DejaVu Sans, sans-serif;
+            font-family: Inter, -apple-system, "Segoe UI", Roboto, "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.45;
             margin: 0;
             padding: 0;
             background: var(--background);
@@ -54,23 +75,36 @@
         .header {
             background: var(--header-background);
             color: var(--header-text);
-            padding: 1rem 2rem;
+            padding: 0.6rem 1rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            box-shadow: 0 2px 4px var(--shadow-color);
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
             position: sticky;
             top: 0;
             z-index: 100;
         }
         .header h1 {
             margin: 0;
-            font-size: 1.5rem;
+            font-size: 1rem;
+            font-weight: 600;
         }
         .controls {
             display: flex;
-            gap: 1rem;
+            flex-wrap: wrap;
+            gap: 0.5rem;
             align-items: center;
+        }
+        .controls input {
+            height: 2rem;
+            box-sizing: border-box;
+            font: inherit;
+        }
+        :focus-visible {
+            outline: 2px solid var(--focus);
+            outline-offset: 1px;
         }
         .connection-params {
             display: flex;
@@ -90,7 +124,8 @@
         }
         .connection-params input:focus {
             outline: none;
-            border-color: var(--btn-primary-bg);
+            border-color: var(--focus);
+            box-shadow: 0 0 0 1px var(--focus);
         }
         #url {
             width: 350px;
@@ -99,28 +134,43 @@
             width: 120px;
         }
         .btn {
-            padding: 0.5rem 1rem;
-            border: none;
+            height: 2rem;
+            padding: 0 0.8rem;
+            border: 1px solid var(--border-color);
             border-radius: 4px;
             cursor: pointer;
-            font-size: 0.9rem;
-            transition: opacity 0.2s;
-        }
-        .btn:hover {
-            opacity: 0.8;
+            font: inherit;
+            font-weight: 500;
         }
         .btn-primary {
             background: var(--btn-primary-bg);
             color: var(--btn-primary-color);
+            border-color: var(--btn-primary-border);
+            font-weight: 600;
+        }
+        .btn-primary:hover {
+            background: var(--btn-primary-hover);
+            border-color: var(--btn-primary-hover);
+        }
+        .btn-primary:active {
+            background: var(--btn-primary-active);
+            border-color: var(--btn-primary-active);
         }
         .btn-secondary {
-            background: var(--border-color);
+            background: var(--card-background);
             color: var(--color);
+        }
+        .btn-secondary:hover {
+            background: var(--surface-hover);
+            border-color: var(--border-hover);
+        }
+        .btn-secondary:active, .theme-toggle:active {
+            background: var(--pressed);
         }
         .container {
             max-width: 90vw;
             margin: 0 auto;
-            padding: 2rem;
+            padding: 1.25rem 1rem;
         }
         .error {
             background: var(--error-color);
@@ -152,19 +202,19 @@
         .metric-card {
             background: var(--card-background);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 1.5rem;
-            box-shadow: 0 2px 4px var(--shadow-color);
+            border-radius: 4px;
+            padding: 1rem 1.25rem;
         }
         .metric-label {
-            font-size: 0.85rem;
+            font-size: 0.75rem;
             text-transform: uppercase;
-            opacity: 0.7;
-            margin-bottom: 0.5rem;
+            letter-spacing: 0.04em;
+            color: var(--muted);
+            margin-bottom: 0.35rem;
         }
         .metric-value {
-            font-size: 1.5rem;
-            font-weight: bold;
+            font-size: 1.45rem;
+            font-weight: 600;
             color: var(--metric-value-color);
         }
         .metric-unit {
@@ -175,17 +225,16 @@
         .section {
             background: var(--card-background);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 1.5rem;
+            border-radius: 4px;
+            padding: 1.25rem;
             margin-bottom: 1rem;
-            box-shadow: 0 2px 4px var(--shadow-color);
         }
         .section-title {
-            font-size: 1.2rem;
-            font-weight: bold;
-            margin-bottom: 1rem;
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
             padding-bottom: 0.5rem;
-            border-bottom: 2px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
         }
         table {
             width: 100%;
@@ -199,7 +248,9 @@
         }
         th {
             background: var(--table-header-bg);
-            font-weight: bold;
+            color: var(--muted);
+            font-size: 0.8rem;
+            font-weight: 600;
             position: sticky;
             top: 0;
         }
@@ -228,26 +279,28 @@
         }
         .tabs {
             display: flex;
-            gap: 0.5rem;
+            flex-wrap: wrap;
+            gap: 0.15rem;
             margin-bottom: 1rem;
-            border-bottom: 2px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
         }
         .tab {
-            padding: 0.75rem 1.5rem;
+            padding: 0.55rem 0.9rem;
+            margin-bottom: -1px;
             cursor: pointer;
             border: none;
             background: none;
-            color: var(--color);
-            font-size: 1rem;
-            border-bottom: 3px solid transparent;
-            transition: border-color 0.2s;
+            color: var(--muted);
+            font: inherit;
+            border-bottom: 2px solid transparent;
         }
         .tab:hover {
-            border-bottom-color: var(--color);
+            color: var(--color);
         }
         .tab.active {
-            border-bottom-color: var(--color);
-            font-weight: bold;
+            color: var(--color);
+            border-bottom-color: var(--accent-border);
+            font-weight: 600;
         }
         .tab-content {
             display: none;
@@ -277,19 +330,37 @@
             white-space: pre;
         }
         .theme-toggle {
-            background: none;
-            border: 1px solid white;
-            color: white;
-            padding: 0.5rem;
+            background: var(--card-background);
+            border: 1px solid var(--border-color);
+            color: var(--header-text);
+            width: 2rem;
+            height: 2rem;
+            padding: 0;
             border-radius: 4px;
             cursor: pointer;
-            display: flex;
+            display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
+            justify-content: center;
+        }
+        .theme-toggle:hover {
+            background: var(--surface-hover);
+            border-color: var(--border-hover);
+        }
+        #theme-icon, #theme-icon svg {
+            display: inline-flex;
+            width: 1.1rem;
+            height: 1.1rem;
+        }
+        #theme-icon svg {
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
         }
         .timestamp {
             font-size: 0.85rem;
-            opacity: 0.7;
+            color: var(--muted);
         }
         .toggle-switch {
             position: relative;
@@ -343,8 +414,8 @@
             flex: 1;
             background: var(--card-background);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 1.5rem;
+            border-radius: 4px;
+            padding: 1.25rem;
         }
         .heatmap-container.standalone {
             margin-bottom: 2rem;
@@ -458,8 +529,8 @@
                 <input type="number" id="refresh-interval" min="0" value="60" title="Set to 0 to disable auto-refresh" style="width: 60px; padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; background: var(--card-background); color: var(--color);" oninput="debouncedUpdateRefreshInterval()" onchange="updateRefreshInterval()">
             </div>
             <button class="btn btn-primary" onclick="event.preventDefault(); loadStats(true); return false;">Refresh</button>
-            <button class="theme-toggle" onclick="toggleTheme()">
-                <span id="theme-icon">🌙</span>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme">
+                <span id="theme-icon"></span>
             </button>
         </div>
     </div>
@@ -526,7 +597,7 @@
                         <div class="section-title" style="margin-bottom: 0;">Raw Statistics</div>
                         <div style="display: flex; gap: 0.5rem;">
                             <button class="btn btn-secondary" onclick="copyRawStats()">Copy All</button>
-                            <button class="btn btn-secondary" onclick="saveRawStats()">💾 Save</button>
+                            <button class="btn btn-secondary" onclick="saveRawStats()">Save</button>
                         </div>
                     </div>
                     <pre id="raw-stats"></pre>
@@ -929,7 +1000,7 @@
             const currentTheme = html.getAttribute('data-theme');
             const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
             html.setAttribute('data-theme', newTheme);
-            document.getElementById('theme-icon').textContent = newTheme === 'dark' ? '☀️' : '🌙';
+            setThemeIcon(newTheme);
             localStorage.setItem('theme', newTheme);
         }
         function switchTab(tabName, evt) {
@@ -1360,7 +1431,7 @@
             const container = document.getElementById('memory-overview');
             const total = stats.resident || 1;
             const items = [
-                { label: 'Allocated', value: stats.allocated || 0, color: '#FCFF74' },
+                { label: 'Allocated', value: stats.allocated || 0, color: '#faff69' },
                 { label: 'Active', value: stats.active || 0, color: '#ffd700' },
                 { label: 'Dirty', value: stats.dirty || 0, color: '#ff9800' },
                 { label: 'Metadata', value: stats.metadata || 0, color: '#9c27b0' }
@@ -3017,10 +3088,16 @@ SETTINGS jemalloc_enable_profiler = 1,
                 loading.style.display = 'none';
             }
         }
-        // Initialize theme
-        const savedTheme = localStorage.getItem('theme') || 'light';
+        /// The button offers the other theme, drawn as a line icon (emoji are missing on some systems).
+        function setThemeIcon(theme) {
+            document.getElementById('theme-icon').innerHTML = theme === 'dark'
+                ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'
+                : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>';
+        }
+        // Initialize theme: the one chosen in the other web UI pages, otherwise the system preference (not stored).
+        const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
         document.documentElement.setAttribute('data-theme', savedTheme);
-        document.getElementById('theme-icon').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+        setThemeIcon(savedTheme);
         // Auto-refresh interval management
         let refreshIntervalId = null;
         let debounceTimer = null;
