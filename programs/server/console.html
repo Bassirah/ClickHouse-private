@@ -45,6 +45,14 @@
     --accent-text: #161517;
     --accent-border: #c7cc00;
     --selected: #ececec;
+    /* Buttons, as in the SQL Console (click-ui): the main action is the black `primary` button, the others
+       are outlined. Shared by the built-in web UI pages. */
+    --primary-bg: #302e32;
+    --primary-hover: #43464c;
+    --primary-active: #161517;
+    --primary-text: #ffffff;
+    --primary-border: #302e32;
+    --border-hover: #c3c6cc;
     --focus: #1d5fd6;
     --danger: #b3261e;
     --danger-bg: #fdecea;
@@ -74,6 +82,8 @@
     --accent-text: #1f1f1c;
     --accent-border: #faff69;
     --selected: #3a3a36;
+    --primary-border: #53575f;
+    --border-hover: #53575f;
     --focus: #8ab4ff;
     --danger: #ff9b94;
     --danger-bg: #3d1f1d;
@@ -105,7 +115,7 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 .skip-link
 {
     position: absolute; left: 0.5rem; top: -3rem; z-index: 100; padding: 0.5rem 1rem;
-    background: var(--accent); color: var(--accent-text); border-radius: 4px;
+    background: var(--primary-bg); color: var(--primary-text); border-radius: 4px;
 }
 .skip-link:focus { top: 0.5rem; }
 
@@ -118,16 +128,19 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
     min-height: 2.25rem; padding: 0.35rem 0.9rem; border-radius: 4px; cursor: pointer;
     border: 1px solid var(--border); background: var(--surface); text-decoration: none; white-space: nowrap;
 }
-.button:hover { background: var(--surface-hover); }
-.button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent-border); font-weight: 600; }
-.button.primary:hover { filter: brightness(0.95); }
+.button:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+.button:active { background: var(--selected); }
+.button.primary { background: var(--primary-bg); color: var(--primary-text); border-color: var(--primary-border); font-weight: 600; }
+.button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+.button.primary:active { background: var(--primary-active); border-color: var(--primary-active); }
 .button:disabled { cursor: not-allowed; opacity: 0.6; }
 .icon-button
 {
     display: inline-flex; align-items: center; justify-content: center; width: 2.25rem; height: 2.25rem;
     border: 1px solid transparent; border-radius: 4px; background: none; cursor: pointer; padding: 0;
 }
-.icon-button:hover { background: var(--surface-hover); border-color: var(--border); }
+.icon-button:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+.icon-button:active { background: var(--selected); }
 
 .message { padding: 0.65rem 0.8rem; border-radius: 4px; border: 1px solid; overflow-wrap: anywhere; }
 .message.error { color: var(--danger); background: var(--danger-bg); border-color: currentColor; }
@@ -271,6 +284,7 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 }
 #panel-title { font-size: 1rem; font-weight: 600; }
 #panel-bar .spacer { flex: 1; }
+#console-toggle { padding: 0.35rem 0.6rem; gap: 0.3rem; }
 #panel-notice { margin: 0.6rem 0.75rem 0; }
 #panel-state { overflow-y: auto; padding: 1.5rem; }
 #panel-state > div { max-width: 46rem; display: flex; flex-direction: column; gap: 0.9rem; }
@@ -336,6 +350,8 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .button.small { min-height: 1.9rem; padding: 0.15rem 0.6rem; font-size: 0.85rem; }
 .button.danger { color: var(--danger); border-color: currentColor; }
 .button.danger.primary { background: var(--danger); color: var(--bg); border-color: var(--danger); }
+.button.danger.primary:hover { background: var(--danger); border-color: var(--danger); filter: brightness(0.92); }
+.button.danger:hover:not(.primary) { background: var(--danger-bg); border-color: currentColor; }
 .actions-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 pre.code
 {
@@ -396,6 +412,12 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
     .kv { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
     .kv dd { margin-bottom: 0.4rem; }
 }
+
+/* Focus mode: an open component gets the whole window, with its own navigation. The console header and
+   sidebar come back with the arrow in the panel bar (`#console-toggle`). After the media query, so that it
+   also applies to narrow screens. */
+#shell.focus, #shell.focus.collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "main"; }
+#shell.focus #topbar, #shell.focus #sidebar, #shell.focus #sidebar-backdrop { display: none; }
 </style>
 </head>
 <body>
@@ -446,6 +468,7 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
         <div id="home-view" hidden></div>
         <div id="panel-view" hidden>
             <div id="panel-bar">
+                <button type="button" class="button" id="console-toggle" aria-controls="sidebar" hidden></button>
                 <span id="panel-icon"></span>
                 <h1 id="panel-title" tabindex="-1"></h1>
                 <span id="panel-badges"></span>
@@ -489,6 +512,7 @@ const ICONS = {
     external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
     collapse: '<path d="M15 6l-6 6 6 6"/>',
+    maximize: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
     moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
     switch: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
@@ -527,8 +551,9 @@ const CATEGORIES = [
     {id: 'home', title: 'Home'},
     {id: 'workspace', title: 'Workspace'},
     {id: 'diagnostics', title: 'Diagnostics'},
-    {id: 'resources', title: 'Resources'},
     {id: 'administration', title: 'Administration'},
+    /// Last: links to documentation and other sites, at the bottom of the sidebar.
+    {id: 'resources', title: 'Resources'},
 ];
 
 /// The navigation registry: the home page cards and the sidebar are generated from it.
@@ -1055,6 +1080,8 @@ function endSession() {
     }
     session = null;
     admin_page = null;
+    console_navigation_for = null;
+    leaveFocusMode();
     closeDialog();
     $('admin-view').replaceChildren();
     $('login-password').value = '';
@@ -1224,10 +1251,11 @@ const STATUS_BADGES = {
 };
 
 /// Destinations not listed in the sidebar and on the home page: administration pages the user cannot
-/// use, and components the console policy does not allow. Their routes still explain why.
+/// use, components the console policy does not allow, and components the user has no privileges for
+/// (their probe query is denied). Their routes still explain why, and offer to open restricted ones.
 function isListed(c) {
     const state = componentState(c);
-    return state.status !== 'hidden' && state.status !== 'denied';
+    return state.status !== 'hidden' && state.status !== 'denied' && state.status !== 'restricted';
 }
 
 function statusBadge(state) {
@@ -1261,8 +1289,11 @@ function showShell(route) {
     $('skip-link').hidden = false;
     renderConnectionStatus();
     renderSidebar();
+    /// The console navigation shown with the arrow stays only for the component it was shown on.
+    if (route.name !== 'component' || route.id !== console_navigation_for) console_navigation_for = null;
 
     if (route.name === 'not-found') {
+        leaveFocusMode();
         hideAllFrames();
         $('home-view').hidden = true;
         $('admin-view').hidden = true;
@@ -1278,6 +1309,7 @@ function showShell(route) {
     document.title = `${route.sub ? route.sub + ' · ' : ''}${c.title} · ClickHouse Console`;
     if (c.kind !== 'admin') admin_page = null;
     if (c.kind === 'home') {
+        leaveFocusMode();
         hideAllFrames();
         $('panel-view').hidden = true;
         $('admin-view').hidden = true;
@@ -1285,6 +1317,7 @@ function showShell(route) {
         renderHome();
         focusHeading($('home-view').querySelector('h1'));
     } else if (c.kind === 'admin') {
+        leaveFocusMode();
         hideAllFrames();
         $('panel-view').hidden = true;
         $('home-view').hidden = true;
@@ -1632,6 +1665,45 @@ function renderCard(c) {
 
 /// --- Panels ---
 
+/// --- Focus mode ---
+
+/// While a component's page is shown, the console header and sidebar are hidden, so the component has
+/// the whole window and its own navigation. The arrow at the start of the panel bar brings the console
+/// navigation back; it then stays visible for that component until another component is selected.
+/// Pages of the console itself (Home, Administration, and the states of components that have no page)
+/// always show the console navigation.
+let console_navigation_for = null;
+
+function setFocusMode(on) {
+    const shell = $('shell');
+    if (on) closeMobileSidebar(false);
+    const changed = shell.classList.contains('focus') !== on;
+    shell.classList.toggle('focus', on);
+    const toggle = $('console-toggle');
+    toggle.replaceChildren(on ? icon('collapse') : icon('maximize'), on ? document.createTextNode('Console') : visuallyHidden('Hide the console navigation'));
+    toggle.title = on ? 'Show the console navigation (header and sidebar)' : 'Hide the console navigation: give the component the whole window';
+    toggle.setAttribute('aria-expanded', String(!on));
+    if (!changed) return;
+    /// The terminal sizes itself to its frame; tell it when the frame size changes.
+    const terminal = frames.get('terminal');
+    if (terminal && terminal.loaded && !terminal.host.hidden) postToTerminal(terminal, {type: 'webterminal-refit', focus: false});
+}
+
+/// Shows the console navigation, without the arrow: for the pages of the console itself.
+function leaveFocusMode() {
+    $('console-toggle').hidden = true;
+    setFocusMode(false);
+}
+
+$('console-toggle').addEventListener('click', () => {
+    const route = parseRoute();
+    const on = !$('shell').classList.contains('focus');
+    console_navigation_for = on ? null : route.id;
+    setFocusMode(on);
+    /// Keep the keyboard focus on the arrow, which stays in place in both modes.
+    $('console-toggle').focus();
+});
+
 function hideAllFrames() {
     for (const [id, entry] of frames) {
         if (entry.component.keep_alive) entry.host.hidden = true;
@@ -1655,7 +1727,10 @@ function renderPanelBar(c, title) {
     $('panel-standalone').hidden = true;
 }
 
+/// A page of the console in place of a component (checking, restricted, not configured, ...): the
+/// component has no navigation of its own, so the console navigation stays.
 function renderPanelState(title, body, actions) {
+    leaveFocusMode();
     const box = $('panel-state');
     const inner = document.createElement('div');
     const heading = document.createElement('h2');
@@ -1705,6 +1780,11 @@ function showPanel(c) {
     renderPanelBar(c, c.title);
     $('panel-state').hidden = true;
 
+    if (state.status === 'denied') {
+        renderUnavailableState(c, state);
+        renderPanelNotice();
+        return;
+    }
     if (c.kind === 'link' || state.external) {
         renderExternalState(c, state);
         renderPanelNotice();
@@ -1794,6 +1874,9 @@ function openFrame(c) {
     let entry = frames.get(c.id);
     if (!entry) entry = createFrame(c);
     entry.host.hidden = false;
+    $('console-toggle').hidden = false;
+    setFocusMode(console_navigation_for !== c.id);
+    if (c.integration === 'clickstack') showClickStackNotice();
     $('panel-reload').hidden = false;
     const standalone = $('panel-standalone');
     standalone.href = frameSource(c);
@@ -1818,6 +1901,7 @@ function createFrame(c) {
     host.append(iframe, overlay);
     const entry = {component: c, host, iframe, overlay, loaded: false, notice: null, session};
     frames.set(c.id, entry);
+    if (c.integration === 'clickstack') hideClickStackBanner();
     iframe.addEventListener('load', () => onFrameLoad(entry));
     iframe.src = frameSource(c);
     $('frames').append(host);
@@ -1927,8 +2011,9 @@ window.addEventListener('message', e => {
     const entry = frames.get('terminal');
     if (!entry || e.source !== entry.iframe.contentWindow) return;
     if (e.data.type === 'webterminal-escape') {
-        /// The terminal captures every key; Escape is how keyboard users leave it.
-        const link = $('sidebar').querySelector('[aria-current="page"]');
+        /// The terminal captures every key; Escape is how keyboard users leave it: to the sidebar, or to
+        /// the arrow that shows it in focus mode.
+        const link = $('shell').classList.contains('focus') ? $('console-toggle') : $('sidebar').querySelector('[aria-current="page"]');
         if (link) link.focus();
     } else if (e.data.type === 'webterminal-closed') {
         destroyFrame('terminal');
@@ -1937,6 +2022,55 @@ window.addEventListener('message', e => {
         }
     }
 });
+
+/// --- Integration: ClickStack ---
+
+/// ClickStack shows a banner across its pages ("This is not recommended for production use ...") until it
+/// is closed with its button, which stores `"closed"` (JSON) under this key of the local storage of the
+/// origin. The console closes it the same way, before ClickStack loads, and shows the message in a popup
+/// instead, so that the banner does not take space in the panel.
+const CLICKSTACK_BANNER_KEY = 'clickstack-banner-state';
+const CLICKSTACK_NOTICE_KEY = 'console.clickstack-notice';
+const CLICKSTACK_DOCS_URL = 'https://clickhouse.com/docs/use-cases/observability/clickstack/getting-started';
+
+function hideClickStackBanner() {
+    try {
+        localStorage.setItem(CLICKSTACK_BANNER_KEY, JSON.stringify('closed'));
+    } catch (e) {
+        /// Storage is disabled: ClickStack cannot store its own state either, and shows the banner.
+    }
+}
+
+/// Shows the message of the banner the first time ClickStack is opened after signing in, unless the user
+/// asked not to see it again.
+function showClickStackNotice() {
+    if (session.clickstack_notice_shown) return;
+    session.clickstack_notice_shown = true;
+    let dismissed = false;
+    try {
+        dismissed = localStorage.getItem(CLICKSTACK_NOTICE_KEY) === 'dismissed';
+    } catch (e) {
+        /// Storage is disabled: show the message on each sign-in.
+    }
+    if (dismissed) return;
+    const again = checkbox('Do not show this again', false);
+    const docs = h('a', {href: CLICKSTACK_DOCS_URL, target: '_blank', rel: 'noopener noreferrer'}, 'ClickStack Docs', visuallyHidden(' (opens in a new tab)'));
+    const ok = button('OK', closeDialog, {className: 'primary'});
+    ok.autofocus = true;
+    openDialog('About ClickStack in ClickHouse', [
+        paragraph('This is not recommended for production use and is lacking core ClickStack features such as alerts and saved searches.'),
+        h('p', {}, 'For a proper experience, visit the ', docs, '.'),
+        h('p', {className: 'note'}, 'ClickStack uses its own connection settings: enter them in ClickStack on first use.'),
+        again.element,
+    ], [ok], {onclose: () => {
+        if (!again.input.checked) return;
+        try {
+            localStorage.setItem(CLICKSTACK_NOTICE_KEY, 'dismissed');
+        } catch (e) {
+            /// Not remembered when storage is disabled.
+        }
+    }});
+}
 
 /// --- Integration: SQL Console ---
 
@@ -2376,11 +2510,20 @@ const COMPONENT_NATIVE = {
     'processors-profile': {view_data: {privileges: [['SELECT', 'system', 'processors_profile_log'], ['SELECT', 'system', 'query_log']]}},
     reference: {view_data: {privileges: [['SELECT', 'system', 'documentation']]}},
 };
+for (const c of COMPONENTS.filter(c => c.kind === 'link')) {
+    COMPONENT_NATIVE[c.id] = {integration: 'An external website. The policy only lists or hides the link in the console: '
+        + 'anyone who knows the address can still visit it.'};
+}
 
-/// The components the policy governs: the panels. Home, the links, and the administration pages are not
-/// governed: the links are public, and the administration pages follow the privileges of the user, so a
-/// policy mistake cannot lock the platform administrators out of this page.
-const POLICY_COMPONENTS = COMPONENTS.filter(c => c.kind === 'panel');
+/// The components the policy governs: the panels and the links of Resources. Home and the administration
+/// pages are not governed: the administration pages follow the privileges of the user, so a policy mistake
+/// cannot lock the platform administrators out of this page.
+const POLICY_COMPONENTS = COMPONENTS.filter(c => c.kind === 'panel' || c.kind === 'link');
+
+/// The capabilities that apply to a component: a link can only be opened.
+function capabilitiesOf(c) {
+    return c.kind === 'link' ? CAPABILITIES.slice(0, 1) : CAPABILITIES;
+}
 
 async function loadPolicy(current) {
     const db = current.admin.db;
@@ -2396,12 +2539,17 @@ async function loadPolicy(current) {
 }
 
 /// The capabilities that the policy rows give to a user with the given roles: for each component and
-/// capability, whether it is allowed and which rows allow it. Rules only allow; no row means not allowed.
+/// capability, whether it is allowed and which rows allow it. Rules only allow: for a component that has
+/// rules, no rule for the user means not allowed. A component that no rule mentions yet, such as one added
+/// to the console after the policy was set up, is not governed and stays open to everyone.
 function effectivePolicy(rows, user, roles) {
+    const governed = new Set(rows.map(row => row.component));
     const result = {};
     for (const c of POLICY_COMPONENTS) {
         result[c.id] = {};
-        for (const capability of CAPABILITIES) result[c.id][capability.key] = {allowed: false, sources: []};
+        for (const capability of CAPABILITIES) {
+            result[c.id][capability.key] = governed.has(c.id) ? {allowed: false, sources: []} : {allowed: true, sources: ['no rules yet (open to everyone)']};
+        }
     }
     for (const row of rows) {
         const applies = row.subject_type === 'all' || (row.subject_type === 'user' && row.subject === user)
@@ -2421,10 +2569,12 @@ function effectivePolicy(rows, user, roles) {
 /// The policy decision for a panel of the signed-in user, or null when the panel is not restricted by it.
 /// When the policy exists but cannot be read, the governed panels are not listed (fail closed).
 function policyDecision(c) {
-    if (!session || c.kind !== 'panel') return null;
+    if (!session || (c.kind !== 'panel' && c.kind !== 'link')) return null;
     const policy = session.admin.policy;
     const href = componentPath(c.id);
-    if (policy.state === 'checking') return {status: 'checking', action: 'Open', href};
+    /// While the policy loads, panels wait; links to public sites stay usable, and disappear if the policy
+    /// turns out to hide them.
+    if (policy.state === 'checking') return c.kind === 'link' ? null : {status: 'checking', action: 'Open', href};
     if (policy.state === 'unreadable' || policy.state === 'error') {
         return {status: 'denied', action: 'Details', href,
             reason: `The console access policy could not be read (${policy.message}), so the components it governs are not shown.`};
@@ -3885,6 +4035,7 @@ function renderUserComponents(panel, ctx) {
         return dataTable([
             {title: 'Component', render: c => c.title},
             ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
+                if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note'}, 'n/a');
                 const allowed = at_login[c.id][capability.key];
                 const with_set_role = all[c.id][capability.key];
                 if (allowed.allowed) return badge('Allowed', 'ok', `By ${allowed.sources.join(', ')}.`);
@@ -4267,6 +4418,7 @@ function renderRoleComponents(panel, ctx) {
     put(box, dataTable([
         {title: 'Component', render: c => c.title},
         ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
+            if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note'}, 'n/a');
             const row = rows.find(r => r.component === c.id);
             return row && row[capability.key] ? badge('Allowed', 'ok') : '—';
         }})),
@@ -4447,7 +4599,7 @@ async function setupDialog() {
         const quoted = quoteIdentifier(db);
         const correlation_id = crypto.randomUUID();
         const seed = POLICY_COMPONENTS.map(component => JSON.stringify({subject_type: 'all', subject: '', component: component.id,
-            open: true, view_data: true, run_queries: true, administer: false}));
+            open: true, view_data: component.kind === 'panel', run_queries: component.kind === 'panel', administer: false}));
         const steps = [
             {description: `Create the database ${db}`, sql: `CREATE DATABASE IF NOT EXISTS ${quoted}`},
             ...Object.entries(ADMIN_TABLES).map(([table, ddl]) => ({description: `Create the table ${db}.${table}`,
@@ -4504,13 +4656,21 @@ function renderPolicyMatrix(page, container, subject) {
     const rows = admin.policy.rows || [];
     const editable = admin.can.write_policy;
     const current = new Map(rows.filter(row => row.subject_type === subject.type && row.subject === subject.name).map(row => [row.component, row]));
+    /// Components that no rule mentions are open to everyone: for all users, show them allowed, so that
+    /// saving turns that into a rule. For a role or user, nothing is set for them yet.
+    const governed = new Set(rows.map(row => row.component));
+    const initially = (c, key) => {
+        const row = current.get(c.id);
+        if (row) return !!row[key];
+        return subject.type === 'all' && !governed.has(c.id) && (key === 'open' || (c.kind === 'panel' && key !== 'administer'));
+    };
     const boxes = new Map();
     const native_cells = new Map();
     const table = dataTable([
-        {title: 'Component', render: c => h('strong', {}, c.title)},
+        {title: 'Component', render: c => [h('strong', {}, c.title), h('div', {className: 'note'}, CATEGORIES.find(category => category.id === c.category).title)]},
         ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
-            const row = current.get(c.id);
-            const input = h('input', {type: 'checkbox', checked: !!(row && row[capability.key]), disabled: !editable,
+            if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note', title: 'Does not apply: a link can only be opened.'}, '—');
+            const input = h('input', {type: 'checkbox', checked: initially(c, capability.key), disabled: !editable,
                 'aria-label': `${capability.title} ${c.title}`});
             input.addEventListener('change', () => {
                 /// The other capabilities need Open, and Open is cleared together with them.
@@ -4521,7 +4681,9 @@ function renderPolicyMatrix(page, container, subject) {
             boxes.set(c.id, {...boxes.get(c.id), [capability.key]: input});
             return input;
         }})),
-        {title: 'Enforced outside the console by', className: 'enforced', render: c => componentEnforcement(c)},
+        {title: 'Enforced outside the console by', className: 'enforced', render: c => [
+            governed.has(c.id) ? null : h('div', {}, badge('No rules yet: open to everyone', 'warn')),
+            componentEnforcement(c)]},
         ...(subject.type === 'all' ? [] : [{title: 'Native privileges', className: 'enforced', render: c => {
             const cell = h('div', {}, h('span', {className: 'note'}, '…'));
             native_cells.set(c.id, cell);
@@ -4533,10 +4695,10 @@ function renderPolicyMatrix(page, container, subject) {
         const changes = [];
         for (const c of POLICY_COMPONENTS) {
             const set = boxes.get(c.id);
-            const values = Object.fromEntries(CAPABILITIES.map(capability => [capability.key, set[capability.key].checked]));
-            const before = current.get(c.id);
-            const unchanged = before ? CAPABILITIES.every(capability => !!before[capability.key] === values[capability.key])
-                : CAPABILITIES.every(capability => !values[capability.key]);
+            const values = Object.fromEntries(CAPABILITIES.map(capability => [capability.key, !!(set[capability.key] && set[capability.key].checked)]));
+            /// Compared with what the matrix showed at first, which for a component without rules is the
+            /// default (open to everyone for all users).
+            const unchanged = CAPABILITIES.every(capability => (initially(c, capability.key) && capabilitiesOf(c).includes(capability)) === values[capability.key]);
             if (!unchanged) changes.push({component: c, values});
         }
         if (!changes.length) {

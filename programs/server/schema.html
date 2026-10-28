@@ -5,24 +5,38 @@
     <title>ClickHouse Schema Visualizer</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1NCIgaGVpZ2h0PSI0OCIgdmlld0JveD0iMCAwIDExIDEwIj48c3R5bGU+LmJne2ZpbGw6I2ZmMH0ub3tmaWxsOiMwMDB9PC9zdHlsZT48cmVjdCBjbGFzcz0iYmciIHg9IjAiIHk9IjAiIHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiLz48cGF0aCBkPSJNMSwxIGgxIHY4IGgtMSB6IiBjbGFzcz0ibyIvPjxwYXRoIGQ9Ik0zLDEgaDEgdjggaC0xIHoiIGNsYXNzPSJvIi8+PHBhdGggZD0iTTUsMSBoMSB2OCBoLTEgeiIgY2xhc3M9Im8iLz48cGF0aCBkPSJNNywxIGgxIHY4IGgtMSB6IiBjbGFzcz0ibyIvPjxwYXRoIGQ9Ik05LDQuMjUgaDEgdjEuNSBoLTEgeiIgY2xhc3M9Im8iLz48L3N2Zz4K">
     <style>
+        /* The design of the other built-in web UIs: the dark theme has the colors of the SQL Console (`/ui`),
+           the light theme those of the web console (`/console`). */
         :root {
             color-scheme: light;
-            --color: black;
-            --background: #f5f5f5;
-            --card-background: white;
-            --border-color: #ddd;
-            --header-background: #FCFF74;
-            --header-text: black;
-            --shadow-color: rgba(0, 0, 0, 0.1);
+            --color: #161517;
+            --background: #f6f7f9;
+            --card-background: #ffffff;
+            --surface-hover: #f0f1f3;
+            --border-color: #d9dbe0;
+            --header-background: #ffffff;
+            --header-text: #161517;
+            --focus: #1d5fd6;
+            --accent-text: #161517;
+            --accent-border: #c7cc00;
+            /* Buttons, as in the SQL Console: the main action is black, the others are outlined. */
+            --primary-bg: #302e32;
+            --primary-hover: #43464c;
+            --primary-active: #161517;
+            --primary-text: #ffffff;
+            --primary-border: #302e32;
+            --border-hover: #c3c6cc;
+            --pressed: #e6e7ea;
+            --shadow-color: rgba(0, 0, 0, 0.06);
             --error-color: #dc3545;
             --success-color: #28a745;
             --warning-color: #b58900;
-            --muted: #6A6A6A;
-            --table-header-bg: #f8f9fa;
-            --table-hover-bg: #fffce0;
-            --btn-primary-bg: black;
-            --btn-primary-color: white;
-            --accent: #FCFF74;
+            --muted: #53575f;
+            --table-header-bg: #f6f7f9;
+            --table-hover-bg: #fdfee0;
+            --btn-primary-bg: #faff69;
+            --btn-primary-color: #161517;
+            --accent: #faff69;
             --accent-hover: #f0f24a;
             /* Engine palette — yellow stays the brand, supporting colors stay distinct enough
                to scan a complex graph at a glance. */
@@ -48,27 +62,34 @@
             --link-dict: #0277BD;
             --link-distributed: #E65100;
             --link-highlight: #B58900;
-            --db-bg: #FFFEF0;
-            --db-border: #E0D060;
+            --db-bg: #fbfcf0;
+            --db-border: #c7cc00;
         }
         [data-theme="dark"] {
             color-scheme: dark;
-            --color: white;
-            --background: #151C2C;
-            --card-background: #1b2834;
-            --border-color: #444;
-            --header-background: #2a2a2a;
-            --header-text: #FCFF74;
+            --color: #f2f2f2;
+            --background: #1f1f1c;
+            --card-background: #282828;
+            --surface-hover: #323232;
+            --border-color: #414141;
+            --header-background: #282828;
+            --header-text: #f2f2f2;
+            --focus: #8ab4ff;
+            --accent-text: #1f1f1c;
+            --accent-border: #faff69;
+            --primary-border: #53575f;
+            --border-hover: #53575f;
+            --pressed: #3a3a36;
             --shadow-color: rgba(0, 0, 0, 0.3);
             --error-color: #F66;
             --success-color: #4ade80;
             --warning-color: #facc15;
-            --muted: #aaaaaa;
-            --table-header-bg: #2a3f5f;
-            --table-hover-bg: #2a3f5f;
-            --btn-primary-bg: #FCFF74;
-            --btn-primary-color: black;
-            --accent: #FCFF74;
+            --muted: #b3b6bd;
+            --table-header-bg: #232320;
+            --table-hover-bg: #323232;
+            --btn-primary-bg: #faff69;
+            --btn-primary-color: #1f1f1c;
+            --accent: #faff69;
             --accent-hover: #e8eb6a;
             --header-mt: #FCFF74;
             --header-mt-text: black;
@@ -92,8 +113,8 @@
             --link-dict: #4FC3F7;
             --link-distributed: #FF8A65;
             --link-highlight: #FCFF74;
-            --db-bg: #1d2a18;
-            --db-border: #555533;
+            --db-bg: #262620;
+            --db-border: #5c5d2a;
         }
         * { box-sizing: border-box; }
         /* Theme-aware scrollbars: `color-scheme` recolours the native scrollbars of
@@ -106,7 +127,9 @@
         ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
         html, body { height: 100%; }
         body {
-            font-family: Liberation Sans, DejaVu Sans, sans-serif;
+            font-family: Inter, -apple-system, "Segoe UI", Roboto, "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.45;
             margin: 0;
             padding: 0;
             background: var(--background);
@@ -115,11 +138,11 @@
         .header {
             background: var(--header-background);
             color: var(--header-text);
-            padding: 0.6rem 0.6rem;
+            padding: 0.6rem 1rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            box-shadow: 0 2px 4px var(--shadow-color);
+            border-bottom: 1px solid var(--border-color);
             position: sticky;
             top: 0;
             z-index: 100;
@@ -128,11 +151,12 @@
         }
         .header h1 {
             margin: 0;
-            font-size: 1.5rem;
+            font-size: 1rem;
+            font-weight: 600;
         }
         .controls {
             display: flex;
-            gap: 1rem;
+            gap: 0.5rem;
             align-items: center;
             flex-wrap: wrap;
         }
@@ -154,7 +178,12 @@
         }
         .connection-params input:focus {
             outline: none;
-            border-color: var(--btn-primary-bg);
+            border-color: var(--focus);
+            box-shadow: 0 0 0 1px var(--focus);
+        }
+        :focus-visible {
+            outline: 2px solid var(--focus);
+            outline-offset: 1px;
         }
         /* Live credential validation feedback (see `checkCredentials`). */
         #user.ok, #password.ok { border-color: var(--success-color); }
@@ -162,63 +191,88 @@
         #url { width: 320px; }
         #user, #password { width: 110px; }
         .btn {
-            padding: 0.5rem 1rem;
-            border: none;
+            height: 2rem;
+            padding: 0 0.8rem;
+            border: 1px solid var(--border-color);
             border-radius: 4px;
             cursor: pointer;
-            font-size: 0.9rem;
-            transition: opacity 0.2s;
+            font-size: 14px;
+            font-weight: 500;
             font-family: inherit;
         }
-        .btn:hover { opacity: 0.8; }
-        .btn-primary {
-            background: var(--btn-primary-bg);
-            color: var(--btn-primary-color);
+        .btn-primary, .btn-toggle.active {
+            background: var(--primary-bg);
+            color: var(--primary-text);
+            border-color: var(--primary-border);
+            font-weight: 600;
+        }
+        .btn-primary:hover, .btn-toggle.active:hover {
+            background: var(--primary-hover);
+            border-color: var(--primary-hover);
+        }
+        .btn-primary:active, .btn-toggle.active:active {
+            background: var(--primary-active);
+            border-color: var(--primary-active);
         }
         .btn-secondary {
-            background: var(--border-color);
+            background: var(--card-background);
             color: var(--color);
+        }
+        .btn-secondary:hover, .btn-toggle:hover, .theme-toggle:hover, #zoom-controls button:hover {
+            background: var(--surface-hover);
+            border-color: var(--border-hover);
+        }
+        .btn-secondary:active, .btn-toggle:active, .theme-toggle:active, #zoom-controls button:active {
+            background: var(--pressed);
         }
         .btn-toggle {
             background: var(--card-background);
             color: var(--color);
             border: 1px solid var(--border-color);
             border-radius: 4px;
-            padding: 0.45rem 0.75rem;
-            font-size: 0.85rem;
+            height: 2rem;
+            padding: 0 0.8rem;
+            font-size: 14px;
+            font-weight: 500;
             font-family: inherit;
             cursor: pointer;
-            transition: background 0.15s, color 0.15s, border-color 0.15s;
         }
-        .btn-toggle:hover { opacity: 0.85; }
-        .btn-toggle.active {
-            background: var(--btn-primary-bg);
-            color: var(--btn-primary-color);
-            border-color: var(--btn-primary-bg);
-        }
+
         .theme-toggle {
-            background: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2rem;
+            height: 2rem;
+            padding: 0;
+            background: var(--card-background);
             border: 1px solid var(--border-color);
             color: var(--header-text);
-            font-size: 1.2rem;
             cursor: pointer;
-            padding: 0.4rem 0.6rem;
             border-radius: 4px;
-            line-height: 1;
+        }
+
+        svg.icon {
+            width: 1.1rem;
+            height: 1.1rem;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
         }
 
         .container {
             max-width: 100%;
             margin: 0;
-            padding: 0.4rem 0.4rem 0.5rem;
+            padding: 1rem;
         }
         .section {
             background: var(--card-background);
             border: 1px solid var(--border-color);
-            border-radius: 6px;
-            padding: 0.5rem 0.6rem;
-            margin-bottom: 0.5rem;
-            box-shadow: 0 1px 2px var(--shadow-color);
+            border-radius: 4px;
+            padding: 0.6rem 0.75rem;
+            margin-bottom: 1rem;
         }
         .filter-row {
             display: flex;
@@ -228,19 +282,20 @@
         }
         .filter-row select,
         .filter-row input[type="text"] {
-            padding: 0.45rem 0.7rem;
+            height: 2rem;
+            padding: 0 0.6rem;
             border: 1px solid var(--border-color);
             border-radius: 4px;
-            background: var(--card-background);
+            background: var(--background);
             color: var(--color);
-            font-size: 0.85rem;
+            font-size: 14px;
             font-family: inherit;
-            box-shadow: 1px 1px 0 var(--shadow-color);
         }
         .filter-row select:focus,
         .filter-row input[type="text"]:focus {
             outline: none;
-            border-color: var(--btn-primary-bg);
+            border-color: var(--focus);
+            box-shadow: 0 0 0 1px var(--focus);
         }
         #search { min-width: 16rem; }
         #db-filter { min-width: 12rem; }
@@ -297,18 +352,17 @@
             background: var(--card-background);
             color: var(--color);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
+            border-radius: 4px;
             padding: 0;
-            box-shadow: 0 2px 4px var(--shadow-color);
             overflow: hidden;
         }
         #viewport {
             position: relative;
             overflow: auto;
             background: var(--card-background);
-            height: calc(100vh - 18rem);
+            height: calc(100vh - 16rem);
             min-height: 24rem;
-            border-radius: 8px;
+            border-radius: 4px;
         }
         #canvas-wrap {
             position: relative;
@@ -337,15 +391,14 @@
             position: absolute;
             top: 0.4rem;
             left: 0.8rem;
-            color: var(--color);
-            background: var(--header-background);
+            color: var(--accent-text);
+            background: var(--accent);
             padding: 0.05rem 0.5rem;
-            font-weight: 700;
-            font-size: 0.95rem;
+            font-weight: 600;
+            font-size: 0.9rem;
             pointer-events: auto;
             user-select: none;
-            border-radius: 3px;
-            box-shadow: 1px 1px 0 var(--shadow-color);
+            border-radius: 4px;
         }
 
         .node {
@@ -465,7 +518,7 @@
             bottom: 0;
             width: 30rem;
             background: var(--card-background);
-            border-left: 4px solid var(--header-background);
+            border-left: 1px solid var(--border-color);
             padding: 1rem 1.25rem;
             overflow-y: auto;
             z-index: 200;
@@ -481,7 +534,7 @@
             align-items: center;
             font-family: Monaco, Consolas, monospace;
             padding-bottom: 0.5rem;
-            border-bottom: 2px solid var(--header-background);
+            border-bottom: 1px solid var(--border-color);
         }
         #sidebar h3 {
             font-size: 0.8rem;
@@ -527,7 +580,7 @@
         }
         #sidebar .close:hover { color: var(--color); }
         #sidebar a {
-            color: var(--btn-primary-bg);
+            color: var(--color);
             cursor: pointer;
             text-decoration: underline;
             font-family: Monaco, Consolas, monospace;
@@ -579,22 +632,24 @@
             background: var(--card-background);
             border: 1px solid var(--border-color);
             padding: 0.3rem;
-            border-radius: 6px;
+            border-radius: 4px;
             z-index: 50;
-            box-shadow: 0 2px 6px var(--shadow-color);
+            box-shadow: 0 2px 8px var(--shadow-color);
         }
         #zoom-controls button {
-            background: var(--header-background);
-            color: black;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--card-background);
+            color: var(--color);
             border: 1px solid var(--border-color);
-            width: 2.1rem;
-            height: 2.1rem;
+            width: 2rem;
+            height: 2rem;
+            padding: 0;
             cursor: pointer;
-            font-size: 1rem;
-            font-weight: bold;
             border-radius: 4px;
         }
-        #zoom-controls button:hover { opacity: 0.85; }
+
     </style>
 </head>
 <body>
@@ -608,14 +663,14 @@
             <input id="password" name="password" type="password" placeholder="password">
         </form>
         <button id="load" class="btn btn-primary">Load</button>
-        <button id="theme-toggle" class="theme-toggle" title="Toggle theme">🌘</button>
+        <button id="theme-toggle" class="theme-toggle" title="Toggle theme" aria-label="Toggle theme"></button>
     </div>
 </div>
 
 <div class="container">
     <div class="section">
         <div class="filter-row">
-            <input id="search" type="text" placeholder="🔍 Search table or column…" spellcheck="false">
+            <input id="search" type="text" placeholder="Search table or column…" spellcheck="false">
             <select id="db-filter"><option value="">All databases</option></select>
             <button id="toggle-columns" class="btn-toggle active">Columns</button>
             <select id="load-period" title="Highlight INSERT pipeline load from system.query_views_log">
@@ -670,9 +725,9 @@
 </aside>
 
 <div id="zoom-controls">
-    <button id="zoom-out" title="Zoom out">−</button>
-    <button id="zoom-reset" title="Reset zoom">⌂</button>
-    <button id="zoom-in" title="Zoom in">+</button>
+    <button id="zoom-out" title="Zoom out" aria-label="Zoom out"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg></button>
+    <button id="zoom-reset" title="Reset zoom" aria-label="Reset zoom"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg></button>
+    <button id="zoom-in" title="Zoom in" aria-label="Zoom in"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
 </div>
 
 <script>
@@ -839,14 +894,20 @@ for (const id of ['url', 'user', 'password']) {
     }, 100));
 }
 
-let theme = window.localStorage.getItem('theme') || 'light';
-function setTheme(t) {
+/// The theme chosen in the other web UI pages, otherwise the system preference (which is not stored).
+const THEME_ICONS = {
+    dark: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>',
+    light: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+};
+let theme = window.localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+function setTheme(t, remember = true) {
     theme = t;
     document.documentElement.setAttribute('data-theme', t);
-    window.localStorage.setItem('theme', t);
-    $('theme-toggle').textContent = t === 'dark' ? '☀️' : '🌘';
+    if (remember) window.localStorage.setItem('theme', t);
+    /// The button offers the other theme.
+    $('theme-toggle').innerHTML = THEME_ICONS[t === 'dark' ? 'light' : 'dark'];
 }
-setTheme(theme);
+setTheme(theme, false);
 $('theme-toggle').onclick = () => setTheme(theme === 'dark' ? 'light' : 'dark');
 
 const state = {

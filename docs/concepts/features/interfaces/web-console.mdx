@@ -26,15 +26,17 @@ The home page and the sidebar list the same destinations:
 | Diagnostics | Schema visualizer | `/schema` | Console integration contract. |
 | Diagnostics | Jemalloc | `/jemalloc` | Console integration contract. |
 | Diagnostics | Processors profile | `/processors-profile` | Console integration contract. |
+| Administration | Users, Roles & Permissions, Component Access, Profiles & Quotas, Audit Activity | `/console/admin-*` | Pages of the console itself (see [Administration](#administration)). |
 | Resources | Source code, Documentation, Website, Cloud | `source_code_url`, `documentation_url`, `website_url`, `cloud_url` | None: opened in a new tab. |
 | Resources | Reference | `/docs` | Console integration contract. |
-| Administration | Users, Roles & Permissions, Component Access, Profiles & Quotas, Audit Activity | `/console/admin-*` | Pages of the console itself (see [Administration](#administration)). |
+
+When a panel opens, the console header and sidebar hide, so that the panel, with its own navigation, uses the whole window. To return to the console navigation, select **Console** (the arrow at the start of the panel bar); select the same button again to hide it. The console navigation stays visible for that panel until you select another one. Home, the [Administration](#administration) pages, and the messages shown instead of a panel (for example when it is restricted or not configured) always show the console navigation. In the Web Terminal, Escape moves the keyboard focus to the **Console** button.
 
 Each panel has a refreshable address under `/console`, for example `/console/merges`. The browser's Back and Forward buttons move between panels. The pages keep working on their own at their original paths.
 
-After sign-in, the console runs a `LIMIT 0` query for each diagnostic panel with the privileges that panel needs. A panel is marked:
+After sign-in, the console runs a `LIMIT 0` query for each diagnostic panel with the privileges that panel needs. A panel is:
 
-- **Restricted** when the server denies that query. You can still open it, and the server rejects every query you are not allowed to run.
+- Not listed when the server denies that query: the user has no privileges for the panel, so the console shows neither its card nor its sidebar entry. Its address, for example `/console/merges`, explains the restriction and can still open the panel; the server rejects every query the user is not allowed to run.
 - **Unavailable** when a system table the panel needs does not exist, for example when `system.part_log` is not configured.
 - **Not configured** when an administrator has removed its address (see [Configuration](#configuration)).
 - **Needs Internet** when the page loads a library from a public CDN: the Binary visualizer loads Leaflet, and Jemalloc loads uPlot. Every other panel and the console itself work without Internet access.
@@ -192,7 +194,7 @@ The access administrator pattern `*` lets the role change any user, including ad
 
 ### Component access {#component-access}
 
-The policy has rules for all users, for roles, and for users. Each rule allows four capabilities of a component: **Open**, **View data**, **Run queries**, and **Administer**. A capability is allowed when any rule for all users, for the signed-in user, or for one of the roles enabled in the session allows it; components without a rule that allows **Open** are not listed, and their address shows that the policy does not allow them. The policy governs the panels; Home, the resource links, and the administration pages are not governed, so a policy mistake cannot lock administrators out.
+The policy has rules for all users, for roles, and for users. Each rule allows four capabilities of a component: **Open**, **View data**, **Run queries**, and **Administer**. A capability is allowed when any rule for all users, for the signed-in user, or for one of the roles enabled in the session allows it; components without a rule that allows **Open** are not listed, and their address shows that the policy does not allow them. The policy governs the panels and the links of the **Resources** section (Source code, Documentation, Website, Cloud, and Reference); for a link, only **Open** applies. Home and the administration pages are not governed, so a policy mistake cannot lock administrators out. A component that no rule mentions yet, such as one added to the console after the policy was set up, is open to everyone; on the Component Access page it is marked **No rules yet**, and saving the rules for all users turns that into a rule. Hiding a link only removes it from the console: anyone who knows the address of an external site can still visit it.
 
 The console enforces only **Open**. The SQL Console, the standalone pages, the Web Terminal, and other clients reach the server directly, where only native privileges apply. For the other capabilities, the Component Access page shows the native privileges that govern them (for example `SELECT ON system.part_log` for the Merges visualizer), whether a role or user has them, and offers to grant the missing ones or revoke direct grants where the policy and the grants disagree. ClickStack has its own connection settings and authorization, and the Web Terminal is enabled for everyone by the `enable_webterminal` server setting: the policy only hides them in the console.
 
@@ -242,7 +244,7 @@ The Web Terminal receives the credentials in its existing `webterminal-credentia
 
 The SQL Console has no embedding interface. The console fills in its connection form and submits it, as a user would. If that does not succeed, the console shows a notice above the panel, and you can sign in with the form of the SQL Console.
 
-ClickStack is a separate application with its own connection settings, entered in ClickStack on first use. The console does not sign in to it.
+ClickStack is a separate application with its own connection settings, entered in ClickStack on first use. The console does not sign in to it. ClickStack shows a banner saying that this embedded version is not recommended for production use. The console closes that banner, the same way as its close button does (in the browser's local storage, which ClickStack opened on its own shares), and shows the message in a popup instead the first time ClickStack is opened after each sign-in, unless **Do not show this again** was selected.
 
 ## Limitations {#limitations}
 
