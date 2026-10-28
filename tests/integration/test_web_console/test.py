@@ -12,6 +12,7 @@ DEFAULTS = {
     "website_url": "https://clickhouse.com/",
     "cloud_url": "https://clickhouse.cloud/",
     "clickstack_url": "/clickstack/",
+    "admin_database": "console_admin",
 }
 
 
