@@ -1,0 +1,24 @@
+--- suspension: every authentication method expires on 2000-01-01 UTC
+[946684800]
+error 516
+[0]
+login after reactivation
+--- user management scoped by name, checked with CHECK GRANT
+1
+0
+0
+ok
+error 497
+--- delegation: a role WITH ADMIN OPTION, and no privilege without the grant option
+ok
+error 497
+error 497
+1	0
+--- audit table: the server fills in the actor, and rejects other values
+ok
+error 44
+VIOLATED_CONSTRAINT
+1	1	written
+--- passwords are not in the query log
+login with the new password
+1	0

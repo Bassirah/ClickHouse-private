@@ -7,15 +7,17 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 
 | File | Role |
 |---|---|
-| `programs/server/console.html` | The console: login, home page, sidebar, panel lifecycle, navigation registry (`COMPONENTS`). |
+| `programs/server/console.html` | The console: login, home page, sidebar, panel lifecycle, navigation registry (`COMPONENTS`), and the Administration pages (users, roles, component access, profiles and quotas, audit). |
 | `src/Server/WebUIRequestHandler.{h,cpp}` | `ConsoleWebUIRequestHandler`: serves the page for `/console/*` and `/console/config.json`. |
 | `src/Server/HTTPHandlerFactory.cpp` | Registers `/console` and the `console` handler type of `http_handlers`. |
 | `src/Core/ServerSettings.cpp` | Accepts the `web_console` configuration section. |
 | `programs/server/{dashboard,binary,merges,schema,jemalloc,processors_profile,docs}.html` | `getConsoleConnection`: take the connection from the console when embedded by it. |
 | `programs/server/index.html` | Link to the console on the landing page. |
 | `tests/queries/0_stateless/05293_web_console.sh` | Routes, headers, configuration defaults, integration contract. |
+| `tests/queries/0_stateless/05294_web_console_access_management.sh` | Server behavior the Administration pages rely on: suspension, scoped `CHECK GRANT`, delegation, the audit table, password masking. |
 | `tests/integration/test_web_console` | `web_console` configuration, configuration reload, `console` handler type. |
 | `utils/web-console/console_e2e.mjs` | Browser end-to-end checks (Playwright; not part of the build). |
+| `utils/web-console/access_e2e.mjs` | Browser acceptance checks of the Administration pages (Playwright; not part of the build). |
 | `utils/web-console/Dockerfile` | Image with a locally built binary on top of the official image. |
 
 All HTML pages are embedded into the binary with `#embed`: **any change to an `.html` file needs a
@@ -120,6 +122,25 @@ cp ~/src/ClickHouse-private/utils/web-console/console_e2e.mjs .
 node console_e2e.mjs --url http://127.0.0.1:28123 --admin alice:alicepass --limited limited:limitedpass --screenshots shots
 ```
 
+The Administration pages have their own checks. They need a user with access management and every privilege
+`WITH GRANT OPTION`, create and remove `e2e_*` users, roles, profiles, quotas, and databases, and set up the
+console tables in `console_admin` if they do not exist. `--cluster` names a cluster where one server is down,
+to check the report of a partly applied `ON CLUSTER` change (the development instance can get one with an
+embedded Keeper and a replica on a port where nothing listens):
+
+```bash
+cp ~/src/ClickHouse-private/utils/web-console/access_e2e.mjs ~/console-e2e/
+node access_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass [--cluster console_test] --screenshots shots
+```
+
+Without root access for `playwright install-deps`, unpack the missing libraries locally and point the loader at them:
+
+```bash
+mkdir -p ~/console-e2e/libs && cd ~/console-e2e/libs && apt-get download libnss3 libnspr4 libasound2t64
+for f in *.deb; do dpkg-deb -x "$f" root; done
+export LD_LIBRARY_PATH=$HOME/console-e2e/libs/root/usr/lib/x86_64-linux-gnu:$HOME/console-e2e/libs/root/usr/lib/x86_64-linux-gnu/nss
+```
+
 ## Docker image
 
 The image keeps everything of the official image of the same release and replaces the binary. Use a
@@ -142,7 +163,21 @@ Jemalloc pages load libraries from public CDNs and do not work offline.
 
 ## Rollback
 
-- Server: deploy the previous binary or image (`clickhouse/clickhouse-server:26.9.8.3`). The change
-  stores nothing on the server; the only configuration it adds is the optional `web_console` section.
-  Remove that section before downgrading, because older servers reject unknown sections.
+- Server: deploy the previous binary or image (`clickhouse/clickhouse-server:26.9.8.3`). The console
+  itself stores nothing on the server; the only configuration it adds is the optional `web_console`
+  section. Remove that section before downgrading, because older servers reject unknown sections.
+- Administration data: the Administration pages store their audit log, component access policy, and
+  protected accounts in the `console_admin` database (the `admin_database` setting), created only when an
+  administrator selects **Set up**, and the role `console_admin_reader`. Users, roles, profiles, and quotas
+  changed in the console are ordinary access entities and stay as they are after a rollback. To remove the
+  console's own data: `DROP DATABASE console_admin; DROP ROLE console_admin_reader`. Back up the audit log
+  first if it must be kept, for example with `BACKUP DATABASE console_admin TO Disk('backups', 'console_admin.zip')`
+  on a server with a `backups` disk configured.
+- Recovery: if a policy change hides components from everyone, the Administration pages are not governed
+  by the policy, so a platform administrator can still fix it on the Component Access page; with SQL,
+  `INSERT INTO console_admin.component_policy (subject_type, subject, component, open, view_data, run_queries, administer)
+  VALUES ('all', '', 'sql', 1, 1, 1, 0)` allows the SQL Console for everyone again, and dropping the database
+  turns the policy off. A user locked out by a suspension is reactivated with
+  `ALTER USER name VALID UNTIL 'infinity'` by any user with `ALTER USER` on it, or from a user defined in
+  `users.xml` with `access_management`.
 - Source: the change is on the branch `private/unified-web-console`; `private/main` is unchanged.
