@@ -2549,13 +2549,19 @@ function canManage(privilege) {
     return !!(session.admin.can[key] || (session.admin.scoped[privilege] || []).length);
 }
 
+/// An administration page is available when the user can read what it shows and, for the pages the console
+/// policy governs, when the policy allows opening it. Otherwise it is hidden, with the reason.
 function adminComponentState(c) {
     const href = componentPath(c.id);
     if (!session || session.admin.state === 'checking') return {status: 'hidden', action: 'Open', href};
     const can = session.admin.can;
-    if (c.admin_needs.some(key => can[key])) return {status: 'available', action: 'Open', href};
-    return {status: 'hidden', action: 'Open', href,
-        reason: 'Your user cannot read what this page shows.'};
+    if (!c.admin_needs.some(key => can[key])) {
+        return {status: 'hidden', action: 'Open', href, reason: 'Your user cannot read what this page shows.'};
+    }
+    const decision = policyDecision(c);
+    if (decision && decision.status === 'checking') return {status: 'hidden', action: 'Open', href, reason: 'The console access policy is being checked.'};
+    if (decision) return {status: 'hidden', action: 'Open', href, reason: decision.reason};
+    return {status: 'available', action: 'Open', href};
 }
 
 /// The source of a user or role: which user directory stores it, and whether SQL can change it.
@@ -2646,14 +2652,29 @@ for (const c of COMPONENTS.filter(c => c.kind === 'link')) {
         + 'anyone who knows the address can still visit it.'};
 }
 
-/// The components the policy governs: the panels and the links of Resources. Home and the administration
-/// pages are not governed: the administration pages follow the privileges of the user, so a policy mistake
-/// cannot lock the platform administrators out of this page.
-const POLICY_COMPONENTS = COMPONENTS.filter(c => c.kind === 'panel' || c.kind === 'link');
+/// What governs the actions of each administration page: the policy only lists or hides the page.
+const ADMIN_NATIVE = {
+    'admin-users': 'SHOW USERS to read; CREATE USER, ALTER USER, DROP USER (possibly limited to name patterns) to change',
+    'admin-roles': 'SHOW ROLES and SELECT on system.grants to read; CREATE ROLE, GRANT with the grant or admin option to change',
+    'admin-limits': 'SHOW SETTINGS PROFILES and SHOW QUOTAS to read; CREATE, ALTER, DROP SETTINGS PROFILE and QUOTA to change',
+    'admin-audit': 'SELECT on the console audit log and on system.query_log',
+    'admin-backups': 'SELECT on the backup tables to read; BACKUP, READ and WRITE on the destinations, and INSERT on the backup tables to act',
+    'admin-clusters': 'SELECT on the cluster tables to read; the cluster capabilities (INSERT(<capability>) ON cluster_capabilities), checked again by the cluster agent',
+};
+for (const c of COMPONENTS.filter(c => c.kind === 'admin')) {
+    if (ADMIN_NATIVE[c.id]) COMPONENT_NATIVE[c.id] = {integration: `An administration page. The policy lists or hides it in the console; every action on it is a statement the server authorizes: ${ADMIN_NATIVE[c.id]}.`};
+}
 
-/// The capabilities that apply to a component: a link can only be opened.
+/// The components the policy governs: the panels, the links of Resources, and the administration pages except
+/// Component Access. Home is not governed, and neither is Component Access: it stays available to the users who
+/// can change the policy, so that a policy mistake cannot lock them out of correcting it.
+const POLICY_EXEMPT = ['admin-access'];
+const POLICY_COMPONENTS = COMPONENTS.filter(c => (c.kind === 'panel' || c.kind === 'link' || c.kind === 'admin') && !POLICY_EXEMPT.includes(c.id));
+
+/// The capabilities that apply to a component: a link and an administration page can only be opened (what can
+/// be done on an administration page is decided by native privileges).
 function capabilitiesOf(c) {
-    return c.kind === 'link' ? CAPABILITIES.slice(0, 1) : CAPABILITIES;
+    return c.kind === 'link' || c.kind === 'admin' ? CAPABILITIES.slice(0, 1) : CAPABILITIES;
 }
 
 async function loadPolicy(current) {
@@ -2700,7 +2721,7 @@ function effectivePolicy(rows, user, roles) {
 /// The policy decision for a panel of the signed-in user, or null when the panel is not restricted by it.
 /// When the policy exists but cannot be read, the governed panels are not listed (fail closed).
 function policyDecision(c) {
-    if (!session || (c.kind !== 'panel' && c.kind !== 'link')) return null;
+    if (!session || !POLICY_COMPONENTS.includes(c)) return null;
     const policy = session.admin.policy;
     const href = componentPath(c.id);
     /// While the policy loads, panels wait; links to public sites stay usable, and disappear if the policy
@@ -4190,9 +4211,10 @@ function policyStateText(policy) {
 }
 
 function policyExplanation() {
-    return h('p', {className: 'note'}, 'The console policy decides which components the console lists and opens. It is not a security boundary on its own: '
-        + 'the SQL Console, the standalone pages, and other clients reach the server directly, where only native ClickHouse privileges apply. '
-        + 'View data, Run queries, and Administer are enforced by the native privileges listed on the Component Access page.');
+    return h('p', {className: 'note'}, 'The console policy decides which components the console lists and opens, including the administration pages. '
+        + 'It is not a security boundary on its own: the SQL Console, the standalone pages, and other clients reach the server directly, where only native ClickHouse privileges apply. '
+        + 'View data, Run queries, and Administer are enforced by the native privileges listed on the Component Access page; on administration pages only Open applies, '
+        + 'and their actions remain statements the server authorizes. Component Access itself is not governed: it stays available to the users who can change the policy.');
 }
 
 /// --- Administration: audit records of one target ---
@@ -4883,7 +4905,10 @@ function renderPolicyMatrix(page, container, subject) {
     const table = dataTable([
         {title: 'Component', render: c => [h('strong', {}, c.title), h('div', {className: 'note'}, CATEGORIES.find(category => category.id === c.category).title)]},
         ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
-            if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note', title: 'Does not apply: a link can only be opened.'}, '—');
+            if (!capabilitiesOf(c).includes(capability)) {
+                return h('span', {className: 'note', title: c.kind === 'admin' ? 'Does not apply: native privileges decide what can be done on an administration page.'
+                    : 'Does not apply: a link can only be opened.'}, '—');
+            }
             const input = h('input', {type: 'checkbox', checked: initially(c, capability.key), disabled: !editable,
                 'aria-label': `${capability.title} ${c.title}`});
             input.addEventListener('change', () => {
