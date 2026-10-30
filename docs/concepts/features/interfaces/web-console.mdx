@@ -86,7 +86,7 @@ The destinations of the resource links and of ClickStack are set in the `web_con
 | `cloud_url` | `https://clickhouse.cloud/` |
 | `clickstack_url` | `/clickstack/` |
 | `admin_database` | `console_admin`: the database of the [administration tables](#console-tables) |
-| `backup_s3_endpoints` | Empty: the S3 endpoints that [backup destinations](#backup-destinations) may use, separated by commas, for example `https://s3.eu-west-1.amazonaws.com,https://minio.example.internal:9000`. With an empty value, only disk destinations can be added. |
+| `backup_s3_endpoints` | Empty: the S3 endpoints that [backup destinations](#backup-destinations) may use, separated by commas: exact endpoints such as `https://minio.example.com:9000`, or [patterns](#s3-endpoint-allowlist) such as `https://*.amazonaws.com`. With an empty value, only disk destinations can be added. |
 
 For example, in a network without Internet access, point the documentation to an internal mirror and remove the other external links:
 
@@ -247,7 +247,7 @@ The **Backup & Restore** page of the **Administration** category runs the native
 | Backups | The inventory: one row per backup with its scope, destination, type and base, size and file count when the server reported them, and checks (artifact opened, restore test). |
 | Restore | The restore wizard for a chosen backup. |
 | Schedules | Schedules with their next runs, and a retention preview. |
-| Destinations | The approved destinations, their test results, and the S3 endpoint allowlist. |
+| Destinations | The approved destinations, their test results, and the allowed S3 endpoints. |
 | Operations | Every backup, restore, restore test, deletion, and destination test, with its state and the source of that state. |
 | Recovery verification | The restore tests and their checks. |
 
@@ -275,11 +275,41 @@ Each table is backed up from the data parts it has when its own backup starts. A
 Backups go only to destinations that an administrator added. Users choose a destination by name; they never type a path or a URL.
 
 - **Disk**: a disk of the server that is allowed in `backups.allowed_disk`, and a prefix inside it. The prefix may not contain `..` or start with `/`.
-- **S3**: an endpoint from `backup_s3_endpoints`, a bucket, and a prefix. The access key is stored by the server in a named collection `console_backup_<id>`, created with `CREATE NAMED COLLECTION` from the destination form. The console tables keep only the collection's name. The server masks the key in `system.query_log` and its logs, and the console never reads it back. HTTPS endpoints are verified with the server's usual certificate checks.
+- **S3**: an endpoint, a bucket, and a prefix. The endpoint is the S3-compatible server, in the same environment or an external one, typed as `https://host[:port]`. It must be an [allowed endpoint](#s3-endpoint-allowlist). The access key is stored by the server in a named collection `console_backup_<id>`, created with `CREATE NAMED COLLECTION` from the destination form. The console tables keep only the collection's name. The server masks the key in `system.query_log` and its logs, and the console never reads it back. HTTPS endpoints are verified with the server's usual certificate checks.
 
 :::note
-The server checks `remote_url_allow_hosts` only for redirects of `BACKUP TO S3`, not for the endpoint itself. A user with `WRITE ON S3` can therefore make the server send requests to any address it can reach, including internal and cloud metadata addresses. The console allows only the endpoints in `backup_s3_endpoints`. Do not grant `READ ON S3` or `WRITE ON S3` to users who should not have that ability outside the console.
+The server checks `remote_url_allow_hosts` only for redirects of `BACKUP TO S3`, not for the endpoint itself. A user with `WRITE ON S3` can therefore make the server send requests to any address it can reach, including internal and cloud metadata addresses. The console allows only the endpoints that `backup_s3_endpoints` allows. Do not grant `READ ON S3` or `WRITE ON S3` to users who should not have that ability outside the console.
 :::
+
+#### Allowed S3 endpoints {#s3-endpoint-allowlist}
+
+S3 destinations can use only allowed endpoints. The server does not restrict the endpoint of `BACKUP TO S3` itself (see the note above), so this list keeps the console from sending backups, and their credentials, to an unintended server. The endpoints come from two places, both listed under **Allowed endpoints** on the **Destinations** tab:
+
+- **The console.** **Allow endpoint** adds an exact endpoint, such as `http://13.140.150.86:9000`, or a domain pattern, such as `https://*.example.com`. When you add a destination at an endpoint that is not allowed yet, the review of the destination includes the step that allows it, with a warning. **Remove** takes an endpoint off the list; destinations that already use it keep working. This needs `SELECT` and `INSERT` on the `backup_endpoints` table, and every change is in the audit log. Installations set up before this table existed show **Set up** in the section.
+- **The server configuration.** `backup_s3_endpoints` in the `web_console` section. These entries are shown in the console but changed only in the configuration. Patterns for any host (`https://*`, `*`) and link-local or metadata addresses can be allowed only here.
+
+Each entry is one of:
+
+| Entry | Allows |
+|---|---|
+| `https://minio.example.com:9000` | Exactly this endpoint. |
+| `https://*.example.com` | Any subdomain of `example.com`, on the default port. Add `:port` to allow another port. |
+| `https://*` or `http://*:9000` | Any host with this scheme (and port). |
+| `*` | Any HTTP or HTTPS endpoint. |
+
+Patterns never match internal addresses: `localhost`, loopback and private network addresses, link-local addresses including the cloud metadata service `169.254.169.254`, and names ending in `.internal` or `.local`. To use such an endpoint, allow it exactly. Link-local and metadata addresses (`169.254.0.0/16`, `fe80::/10`, `metadata.google.internal`, `instance-data`) can be allowed only in the server configuration. The console checks the address as typed. It cannot detect a public name that resolves to an internal address, so use patterns only for domains you trust. The configuration entries are read from `/console/config.json`, so a configuration reload applies a change.
+
+For example, to allow a MinIO server on the internal network and the buckets of AWS S3 in the configuration:
+
+```xml
+<clickhouse>
+    <web_console>
+        <backup_s3_endpoints>http://10.0.4.20:9000, https://*.amazonaws.com</backup_s3_endpoints>
+    </web_console>
+</clickhouse>
+```
+
+The server, not the browser, connects to the endpoint: it must be reachable from the server, and from every server of a cluster that runs backups. The [backup worker](#backup-worker) reaches it too, to list and delete backups.
 
 A new destination is disabled until it passes **Test**: the server writes a small backup of the destinations table to `<prefix>/_console_test/<uuid>` and opens it. Listing and deleting at the destination are tested by the [backup worker](#backup-worker) with its own credentials, which also removes the test backup. The test runs on the server the console is connected to. In a cluster, every server that runs backups needs the same access.
 
@@ -365,6 +395,7 @@ As everywhere in the console, every action is a statement run as you and authori
 | Test restore | As restore, on `console_verify_*`, and `DROP DATABASE` on it |
 | Check an artifact | `CREATE DATABASE, DROP DATABASE ON console_inspect_*.*` (the artifact is opened with the `Backup` database engine) |
 | Manage destinations | `INSERT` on `backup_destinations`; for S3, `CREATE NAMED COLLECTION`, `ALTER NAMED COLLECTION`, `DROP NAMED COLLECTION` on `console_backup_*` |
+| Allow S3 endpoints | `SELECT` and `INSERT` on `backup_endpoints` |
 | Manage schedules | `INSERT` on `backup_schedules` |
 | Cancel | `KILL QUERY` |
 
@@ -373,7 +404,7 @@ As everywhere in the console, every action is a statement run as you and authori
 | Backup Viewer | `SELECT` on the backup tables, the audit log, `system.backups`, `system.backup_log`, and `system.disks`; `SHOW DATABASES`. |
 | Backup Operator | The viewer's, plus backing up the chosen databases to disks (optionally S3), checking artifacts, and requesting deletions; optionally `KILL QUERY`. |
 | Restore Operator | The viewer's, plus restoring into new databases named `restore_*` and restore tests. It cannot drop databases other than its restore tests, or restore access entities. |
-| Backup Administrator | All of the above for the chosen databases, plus destinations, schedules, and `KILL QUERY`. |
+| Backup Administrator | All of the above for the chosen databases, plus destinations, allowed S3 endpoints, schedules, and `KILL QUERY`. |
 
 `READ ON S3` and `WRITE ON S3` apply to every S3 URL, not only to the configured destinations, and `READ ON DISK` and `WRITE ON DISK` to every disk: grant them only to users trusted with that.
 
@@ -385,6 +416,7 @@ As everywhere in the console, every action is a statement run as you and authori
 | `backup_schedules` | `ReplacingMergeTree`: one row per schedule. |
 | `backup_operations` | `MergeTree`: one row per operation, written once when it is requested. |
 | `backup_events` | `MergeTree`: the state changes and checks of each operation, appended. The current state is the latest event. |
+| `backup_endpoints` | `ReplacingMergeTree`: the S3 endpoints allowed in the console, in addition to `backup_s3_endpoints`. |
 
 As with the other console tables, the requester and the time are filled in by the server. Rows are never updated: deleting a backup appends a `deleted` event.
 
