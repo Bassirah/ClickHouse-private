@@ -7,7 +7,7 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 
 | File | Role |
 |---|---|
-| `programs/server/console.html` | The console: login, home page, sidebar, panel lifecycle, navigation registry (`COMPONENTS`), and the Administration pages (users, roles, component access, profiles and quotas, audit, backup and restore). |
+| `programs/server/console.html` | The console: login, home page, sidebar, panel lifecycle, navigation registry (`COMPONENTS`), and the Administration pages (users, roles, component access, profiles and quotas, audit, backup and restore, clusters). |
 | `src/Server/WebUIRequestHandler.{h,cpp}` | `ConsoleWebUIRequestHandler`: serves the page for `/console/*` and `/console/config.json`. |
 | `src/Server/HTTPHandlerFactory.cpp` | Registers `/console` and the `console` handler type of `http_handlers`. |
 | `src/Core/ServerSettings.cpp` | Accepts the `web_console` configuration section. |
@@ -21,6 +21,8 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/access_e2e.mjs` | Browser acceptance checks of the Administration pages (Playwright; not part of the build). |
 | `utils/web-console/backup_worker.mjs` | Backup worker: schedules, reconciliation, retention, deletions (Node.js 18, no packages). |
 | `utils/web-console/backup_e2e.mjs` | Browser acceptance checks of Backup & Restore, including a server restart and an unavailable destination (Playwright; not part of the build). |
+| `utils/web-console/cluster_agent.mjs` | Cluster agent: executes cluster lifecycle operations through the docker-compose provider, and observes clusters (Node.js 18, no packages). |
+| `utils/web-console/cluster_e2e.mjs` | Browser acceptance checks of Cluster Management against a running agent: provisioning, registration, drift, scaling, failures, and retirement (Playwright; not part of the build). |
 | `utils/web-console/Dockerfile` | Image with a locally built binary on top of the official image. |
 
 All HTML pages are embedded into the binary with `#embed`: **any change to an `.html` file needs a
@@ -173,6 +175,20 @@ node backup_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass \
     --worker ~/src/ClickHouse-private/utils/web-console/backup_worker.mjs \
     --server-restart ~/src/ClickHouse-private/tmp/console-dev/e2e/restart.sh \
     --server-log ~/src/ClickHouse-private/tmp/console-dev/log/clickhouse-server.log --screenshots shots
+```
+
+Cluster Management has its own checks. They need the cluster agent running against the same server with the
+docker-compose provider for the environment `lab`, the image `clickhouse/clickhouse-server:26.9.8.3` on the Docker
+host, and a credential reference `PLATFORM` (the agent's `PLATFORM_USER` and `PLATFORM_PASSWORD`) for the
+registration check. They create lab clusters named `e2e-*`, retire them, and delete their resources:
+
+```bash
+cd ~/src/ClickHouse-private
+CLICKHOUSE_URL=http://127.0.0.1:28123 CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD=devpass \
+CLUSTER_AGENT_STATE_DIR=$PWD/tmp/clusterlab/state PLATFORM_USER=default PLATFORM_PASSWORD=devpass \
+node utils/web-console/cluster_agent.mjs &
+cp utils/web-console/cluster_e2e.mjs ~/console-e2e/ && cd ~/console-e2e
+node cluster_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass --screenshots shots
 ```
 
 Without root access for `playwright install-deps`, unpack the missing libraries locally and point the loader at them:

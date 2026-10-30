@@ -625,6 +625,7 @@ const ICONS = {
     access: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M15 17.5l2 2 4-4"/>',
     limits: '<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6M4 18h16"/>',
     audit: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v2h6V3M9 10h6M9 14h6M9 18h3"/>',
+    cluster: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="8.5" y="14" width="7" height="7" rx="1"/><path d="M6.5 10v2h11v-2M12 12v2"/>',
     backup: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3 1.1 0 2.1-.1 3-.3"/><path d="M19 15v6M16 18l3 3 3-3"/>',
 };
 
@@ -746,6 +747,9 @@ const COMPONENTS = [
     {id: 'admin-audit', category: 'administration', kind: 'admin', title: 'Audit Activity', icon: 'audit', page: 'audit',
      admin_needs: ['read_audit', 'read_query_log'],
      description: 'Administrative actions from this console and access changes seen by the server.'},
+    {id: 'admin-clusters', category: 'administration', kind: 'admin', title: 'Clusters', icon: 'cluster', page: 'clusters',
+     admin_needs: ['read_clusters', 'setup'],
+     description: 'Cluster lifecycle: provisioning, registration, topology, Keeper, configuration, scaling, upgrades, recovery, and retirement.'},
     {id: 'admin-backups', category: 'administration', kind: 'admin', title: 'Backup & Restore', icon: 'backup', page: 'backups',
      admin_needs: ['read_backups', 'setup'],
      description: 'Backup destinations, manual and scheduled backups, restores, and recovery verification.'},
@@ -2455,6 +2459,10 @@ function adminChecks(db) {
         write_destinations: db ? grant(`INSERT ON ${table('backup_destinations')}`) : null,
         write_schedules: db ? grant(`INSERT ON ${table('backup_schedules')}`) : null,
         read_endpoints: db ? read(table('backup_endpoints')) : null,
+        read_clusters: db ? read(table('clusters'), table('cluster_revisions'), table('cluster_operations'), table('cluster_events'),
+            table('cluster_observations'), table('cluster_resources')) : null,
+        write_clusters: db ? grant(`INSERT ON ${table('cluster_operations')}`) : null,
+        ...Object.fromEntries(CLUSTER_CAPABILITIES.map(([cap]) => [`cap_${cap}`, db ? grant(`INSERT(${cap}) ON ${table('cluster_capabilities')}`) : null])),
         write_endpoints: db ? grant(`INSERT ON ${table('backup_endpoints')}`) : null,
         read_system_backups: read('system.backups'),
         read_backup_log: read('system.backup_log'),
@@ -4322,6 +4330,21 @@ const ROLE_TEMPLATES = [
          ['CREATE DATABASE, DROP DATABASE', 'console_inspect_*.*'],
          ['KILL QUERY', '*.*'],
      ]},
+    {id: 'cluster-viewer', title: 'Cluster Viewer', suggested: 'cluster_viewer',
+     purpose: 'Sees the cluster inventory, topology, health observations, configuration history, operations, and resources. Cannot request any operation.',
+     params: [],
+     grants: (p, db) => clusterViewerGrants(db)},
+    {id: 'cluster-operator', title: 'Cluster Operator', suggested: 'cluster_operator',
+     purpose: 'Registers existing deployments, changes configuration, restarts nodes, backs clusters up, and scales them, including decommissioning replicas. '
+        + 'Cannot create, upgrade, retire, or delete.',
+     params: [],
+     grants: (p, db) => [...clusterViewerGrants(db), ...clusterRequestGrants(db), ['INSERT(register, configure, maintain, scale, decommission)', `${db}.cluster_capabilities`]]},
+    {id: 'cluster-admin', title: 'Cluster Administrator', suggested: 'cluster_admin',
+     purpose: 'Every cluster lifecycle capability, including creating, adopting, upgrading, recovering, and retiring clusters. '
+        + 'Deleting infrastructure and data is a separate, optional capability.',
+     params: [{key: 'destroy', title: 'Include the capability to delete infrastructure and data permanently (destroy)', flag: true}],
+     grants: (p, db) => [...clusterViewerGrants(db), ...clusterRequestGrants(db), ['INSERT', `${db}.clusters`], ['INSERT', `${db}.cluster_revisions`],
+         [`INSERT(${CLUSTER_CAPABILITIES.map(([c]) => c).filter(c => c !== 'destroy' || p.destroy).join(', ')})`, `${db}.cluster_capabilities`]]},
     {id: 'auditor', title: 'Auditor', suggested: 'auditor',
      purpose: 'Reads users, roles, profiles, quotas, row policies, and their grants, the console audit log and policy, and the server query and session logs. Cannot change anything.',
      params: [],
@@ -4331,6 +4354,16 @@ const ROLE_TEMPLATES = [
          ['SELECT', 'system.query_log'], ['SELECT', 'system.session_log'],
      ]},
 ];
+
+function clusterViewerGrants(db) {
+    return [...['clusters', 'cluster_revisions', 'cluster_operations', 'cluster_events', 'cluster_observations', 'cluster_resources'].map(t => ['SELECT', `${db}.${t}`]),
+        ['SELECT', `${db}.backup_destinations`], ['INSERT(view_clusters)', `${db}.cluster_capabilities`]];
+}
+
+/// Requesting operations: the operation, its events (queued, cancel, retry), new revisions, and the audit record.
+function clusterRequestGrants(db) {
+    return [['INSERT', `${db}.cluster_operations`], ['INSERT', `${db}.cluster_events`], ['INSERT', `${db}.cluster_revisions`], ['INSERT', `${db}.audit_log`]];
+}
 
 function backupViewerGrants(db) {
     return [...['backup_destinations', 'backup_schedules', 'backup_operations', 'backup_events', 'backup_endpoints', 'audit_log'].map(t => ['SELECT', `${db}.${t}`]),
@@ -4415,7 +4448,7 @@ function renderTemplates() {
 }
 
 function templatePreview(template) {
-    const sample = {databases: ['<database>'], pattern: '<users>', roles: ['<role>'], kill: true, s3: true, query_text: true, introspection: true,
+    const sample = {databases: ['<database>'], pattern: '<users>', roles: ['<role>'], kill: true, s3: true, destroy: true, query_text: true, introspection: true,
         reader: `${session.admin.db || 'console_admin'}_reader`};
     return template.grants(sample, session.admin.db || 'console_admin').map(item => item.role ? `${item.role} WITH ADMIN OPTION` : (item[1] === null ? item[0] : `${item[0]} ON ${item[1]}`))
         .join('\n') + (template.params.some(p => p.flag) ? '\n(some lines are optional)' : '');
@@ -7425,6 +7458,1149 @@ async function startRestore(state, backup, destination, w) {
         const checks = await validateRestore(state, backup, w.mapping, op);
         details.lastChild.remove();
         details.append(checksSummary(checks));
+    });
+}
+
+/// --- Cluster Management ---
+///
+/// The console records clusters, versioned desired configurations (`cluster_revisions`), and lifecycle operations;
+/// the cluster agent (`utils/web-console/cluster_agent.mjs`) on the infrastructure host executes them, checks the
+/// requester's capability on the server, and records events and observations. The console never connects to the
+/// managed clusters and never handles their credentials: what it shows comes from the agent's observations.
+
+const CLUSTER_TABLES = {
+    clusters: () => `(
+    cluster_id String,
+    name String,
+    environment LowCardinality(String),
+    owner String,
+    description String,
+    provider LowCardinality(String),
+    connection String,
+    requirements String,
+    policies String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY cluster_id`,
+    cluster_revisions: () => `(
+    cluster_id String,
+    revision UInt32,
+    spec String,
+    source LowCardinality(String),
+    note String,
+    created_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    created_by String MATERIALIZED currentUser(),
+    CONSTRAINT created_by_is_writer CHECK created_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (cluster_id, revision)`,
+    cluster_operations: () => `(
+    op_id String,
+    cluster_id String,
+    kind LowCardinality(String),
+    revision UInt32,
+    parameters String,
+    requested_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    requested_by String MATERIALIZED currentUser(),
+    CONSTRAINT requested_by_is_writer CHECK requested_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY op_id`,
+    cluster_events: () => `(
+    op_id String,
+    cluster_id String,
+    kind LowCardinality(String),
+    state LowCardinality(String),
+    step String,
+    message String,
+    data String,
+    at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    recorded_by String MATERIALIZED currentUser(),
+    CONSTRAINT recorded_by_is_writer CHECK recorded_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (cluster_id, at) TTL toDateTime(at) + INTERVAL 30 DAY DELETE WHERE kind = 'heartbeat'`,
+    cluster_observations: () => `(
+    cluster_id String,
+    node_id String,
+    role LowCardinality(String),
+    status LowCardinality(String),
+    data String,
+    at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    recorded_by String MATERIALIZED currentUser(),
+    CONSTRAINT recorded_by_is_writer CHECK recorded_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (cluster_id, node_id, at) TTL toDateTime(at) + INTERVAL 7 DAY`,
+    cluster_resources: () => `(
+    cluster_id String,
+    resource_id String,
+    kind LowCardinality(String),
+    name String,
+    owner_op String,
+    disposition LowCardinality(String),
+    retention_until Nullable(Date),
+    evidence String,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY (cluster_id, resource_id)`,
+    /// Holds no data: each column is a capability, granted as `INSERT(<column>)` and checked with `CHECK GRANT`.
+    cluster_capabilities: () => `(
+    view_clusters UInt8, register UInt8, create_cluster UInt8, adopt UInt8, configure UInt8, scale UInt8, keeper UInt8,
+    maintain UInt8, upgrade UInt8, recover UInt8, decommission UInt8, retire UInt8, destroy UInt8
+)
+ENGINE = Null`,
+};
+
+const CLUSTER_CAPABILITIES = [
+    ['view_clusters', 'View clusters'], ['register', 'Register existing deployments'], ['create_cluster', 'Create clusters'],
+    ['adopt', 'Adopt or release management'], ['configure', 'Edit configuration'], ['scale', 'Scale resources and topology'],
+    ['keeper', 'Manage Keeper'], ['maintain', 'Perform maintenance and backups'], ['upgrade', 'Upgrade versions'],
+    ['recover', 'Initiate recovery'], ['decommission', 'Decommission nodes'], ['retire', 'Retire clusters'],
+    ['destroy', 'Permanently delete infrastructure or data'],
+];
+
+/// Providers. Only implemented ones can be chosen; the others are listed so that nothing suggests they work.
+const CLUSTER_PROVIDERS = [
+    {id: 'docker-compose', title: 'Docker Compose (local lab)', implemented: true,
+     note: 'Containers on the agent\'s Docker host, bound to 127.0.0.1. All nodes share one host: they are not independent failure domains. For development and tests.'},
+    {id: 'kubernetes', title: 'Kubernetes (operator)', implemented: false, note: 'Not implemented: no verified operator integration.'},
+    {id: 'linux', title: 'Linux servers (agent)', implemented: false, note: 'Not implemented: no verified host automation integration.'},
+];
+
+/// Server settings the Configuration view edits, with what changing them involves. Whether a restart is needed is
+/// read from the server (`system.server_settings.changeable_without_restart`) when the change is applied.
+const CLUSTER_SETTINGS = [
+    {name: 'max_concurrent_queries', scope: 'server', min: 1, max: 100000, hint: 'Queries running at the same time; more are rejected.'},
+    {name: 'max_connections', scope: 'server', min: 16, max: 100000, hint: 'Client connections; restart required.'},
+    {name: 'keep_alive_timeout', scope: 'server', min: 1, max: 3600, hint: 'HTTP keep-alive, seconds; restart required.'},
+    {name: 'max_table_size_to_drop', scope: 'server', min: 0, max: 1e15, hint: 'Bytes; larger tables cannot be dropped (0: no limit).'},
+    {name: 'background_pool_size', scope: 'server', min: 1, max: 512, hint: 'Merge and mutation threads; can only grow without a restart.'},
+    {name: 'max_server_memory_usage_to_ram_ratio', scope: 'server', min: 0.1, max: 1, float: true, hint: 'Share of RAM the server may use.'},
+    {name: 'max_memory_usage', scope: 'profile', min: 0, max: 1e13, hint: 'Bytes per query for the default profile (0: no limit).'},
+    {name: 'max_execution_time', scope: 'profile', min: 0, max: 86400, hint: 'Seconds per query for the default profile (0: no limit).'},
+    {name: 'max_threads', scope: 'profile', min: 1, max: 1024, hint: 'Threads per query for the default profile.'},
+];
+
+const CLUSTER_TABS = [['overview', 'Overview'], ['nodes', 'Nodes & Topology'], ['keeper', 'Keeper'], ['configuration', 'Configuration'],
+    ['scaling', 'Capacity & Scaling'], ['maintenance', 'Maintenance & Upgrades'], ['protection', 'Protection & Recovery'],
+    ['operations', 'Operations'], ['retirement', 'Retirement']];
+
+const CLUSTER_LIST_TABS = [['inventory', 'Cluster Inventory'], ['create', 'Create Cluster'], ['register', 'Register Existing']];
+
+const OP_TERMINAL = ['succeeded', 'failed', 'cancelled', 'rejected'];
+const OP_BADGES = {queued: ['Queued', ''], waiting: ['Waiting', ''], running: ['Running', 'warn'], succeeded: ['Succeeded', 'ok'], failed: ['Failed', 'bad'],
+    rejected: ['Rejected', 'bad'], cancelled: ['Cancelled', ''], blocked: ['Needs an operator', 'bad'], unknown: ['Outcome unknown', 'warn']};
+const LIFECYCLE_BADGES = {planned: ['Planned', ''], provisioning: ['Provisioning', 'warn'], validating: ['Validating', 'warn'], ready: ['Ready', 'ok'],
+    degraded: ['Degraded', 'bad'], unreachable: ['Unreachable', 'bad'], maintenance: ['Maintenance', 'warn'], failed: ['Failed', 'bad'],
+    retiring: ['Retiring', 'warn'], retired: ['Retired', ''], destroyed: ['Destroyed', '']};
+const NODE_BADGES = {ok: ['Answers', 'ok'], unreachable: ['Unreachable', 'warn'], failed: ['Failed (confirmed)', 'bad'], unknown: ['Unknown', 'warn']};
+
+const OP_TITLES = {register: 'Register and discover', provision: 'Provision', adopt: 'Adopt management', release: 'Release management', configure: 'Change configuration',
+    reconcile: 'Reconcile drift', resize: 'Resize', add_replica: 'Add replica', add_shard: 'Add shard', remove_shard: 'Remove shard', remove_replica: 'Decommission node',
+    restart_node: 'Restart nodes', backup: 'Back up', upgrade: 'Upgrade', keeper_change: 'Change Keeper membership', retire: 'Retire', destroy: 'Delete resources'};
+
+const OBSERVATION_STALE_SECONDS = 120;
+
+const opBadge = state => badge(...(OP_BADGES[state] || [state, '']));
+const lifecycleBadge = (state, title) => badge(...(LIFECYCLE_BADGES[state] || [state, '']), title);
+
+function clusterTable(name) {
+    return `${quoteIdentifier(session.admin.db)}.${quoteIdentifier(name)}`;
+}
+
+function insertStep(table, row, description) {
+    return {description, sql: `INSERT INTO ${clusterTable(table)} (${Object.keys(row).join(', ')}) FORMAT JSONEachRow\n${JSON.stringify(row)}`};
+}
+
+/// The statements that submit an operation: the operation, its queued state, and optionally a new revision.
+function operationSteps(cluster, kind, parameters, spec, note) {
+    const op_id = crypto.randomUUID();
+    const steps = [];
+    let revision = cluster.revision;
+    if (spec) {
+        revision += 1;
+        steps.push(insertStep('cluster_revisions', {cluster_id: cluster.cluster_id, revision, spec: JSON.stringify(spec), source: 'console', note: note || OP_TITLES[kind]},
+            `Record revision ${revision} of the desired configuration`));
+    }
+    steps.push(insertStep('cluster_operations', {op_id, cluster_id: cluster.cluster_id, kind, revision, parameters: JSON.stringify(parameters || {})},
+        `Request the operation "${OP_TITLES[kind]}" (${op_id})`));
+    steps.push(insertStep('cluster_events', {op_id, cluster_id: cluster.cluster_id, kind: 'state', state: 'queued', step: '', message: '', data: '{}'},
+        'Queue it for the cluster agent'));
+    return {op_id, steps};
+}
+
+/// The reviewable plan of an operation. Form dialogs return it (`formDialog` opens the review); other callers use `submitOperation`.
+function operationPlan(cluster, kind, {parameters, spec, note, summary, warning, danger, capability}) {
+    const {op_id, steps} = operationSteps(cluster, kind, parameters, spec, note);
+    return {action: `cluster_${kind}_request`, target_type: 'cluster', target_name: cluster.name, summary: summary || `${OP_TITLES[kind]}: ${cluster.name}`,
+        steps, local_only: true, danger, confirm_text: danger ? 'Submit' : undefined, correlation_id: op_id,
+        warning: [warning, `The cluster agent executes the operation and checks on the server that you hold the capability ${capability}. Closing the browser does not stop it.`]
+            .filter(Boolean).join(' '),
+        onclose: () => navigate(adminPath('admin-clusters', cluster.cluster_id, 'operations'))};
+}
+
+function submitClusterOperation(cluster, kind, options) {
+    reviewPlan(operationPlan(cluster, kind, options));
+}
+
+async function loadClusterState() {
+    const db = quoteIdentifier(session.admin.db);
+    const [clusters, revisions, operations, events, observations, resources, agents] = await Promise.all([
+        adminRows(`SELECT cluster_id, name, environment, owner, description, provider, connection, requirements, policies, updated_by,
+            formatDateTime(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at FROM ${db}.clusters FINAL WHERE NOT deleted ORDER BY name`),
+        adminRows(`SELECT cluster_id, revision, spec, source, note, created_by, formatDateTime(created_at, '%Y-%m-%d %H:%i:%S') AS created_at
+            FROM ${db}.cluster_revisions ORDER BY cluster_id, revision DESC LIMIT 20 BY cluster_id`),
+        adminRows(`SELECT op_id, cluster_id, kind, revision, parameters, requested_by, formatDateTime(o.requested_at, '%Y-%m-%d %H:%i:%S') AS requested_at,
+            toUnixTimestamp64Milli(o.requested_at) AS requested_ms FROM ${db}.cluster_operations AS o ORDER BY o.requested_at DESC LIMIT 1000`),
+        adminRows(`SELECT op_id, cluster_id, kind, state, step, message, data, recorded_by, formatDateTime(e.at, '%Y-%m-%d %H:%i:%S') AS at,
+            toUnixTimestamp64Milli(e.at) AS at_ms FROM ${db}.cluster_events AS e WHERE kind != 'heartbeat' ORDER BY e.at`),
+        adminRows(`SELECT cluster_id, node_id, role, status, data, formatDateTime(o.at, '%Y-%m-%d %H:%i:%S') AS at, dateDiff('second', o.at, now64(3)) AS age
+            FROM ${db}.cluster_observations AS o WHERE o.at > now64(3) - INTERVAL 1 DAY ORDER BY o.at DESC LIMIT 1 BY cluster_id, node_id`),
+        adminRows(`SELECT cluster_id, resource_id, kind, name, owner_op, disposition, retention_until, evidence, updated_by,
+            formatDateTime(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at FROM ${db}.cluster_resources FINAL ORDER BY cluster_id, kind, name`),
+        adminRows(`SELECT op_id, argMax(data, e.at) AS data, formatDateTime(max(e.at), '%Y-%m-%d %H:%i:%S') AS last_at, dateDiff('second', max(e.at), now64(3)) AS age
+            FROM ${db}.cluster_events AS e WHERE kind = 'heartbeat' AND e.at > now64(3) - INTERVAL 7 DAY GROUP BY op_id ORDER BY max(e.at) DESC`),
+    ]);
+    const by_id = new Map(clusters.map(c => [c.cluster_id, {...c, connection: parseJSON(c.connection, {}), requirements: parseJSON(c.requirements, {}),
+        policies: parseJSON(c.policies, {}), revisions: [], spec: null, revision: 0, lifecycle: 'planned', lifecycle_message: '', mode: 'observe',
+        drift: null, ops: [], observations: [], resources: []}]));
+    for (const r of revisions) {
+        const c = by_id.get(r.cluster_id);
+        if (!c) continue;
+        c.revisions.push({...r, revision: Number(r.revision), spec: parseJSON(r.spec, null)});
+        if (Number(r.revision) > c.revision) {
+            c.revision = Number(r.revision);
+            c.spec = parseJSON(r.spec, null);
+        }
+    }
+    const ops = new Map(operations.map(o => [o.op_id, {...o, revision: Number(o.revision), parameters: parseJSON(o.parameters, {}), state: 'queued', message: '',
+        steps: [], events: [], cancel_requested: false}]));
+    for (const e of events) {
+        const c = by_id.get(e.cluster_id);
+        if (c && e.kind === 'lifecycle') { c.lifecycle = e.state; c.lifecycle_message = e.message; c.lifecycle_at = e.at; }
+        if (c && e.kind === 'mode') c.mode = e.state;
+        if (c && e.kind === 'drift') c.drift = {...e, data: parseJSON(e.data, {})};
+        const op = ops.get(e.op_id);
+        if (!op) continue;
+        op.events.push(e);
+        if (e.kind === 'state') { op.state = e.state; op.message = e.message; op.state_at = e.at; }
+        if (e.kind === 'request' && e.state === 'cancel') op.cancel_requested = true;
+        if (e.kind === 'step') {
+            const existing = op.steps.find(s => s.step === e.step);
+            const entry = {step: e.step, state: e.state, message: e.message, data: parseJSON(e.data, {}), at: e.at};
+            if (existing) Object.assign(existing, entry); else op.steps.push(entry);
+        }
+    }
+    for (const op of ops.values()) {
+        const c = by_id.get(op.cluster_id);
+        if (c) c.ops.push(op);
+    }
+    for (const o of observations) {
+        const c = by_id.get(o.cluster_id);
+        if (c) c.observations.push({...o, age: Number(o.age), data: parseJSON(o.data, {})});
+    }
+    for (const r of resources) {
+        const c = by_id.get(r.cluster_id);
+        if (c) c.resources.push(r);
+    }
+    return {clusters: [...by_id.values()], by_id, agents: agents.map(a => ({...a, age: Number(a.age), data: parseJSON(a.data, {})}))};
+}
+
+/// Health from the latest observation of every member. `stale` when the newest is older than two observation periods.
+function clusterHealth(c) {
+    const ch = c.observations.filter(o => o.role === 'clickhouse');
+    const keeper = c.observations.filter(o => o.role === 'keeper');
+    const newest = c.observations.length ? Math.min(...c.observations.map(o => o.age)) : null;
+    const count = (list, status) => list.filter(o => o.status === status).length;
+    const leader = keeper.find(o => ['leader', 'standalone'].includes(o.data.server_state));
+    return {ch, keeper, newest, stale: newest === null || newest > OBSERVATION_STALE_SECONDS,
+        ok: count(ch, 'ok'), unreachable: count(ch, 'unreachable'), failed: count(ch, 'failed'), unknown: count(ch, 'unknown'),
+        keeper_ok: count(keeper, 'ok'), quorum: keeper.length ? (leader && count(keeper, 'ok') > keeper.length / 2) : null, leader: leader ? leader.data.name : null,
+        versions: [...new Set(ch.filter(o => o.data.version).map(o => o.data.version))]};
+}
+
+function observedAt(c) {
+    if (c.mode === 'retired') return h('span', {className: 'note'}, '—');
+    const health = clusterHealth(c);
+    if (health.newest === null) return badge('Never observed', 'warn', 'The cluster agent has not recorded an observation in the last day.');
+    const text = `${formatSeconds(health.newest)} ago`;
+    return health.stale ? badge(`Stale: ${text}`, 'warn', 'The newest observation is older than two observation periods: the agent may be stopped.') : h('span', {}, text);
+}
+
+function healthSummary(c) {
+    if (c.mode === 'retired') return h('span', {className: 'note'}, 'Retired: not observed');
+    const x = clusterHealth(c);
+    if (!x.ch.length) return h('span', {className: 'note'}, 'no observation');
+    const parts = [`${x.ok}/${x.ch.length} nodes answer`];
+    if (x.unreachable) parts.push(`${x.unreachable} unreachable`);
+    if (x.failed) parts.push(`${x.failed} failed`);
+    if (x.unknown) parts.push(`${x.unknown} unknown`);
+    if (x.keeper.length) parts.push(`Keeper ${x.quorum ? 'quorum' : 'NO quorum'} (${x.keeper_ok}/${x.keeper.length})`);
+    return h('span', {}, parts.join(', '));
+}
+
+ADMIN_PAGES.clusters = (root, route, page) => {
+    const c = page.component;
+    if (!session.admin.can.read_clusters) {
+        put(root, pageHeader(c, 'Clusters'), clusterSetupBox());
+        return;
+    }
+    if (route.sub !== null) {
+        renderClusterDetails(root, route, page);
+        return;
+    }
+    const tab = CLUSTER_LIST_TABS.some(([key]) => key === route.tab) ? route.tab : 'inventory';
+    const panel = h('div', {className: 'admin-page'});
+    put(root, pageHeader(c, 'Clusters', null, [button('Refresh', reloadAdmin)]),
+        h('p', {className: 'note'}, 'Lifecycle management of ClickHouse deployments: planning, provisioning, registration, configuration, scaling, maintenance, '
+            + 'upgrades, recovery, decommissioning, and retirement. The console records plans and operations; the cluster agent on the infrastructure host executes them.'),
+        tabList(c, null, CLUSTER_LIST_TABS, tab), panel);
+    loadInto(page, panel, loadClusterState, state => ({inventory: renderClusterInventory, create: renderCreateCluster, register: renderRegisterCluster})[tab](state));
+};
+
+function clusterSetupBox() {
+    const admin = session.admin;
+    const box = h('div', {className: 'box'}, h('h2', {}, 'Set up Cluster Management'),
+        paragraph(`Cluster Management keeps clusters, desired configurations, operations, observations, and resources in tables of the ${admin.db} database, `
+            + 'and represents its capabilities as columns of a table that stores no data. Setting up creates them; it does not create or change any deployment.'));
+    put(box, h('div', {className: 'actions-row'}, button('Set up', () => {
+        const quoted = quoteIdentifier(admin.db);
+        reviewPlan({action: 'setup_clusters', target_type: 'platform', target_name: admin.db, summary: `Set up Cluster Management in ${admin.db}`, local_only: true,
+            steps: [{description: `Create the database ${admin.db}`, sql: `CREATE DATABASE IF NOT EXISTS ${quoted}`},
+                ...Object.entries(CLUSTER_TABLES).map(([table, ddl]) => ({description: `Create the table ${admin.db}.${table}`,
+                    sql: `CREATE TABLE IF NOT EXISTS ${quoted}.${quoteIdentifier(table)}\n${ddl()}`}))],
+            recovery: 'The statements use IF NOT EXISTS: run the setup again after fixing the error.', onclose: reloadAdminContext});
+    }, {className: 'primary', disabled: !admin.can.setup, title: admin.can.setup ? null : `Needs CREATE TABLE on ${admin.db}.*.`})));
+    if (!admin.can.setup) box.append(paragraph('Your user cannot read the cluster records, and cannot set them up.'));
+    return box;
+}
+
+function agentBox(state) {
+    const agent = state.agents[0];
+    const box = h('div', {className: 'box'}, h('h2', {}, 'Cluster agent'));
+    if (!agent) {
+        box.append(h('div', {className: 'message warning'}, 'No cluster agent has reported in the last 7 days: operations stay queued and nothing is observed. '
+            + 'Start utils/web-console/cluster_agent.mjs on the infrastructure host (see "Cluster agent" in the documentation).'));
+        return box;
+    }
+    box.append(kvList([['Agent', agent.op_id.replace(/^agent:/, '')], ['Last seen', `${agent.last_at} UTC (${formatSeconds(agent.age)} ago)`],
+        ['Providers', (agent.data.providers || []).join(', ') || 'none'], ['Environments it may change', (agent.data.environments || []).join(', ')]]));
+    if (agent.age > 120) box.append(h('div', {className: 'message warning'}, 'The agent has not reported for more than 2 minutes: observations are stale and operations wait.'));
+    return box;
+}
+
+function renderClusterInventory(state) {
+    const rows = state.clusters;
+    return [agentBox(state), dataTable([
+        {title: 'Cluster', render: c => [adminLink(c.name, 'admin-clusters', c.cluster_id), h('div', {className: 'note'}, `${shortId(c.cluster_id)} · ${c.environment} · ${c.owner || 'no owner'}`)]},
+        {title: 'Provider / mode', render: c => [c.provider, h('div', {className: 'note'}, c.mode)]},
+        {title: 'Lifecycle', render: c => lifecycleBadge(c.lifecycle, c.lifecycle_message)},
+        {title: 'Health', render: c => healthSummary(c)},
+        {title: 'Versions', render: c => clusterHealth(c).versions.join(', ') || h('span', {className: 'note'}, 'unknown')},
+        {title: 'Last observation', render: c => observedAt(c)},
+        {title: 'Attention', render: c => {
+            const failed = c.ops.filter(o => ['failed', 'blocked', 'unknown'].includes(o.state)).length;
+            const drift = c.drift && c.drift.state === 'drift';
+            return h('span', {className: 'chips'}, drift ? badge('Drift', 'warn') : null, failed ? badge(`${failed} operations need attention`, 'bad') : null,
+                !drift && !failed ? h('span', {className: 'note'}, '—') : null);
+        }},
+    ], rows, 'No cluster is registered. Create one, or register an existing deployment.', 'Clusters')];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Create Cluster
+
+function renderCreateCluster(state) {
+    const can = session.admin.can;
+    return [h('div', {className: 'box'}, h('h2', {}, 'Create a cluster'),
+        paragraph('A guided plan: purpose, provider, topology, storage and resources, security, operational policies, and a reviewable plan. '
+            + 'The cluster agent provisions it as a durable operation and declares it ready only after it has checked Keeper, authentication, the topology, '
+            + 'and a write, replication, and read test.'),
+        h('div', {className: 'actions-row'}, button('Create cluster', () => createClusterWizard(state).catch(showFailure('Create cluster')), {className: 'primary',
+            disabled: !(can.cap_create_cluster && can.write_clusters), title: can.cap_create_cluster ? null : 'Needs the capability create_cluster.'})))];
+}
+
+function topologyTolerance(w) {
+    const lines = [];
+    lines.push(w.replicas > 1 ? `Each shard keeps serving reads and writes with up to ${w.replicas - 1} of its ${w.replicas} replicas stopped.`
+        : 'Each shard has one replica: stopping its node stops that shard, and losing its volume loses its data unless it was backed up.');
+    if (w.keepers === 1) lines.push('One Keeper member: when it stops, replicated tables become read-only and ON CLUSTER queries wait.');
+    else lines.push(`${w.keepers} Keeper members: the quorum survives ${Math.floor((w.keepers - 1) / 2)} stopped members.`);
+    if (w.keepers % 2 === 0) lines.push('An even number of Keeper members tolerates no more failures than one less, and is refused.');
+    if (w.provider === 'docker-compose') lines.push('All containers run on one Docker host: they are one failure domain. A host failure stops the whole cluster; this lab does not provide high availability.');
+    return lines;
+}
+
+async function createClusterWizard(state) {
+    const backup_destinations = await detailRows(`SELECT id, name, toString(type) AS type FROM ${clusterTable('backup_destinations')} FINAL WHERE NOT deleted AND enabled ORDER BY name`);
+    const w = {name: '', environment: 'lab', owner: session.server_user, description: '', volume_gb: 10, growth: 10, concurrency: 10, ingestion: 'batch',
+        availability: 'lab', rpo_hours: 24, rto_hours: 4, provider: 'docker-compose', shards: 1, replicas: 2, keepers: 3, cluster_name: 'main',
+        image: 'clickhouse/clickhouse-server:26.9.8.3', cpus: 2, memory_mb: 2048, admin_user: 'console_admin', backup_destination_id: '',
+        maintenance_window: 'Sunday 02:00-04:00 UTC', notify_ref: ''};
+    const field = (label, key, attrs = {}, hint) => {
+        const input = h('input', {type: attrs.type || 'text', value: w[key], autocomplete: 'off', spellcheck: false, ...attrs,
+            oninput: e => { w[key] = attrs.type === 'number' ? Number(e.target.value) : e.target.value; }});
+        return adminField(label, input, hint);
+    };
+    const choice = (label, key, options, hint) => adminField(label, select(options, w[key], {onchange: e => { w[key] = /^\d+$/.test(e.target.value) ? Number(e.target.value) : e.target.value; }}), hint);
+    const plan = () => {
+        const project = 'chc-<cluster id>';
+        const nodes = [];
+        for (let s = 1; s <= w.shards; s++) for (let r = 1; r <= w.replicas; r++) nodes.push(`s${s}r${r}`);
+        const keepers = Array.from({length: w.keepers}, (_, i) => `keeper${i + 1}`);
+        return {nodes, keepers, project};
+    };
+    wizard('Create cluster', [
+        {title: 'Purpose and ownership', render: () => h('div', {},
+            field('Name', 'name', {}, 'Unique in the inventory: letters, digits, dashes.'), choice('Environment', 'environment', ['lab', 'development', 'staging', 'production']),
+            field('Owner', 'owner'), field('Workload', 'description', {}, 'What runs on it.'),
+            h('div', {className: 'form-grid'}, field('Expected data (GiB)', 'volume_gb', {type: 'number', min: 0}), field('Growth per month (%)', 'growth', {type: 'number', min: 0}),
+                field('Concurrent queries', 'concurrency', {type: 'number', min: 1}), choice('Ingestion', 'ingestion', [['batch', 'Batch'], ['streaming', 'Streaming'], ['mixed', 'Mixed']]),
+                choice('Availability goal', 'availability', [['lab', 'None (lab)'], ['single-failure', 'Survive one node failure'], ['site', 'Survive a site failure']]),
+                field('Target RPO (hours)', 'rpo_hours', {type: 'number', min: 0}), field('Target RTO (hours)', 'rto_hours', {type: 'number', min: 0})),
+            h('p', {className: 'note'}, 'Sizing derived from these numbers is an estimate: validate it with the real workload.')),
+        validate: () => {
+            if (!/^[a-z][a-z0-9-]{1,40}$/.test(w.name)) return 'Enter a name of 2 to 41 lowercase letters, digits, and dashes, starting with a letter.';
+            if (state.clusters.some(c => c.name === w.name)) return 'Another cluster has this name.';
+            if (!w.owner.trim()) return 'Enter an owner.';
+            return null;
+        }},
+        {title: 'Infrastructure provider', render: () => h('div', {},
+            dataTable([{title: 'Provider', render: p => h('label', {className: 'check'}, h('input', {type: 'radio', name: 'cluster-provider', value: p.id, checked: w.provider === p.id,
+                disabled: !p.implemented, onchange: () => { w.provider = p.id; }}), h('span', {}, p.title))},
+            {title: 'Status', render: p => (p.implemented ? badge('Implemented', 'ok') : badge('Not available'))}, {title: 'Notes', render: p => p.note}], CLUSTER_PROVIDERS, null, 'Providers'),
+            h('p', {className: 'note'}, `The cluster agent validates provider access, the image, free ports, and the host's resources before it creates anything. `
+                + `Agent: ${state.agents[0] ? `${state.agents[0].op_id.replace(/^agent:/, '')}, last seen ${formatSeconds(state.agents[0].age)} ago, environments ${(state.agents[0].data.environments || []).join(', ')}` : 'none has reported'}.`)),
+        validate: () => {
+            if (!state.agents[0] || !(state.agents[0].data.providers || []).includes(w.provider)) return 'No running cluster agent offers this provider.';
+            if (!(state.agents[0].data.environments || []).includes(w.environment)) return `The agent does not change the environment ${w.environment}. Choose an environment it serves, or configure the agent.`;
+            return null;
+        }},
+        {title: 'Topology', render: () => {
+            const tolerance = h('ul', {className: 'steps'});
+            const draw = () => tolerance.replaceChildren(...topologyTolerance(w).map(t => h('li', {}, t)));
+            const redraw = el => { el.addEventListener('change', draw); el.addEventListener('input', draw); return el; };
+            const box = h('div', {},
+                h('div', {className: 'form-grid'},
+                    redraw(field('Shards', 'shards', {type: 'number', min: 1, max: 4})), redraw(field('Replicas per shard', 'replicas', {type: 'number', min: 1, max: 3})),
+                    redraw(choice('Keeper members', 'keepers', [['1', '1 (no fault tolerance)'], ['3', '3 (survives 1)'], ['5', '5 (survives 2)']])),
+                    field('Cluster name in remote_servers', 'cluster_name', {}, 'Used by ON CLUSTER and the cluster() function.')),
+                h('p', {className: 'note'}, 'ClickHouse replica count and Keeper quorum are separate: Keeper is a distinct ensemble, and changing the replicas does not resize it. '
+                    + 'Clients connect to any node; this lab has no load balancer.'),
+                h('h3', {}, 'What this topology tolerates'), tolerance);
+            draw();
+            return box;
+        },
+        validate: () => {
+            if (!(w.shards >= 1 && w.shards <= 4) || !(w.replicas >= 1 && w.replicas <= 3)) return 'Choose 1 to 4 shards and 1 to 3 replicas per shard.';
+            if (w.keepers % 2 === 0) return 'Choose an odd number of Keeper members.';
+            if (!/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(w.cluster_name)) return 'Enter a cluster name of letters, digits, and underscores.';
+            return null;
+        }},
+        {title: 'Storage and resources', render: () => h('div', {},
+            h('div', {className: 'form-grid'}, field('CPUs per node', 'cpus', {type: 'number', min: 0.5, step: 0.5}), field('Memory per node (MiB)', 'memory_mb', {type: 'number', min: 512}),
+                field('Image', 'image', {}, 'An image of an allowed repository that is already on the Docker host (the agent does not pull images).')),
+            kvList([['Data storage', 'A local Docker volume per node (persistent; not shrinkable; size limited by the host disk).'],
+                ['Keeper storage', 'A local Docker volume per member for its log and snapshots.'],
+                ['Object storage', 'Not configured by this provider. Object storage does not make an OSS deployment stateless: metadata and coordination remain on the nodes and in Keeper.'],
+                ['Backups', 'Through Backup & Restore destinations (next steps), not the node volumes.']])),
+        validate: () => {
+            if (!(w.cpus >= 0.5) || !(w.memory_mb >= 512)) return 'Give each node at least 0.5 CPU and 512 MiB.';
+            if (!/^[a-z0-9./_-]+:[A-Za-z0-9._-]+$/.test(w.image)) return 'Enter an image as repository:tag.';
+            return null;
+        }},
+        {title: 'Security', render: () => h('div', {}, field('Administrative user on the nodes', 'admin_user', {}, 'Created from the configuration with a generated password.'),
+            kvList([['Bootstrap credentials', 'Generated by the agent on its host (file secrets.env of the deployment, readable by its owner). Never sent to the browser, shown in plans, or logged.'],
+                ['Inter-node authentication', 'A generated cluster secret for distributed queries, and interserver credentials for replication.'],
+                ['Network', 'Endpoints bound to 127.0.0.1 on the Docker host; nodes reach each other on a private Docker network.'],
+                ['TLS', 'Not configured by this provider: traffic stays on the host. Use another provider for networks where TLS is required.'],
+                ['Access management', 'SQL users are local to each node (no replicated user directory); the administrative user comes from the configuration on every node.']])),
+        validate: () => (/^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(w.admin_user) ? null : 'Enter a valid user name.')},
+        {title: 'Operational policies', render: () => h('div', {},
+            adminField('Backup destination', select([['', 'None yet'], ...(backup_destinations.rows || []).filter(d => d.type === 's3').map(d => [d.id, d.name])], w.backup_destination_id,
+                {onchange: e => { w.backup_destination_id = e.target.value; }}), backup_destinations.error ? `The destinations could not be read: ${backup_destinations.error}`
+                : 'S3 destinations of Backup & Restore. Disk destinations belong to the console\'s server and cannot be reached by the lab nodes.'),
+            field('Maintenance window', 'maintenance_window', {}, 'Recorded with the cluster; operations are started by people, not by the window.'),
+            field('Notification reference', 'notify_ref', {placeholder: 'CLUSTER_ALERTS_WEBHOOK'}, 'An environment variable on the agent host with a webhook URL (optional).'),
+            h('p', {className: 'note'}, 'Monitoring is collected by the cluster agent and shown in this console. Backup schedules are created in Backup & Restore.')),
+        validate: () => (w.notify_ref && !/^[A-Z][A-Z0-9_]{0,63}$/.test(w.notify_ref) ? 'The notification reference is an environment variable name.' : null)},
+        {title: 'Plan', render: () => {
+            const p = plan();
+            return h('div', {},
+                kvList([['Cluster', `${w.name} (${w.environment}, owner ${w.owner})`], ['Provider', w.provider],
+                    ['Topology', `${w.shards} shards × ${w.replicas} replicas: ${p.nodes.join(', ')}; Keeper: ${p.keepers.join(', ')}`],
+                    ['Containers to create', `${p.nodes.length + p.keepers.length}: ${[...p.nodes, ...p.keepers].map(n => `${p.project}-${n}-1`).join(', ')}`],
+                    ['Volumes to create', [...p.nodes, ...p.keepers].map(n => `${p.project}_${n}-data`).join(', ')],
+                    ['Network', `${p.project}_default`],
+                    ['Endpoints', `HTTP and native ports of every node on 127.0.0.1, assigned by the agent from its port range, and recorded in revision 2.`],
+                    ['Configuration', 'remote_servers, macros, Keeper connection, interserver credentials, and the administrative user, generated per node.'],
+                    ['Resources per node', `${w.cpus} CPU, ${w.memory_mb} MiB`], ['Image', w.image],
+                    ['Expected disruption', 'None: a new deployment.'],
+                    ['Preconditions checked by the agent', 'Docker answers; the image is present and allowed; free ports; the host has the memory; your capability create_cluster.'],
+                    ['Readiness', 'Every node answers and authenticates; Keeper has a leader and a quorum; every node lists the topology; a test database is written, replicated, read, and dropped.'],
+                    ['If provisioning fails', 'The resources created so far are recorded with their owner operation and listed under Retirement. Retry reuses them; Delete resources removes them.']]),
+                h('p', {className: 'note'}, 'Submitting records the cluster and its desired configuration (revision 1) and queues the operation. The plan contains no credentials.'));
+        }},
+    ], 'Review', () => {
+        const cluster_id = crypto.randomUUID();
+        const op_id = crypto.randomUUID();
+        const spec = {schema: 1, cluster_name: w.cluster_name, image: w.image,
+            keeper: {image: w.image, members: Array.from({length: w.keepers}, (_, i) => ({node_id: crypto.randomUUID(), name: `keeper${i + 1}`, server_id: i + 1}))},
+            shards: Array.from({length: w.shards}, (_, i) => ({index: i + 1, replicas: Array.from({length: w.replicas}, (_, r) => ({node_id: crypto.randomUUID(), name: `s${i + 1}r${r + 1}`, state: 'active'}))})),
+            resources: {cpus: w.cpus, memory_mb: w.memory_mb}, storage: {kind: 'local-volume'}, settings: {server: {}, profile: {}},
+            security: {admin_user: w.admin_user, tls: false, network: 'loopback'}};
+        const cluster_row = {cluster_id, name: w.name, environment: w.environment, owner: w.owner, description: w.description, provider: w.provider, connection: '{}',
+            requirements: JSON.stringify({volume_gb: w.volume_gb, growth_percent: w.growth, concurrency: w.concurrency, ingestion: w.ingestion, availability: w.availability,
+                rpo_hours: w.rpo_hours, rto_hours: w.rto_hours}),
+            policies: JSON.stringify({backup_destination_id: w.backup_destination_id, maintenance_window: w.maintenance_window, notify_ref: w.notify_ref}), deleted: false};
+        reviewPlan({action: 'cluster_create_request', target_type: 'cluster', target_name: w.name, summary: `Create cluster ${w.name}`, local_only: true, correlation_id: op_id,
+            steps: [insertStep('clusters', cluster_row, `Register cluster ${w.name} (${cluster_id})`),
+                insertStep('cluster_revisions', {cluster_id, revision: 1, spec: JSON.stringify(spec), source: 'console', note: 'initial plan'}, 'Record the desired configuration (revision 1)'),
+                insertStep('cluster_events', {op_id: '', cluster_id, kind: 'mode', state: 'manage', step: '', message: 'created by the console', data: '{}'}, 'Set the management mode to Manage'),
+                insertStep('cluster_events', {op_id: '', cluster_id, kind: 'lifecycle', state: 'planned', step: '', message: 'planned', data: '{}'}, 'Set the lifecycle state to Planned'),
+                insertStep('cluster_operations', {op_id, cluster_id, kind: 'provision', revision: 1, parameters: '{}'}, `Request provisioning (${op_id})`),
+                insertStep('cluster_events', {op_id, cluster_id, kind: 'state', state: 'queued', step: '', message: '', data: '{}'}, 'Queue it for the cluster agent')],
+            warning: 'The cluster agent provisions it and checks on the server that you hold the capability create_cluster. Submitting the same plan twice provisions it once.',
+            onclose: () => navigate(adminPath('admin-clusters', cluster_id, 'operations'))});
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Register Existing
+
+function renderRegisterCluster(state) {
+    const can = session.admin.can;
+    return [h('div', {className: 'box'}, h('h2', {}, 'Register an existing deployment'),
+        paragraph('Registration is read-only. The cluster agent connects to the endpoints you list with credentials from its own environment, discovers the nodes, '
+            + 'topology, versions, storage, and Keeper, and records what it saw with its provenance and confidence. The cluster starts in Observe mode: '
+            + 'nothing is changed, recreated, or rotated, and infrastructure is not taken over.'),
+        h('div', {className: 'actions-row'}, button('Register deployment', () => registerClusterDialog(state), {className: 'primary',
+            disabled: !(can.cap_register && can.write_clusters), title: can.cap_register ? null : 'Needs the capability register.'})))];
+}
+
+function registerClusterDialog(state) {
+    const name = h('input', {type: 'text', autocomplete: 'off', spellcheck: false});
+    const environment = select(['lab', 'development', 'staging', 'production'], 'development');
+    const owner = h('input', {type: 'text', value: session.server_user, autocomplete: 'off'});
+    const endpoints = h('textarea', {placeholder: 'http://clickhouse-1.example.internal:8123\nhttp://clickhouse-2.example.internal:8123', spellcheck: false});
+    const credential_ref = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'PROD_CLICKHOUSE'});
+    const description = h('input', {type: 'text', autocomplete: 'off'});
+    formDialog('Register existing deployment', [
+        adminField('Name', name), adminField('Environment', environment), adminField('Owner', owner), adminField('Description', description),
+        adminField('Endpoints', endpoints, 'HTTP endpoints of the nodes, one per line, reachable from the agent host.'),
+        adminField('Credential reference', credential_ref, 'The agent reads <REF>_USER and <REF>_PASSWORD from its environment. Use a read-only account: discovery and observation only read.'),
+    ], 'Review', () => {
+        if (!/^[a-z][a-z0-9-]{1,40}$/.test(name.value)) return 'Enter a name of lowercase letters, digits, and dashes.';
+        if (state.clusters.some(c => c.name === name.value)) return 'Another cluster has this name.';
+        const list = endpoints.value.split('\n').map(v => v.trim()).filter(Boolean);
+        if (!list.length) return 'Enter at least one endpoint.';
+        for (const e of list) {
+            const parsed = parseEndpoint(e);
+            if (parsed.error) return `${e}: ${parsed.error}`;
+        }
+        if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(credential_ref.value)) return 'The credential reference is an environment variable prefix of uppercase letters, digits, and underscores.';
+        const cluster_id = crypto.randomUUID();
+        const op_id = crypto.randomUUID();
+        const origins = list.map(e => parseEndpoint(e).origin);
+        return {action: 'cluster_register_request', target_type: 'cluster', target_name: name.value, summary: `Register ${name.value}`, local_only: true, correlation_id: op_id,
+            steps: [insertStep('clusters', {cluster_id, name: name.value, environment: environment.value, owner: owner.value, description: description.value, provider: 'external',
+                connection: JSON.stringify({endpoints: origins, credential_ref: credential_ref.value}), requirements: '{}', policies: '{}', deleted: false}, `Register ${name.value} (${cluster_id})`),
+                insertStep('cluster_events', {op_id: '', cluster_id, kind: 'mode', state: 'observe', step: '', message: 'registered', data: '{}'}, 'Set the management mode to Observe'),
+                insertStep('cluster_events', {op_id: '', cluster_id, kind: 'lifecycle', state: 'planned', step: '', message: 'awaiting discovery', data: '{}'}, 'Set the lifecycle state to Planned'),
+                insertStep('cluster_operations', {op_id, cluster_id, kind: 'register', revision: 0, parameters: '{}'}, `Request discovery (${op_id})`),
+                insertStep('cluster_events', {op_id, cluster_id, kind: 'state', state: 'queued', step: '', message: '', data: '{}'}, 'Queue it for the cluster agent')],
+            warning: 'Discovery only reads. The credentials stay on the agent host.',
+            onclose: () => navigate(adminPath('admin-clusters', cluster_id, 'overview'))};
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cluster details
+
+function renderClusterDetails(root, route, page) {
+    const c = page.component;
+    const tab = CLUSTER_TABS.some(([key]) => key === route.tab) ? route.tab : 'overview';
+    const body = h('div', {className: 'admin-page'});
+    root.replaceWith(body);
+    loadInto(page, body, loadClusterState, state => {
+        const cluster = state.by_id.get(route.sub);
+        if (!cluster) return [pageHeader(c, 'Cluster not found', adminLink('Clusters', 'admin-clusters')), paragraph(`No cluster with the identifier ${route.sub}.`)];
+        const header = pageHeader(c, cluster.name, adminLink('Clusters', 'admin-clusters'), [button('Refresh', reloadAdmin)]);
+        header.insertBefore(h('span', {className: 'chips'}, lifecycleBadge(cluster.lifecycle, cluster.lifecycle_message), badge(cluster.mode), badge(cluster.environment)),
+            header.querySelector('.spacer'));
+        const views = {overview: clusterOverview, nodes: clusterNodes, keeper: clusterKeeper, configuration: clusterConfiguration, scaling: clusterScaling,
+            maintenance: clusterMaintenance, protection: clusterProtection, operations: clusterOperations, retirement: clusterRetirement};
+        return [header, tabList(c, cluster.cluster_id, CLUSTER_TABS, tab), ...[].concat(views[tab](state, cluster))];
+    });
+}
+
+const managed = cluster => cluster.provider === 'docker-compose' && cluster.mode === 'manage' && cluster.spec && cluster.spec.shards;
+const activeNodes = spec => spec.shards.flatMap(sh => sh.replicas.filter(r => r.state !== 'removed').map(r => ({...r, shard: sh.index})));
+
+function capabilityButton(text, capability, fn, options = {}) {
+    const can = session.admin.can;
+    const allowed = can[`cap_${capability}`] && can.write_clusters;
+    return button(text, fn, {className: options.className || 'small', disabled: !allowed || options.disabled,
+        title: !allowed ? `Needs the capability ${capability} (INSERT(${capability}) ON ${session.admin.db}.cluster_capabilities) and INSERT on the operation tables.` : options.title});
+}
+
+function clusterOverview(state, cluster) {
+    const x = clusterHealth(cluster);
+    const backups = cluster.ops.filter(o => o.kind === 'backup' && o.state === 'succeeded');
+    const last_backup = backups[0];
+    const req = cluster.requirements || {};
+    return [
+        h('div', {className: 'box'}, h('h2', {}, 'Identity'), kvList([
+            ['Identifier', h('code', {}, cluster.cluster_id)], ['Environment', cluster.environment], ['Owner', cluster.owner || '—'], ['Workload', cluster.description || '—'],
+            ['Provider', cluster.provider], ['Management mode', `${cluster.mode}${cluster.provider === 'external' ? ' (no provider integration: the console observes, and does not change the deployment)' : ''}`],
+            ['Lifecycle', [lifecycleBadge(cluster.lifecycle), ` ${cluster.lifecycle_message || ''}`]],
+            ['Desired configuration', cluster.revision ? `revision ${cluster.revision}` : 'none yet'],
+            ['Endpoints', cluster.provider === 'external' ? (cluster.connection.endpoints || []).join(', ') : (cluster.spec ? activeNodes(cluster.spec).map(n => n.http_port ? `${n.name} http://127.0.0.1:${n.http_port}` : `${n.name} (port not assigned yet)`).join(', ') : '—')],
+            ['Secrets', cluster.provider === 'docker-compose' ? 'Referenced: secrets.env of the deployment on the agent host' : `Referenced: ${cluster.connection.credential_ref || '—'}_USER / _PASSWORD on the agent host`],
+        ])),
+        h('div', {className: 'box'}, h('h2', {}, 'Health'), kvList([
+            ['Last observation', observedAt(cluster)], ['ClickHouse nodes', healthSummary(cluster)],
+            ['Keeper', x.keeper.length ? `${x.quorum ? 'quorum' : 'no quorum'}; leader ${x.leader || 'none'}` : (cluster.provider === 'external' ? 'not observed: Keeper of a registered deployment is reported by its nodes (Nodes & Topology)' : '—')],
+            ['Versions', x.versions.join(', ') || 'unknown'],
+            ['Configuration drift', cluster.drift ? (cluster.drift.state === 'drift' ? badge('Drift', 'warn') : badge('In sync', 'ok')) : h('span', {className: 'note'}, 'not checked (managed clusters only)')],
+        ]), x.stale ? h('div', {className: 'message warning'}, 'The observations are stale or missing: the values above may not describe the cluster now.') : null),
+        h('div', {className: 'box'}, h('h2', {}, 'Recovery objectives'), kvList([
+            ['Target RPO / RTO', req.rpo_hours !== undefined ? `${req.rpo_hours} h / ${req.rto_hours} h (targets, not measurements)` : 'not set'],
+            ['Last verified backup', last_backup ? `${last_backup.requested_at} UTC (operation ${shortId(last_backup.op_id)})` : 'none: no measured recovery point'],
+            ['Measured restore time', 'not measured: restores into replacement clusters are not automated (see Protection & Recovery)'],
+        ])),
+        h('div', {className: 'box'}, h('h2', {}, 'Recent operations'), clusterOperationsTable(cluster, cluster.ops.slice(0, 5))),
+    ];
+}
+
+function nodeRow(o) {
+    const d = o.data;
+    const used = d.disk_total ? Math.round(100 * (1 - Number(d.disk_free) / Number(d.disk_total))) : null;
+    return [
+        badge(...(NODE_BADGES[o.status] || [o.status, '']), d.error || null),
+        d.version || '—', d.uptime !== undefined ? formatSeconds(Number(d.uptime)) : '—',
+        d.replication_queue !== undefined ? `${d.replication_queue} queued, ${d.max_replication_delay || 0} s delay${Number(d.readonly_replicas) ? `, ${d.readonly_replicas} read-only` : ''}` : '—',
+        d.merges !== undefined ? `${d.merges} merges, ${d.unfinished_mutations} mutations, ${d.distribution_files || 0} queued distributed files` : '—',
+        used !== null ? `${used}% of ${formatBytes(Number(d.disk_total))}` : '—',
+        d.memory_used !== undefined ? `${formatBytes(Number(d.memory_used))} (host ${formatBytes(Number(d.memory_total))})` : '—',
+        `${formatSeconds(o.age)} ago`,
+    ];
+}
+
+function clusterNodes(state, cluster) {
+    const observed = new Map(cluster.observations.filter(o => o.role === 'clickhouse').map(o => [o.node_id, o]));
+    const out = [h('p', {className: 'note'}, 'Unreachable means the node did not answer the agent; failed is used only when the provider confirms it (a container that is not running). '
+        + 'Memory is reported for the Docker host, not the container limit.')];
+    if (cluster.provider === 'external') {
+        const discovered = cluster.spec || {};
+        out.push(h('div', {className: 'box'}, h('h2', {}, 'Observed endpoints'), dataTable([
+            {title: 'Endpoint', render: o => o.data.endpoint || o.node_id},
+            ...['State', 'Version', 'Uptime', 'Replication', 'Background work', 'Disk', 'Memory', 'Observed'].map((title, i) => ({title, render: o => nodeRow(o)[i]})),
+        ], [...observed.values()], 'Not observed yet.', 'Endpoints')),
+        h('div', {className: 'box'}, h('h2', {}, 'Discovered topology'),
+            h('p', {className: 'note'}, `${(discovered.provenance || {}).clusters || ''} Confidence: ${(discovered.provenance || {}).confidence || 'unknown'}.`),
+            dataTable([{title: 'Cluster definition', render: e => e[0]}, {title: 'Members (shard/replica → host)', render: e => Object.entries(e[1].members).map(([k, v]) => `${k} → ${v}`).join(', ')},
+                {title: 'Seen from', render: e => e[1].seen_from.join(', ')}], Object.entries(discovered.clusters || {}), 'Nothing discovered yet.', 'Discovered clusters'),
+            (discovered.conflicts || []).length ? h('div', {className: 'message warning'}, `Conflicting observations: ${discovered.conflicts.join('; ')}`) : null));
+        return out;
+    }
+    if (!cluster.spec || !cluster.spec.shards) return [...out, paragraph('No topology yet.')];
+    for (const shard of cluster.spec.shards) {
+        const replicas = shard.replicas.filter(r => r.state !== 'removed');
+        if (!replicas.length) continue;
+        out.push(h('div', {className: 'box'}, h('h2', {}, `Shard ${shard.index}`), dataTable([
+            {title: 'Node', render: r => [h('strong', {}, r.name), h('div', {className: 'note'}, `${shortId(r.node_id)} · ${r.http_port ? `127.0.0.1:${r.http_port}` : 'no port yet'} · ${(r.image || cluster.spec.image).split(':').pop()}`)]},
+            ...['State', 'Version', 'Uptime', 'Replication', 'Background work', 'Disk', 'Memory', 'Observed'].map((title, i) => ({title, render: r => {
+                const o = observed.get(r.node_id);
+                return o ? nodeRow(o)[i] : (i === 0 ? badge('Not observed', 'warn') : '—');
+            }})),
+            {title: '', render: r => (managed(cluster) ? h('span', {className: 'actions-row'},
+                capabilityButton('Restart', 'maintain', () => restartDialog(cluster, [r.name])),
+                capabilityButton('Decommission', 'decommission', () => decommissionDialog(cluster, {...r, shard: shard.index}))) : null)},
+        ], replicas, null, `Shard ${shard.index}`)));
+    }
+    out.push(h('p', {className: 'note'}, `Placement: every node runs on the agent's Docker host (one failure domain). Infrastructure: containers ${cluster.spec ? `chc-${cluster.cluster_id.replace(/-/g, '').slice(0, 10)}-<node>-1` : ''}.`));
+    return out;
+}
+
+function clusterKeeper(state, cluster) {
+    const members = cluster.observations.filter(o => o.role === 'keeper');
+    const x = clusterHealth(cluster);
+    if (cluster.provider === 'external') {
+        const nodes = ((cluster.spec || {}).nodes || []);
+        return [h('div', {className: 'box'}, h('h2', {}, 'Keeper as reported by the nodes'),
+            dataTable([{title: 'Node', render: n => n.endpoint}, {title: 'Keeper sessions', render: n => (n.keeper || []).map(k => `${k[0]} ${k[1]}:${k[2]}`).join(', ') || (n.reachable ? 'none' : 'not reachable')}],
+                nodes, 'Not discovered yet.', 'Keeper connections'),
+            paragraph('The members of an external Keeper ensemble are not contacted directly; membership and quorum are not observed for registered deployments.'))];
+    }
+    return [
+        h('div', {className: 'box'}, h('h2', {}, 'Quorum'), kvList([
+            ['Members', String((cluster.spec ? cluster.spec.keeper.members : []).length)], ['Answering', `${x.keeper_ok}/${members.length}`],
+            ['Leader', x.leader || 'none'], ['Quorum', x.quorum === null ? 'not observed' : (x.quorum ? badge('Yes', 'ok') : badge('No', 'bad'))],
+            ['Last observation', observedAt(cluster)],
+        ]), x.quorum === false ? h('div', {className: 'message error'}, 'Without a quorum, replicated tables are read-only and ON CLUSTER queries wait. '
+            + 'The agent stops operations that remove nodes until the quorum is back.') : null),
+        h('div', {className: 'box'}, h('h2', {}, 'Members'), dataTable([
+            {title: 'Member', render: o => [h('strong', {}, o.data.name), h('div', {className: 'note'}, shortId(o.node_id))]},
+            {title: 'State', render: o => badge(...(NODE_BADGES[o.status] || [o.status, '']), o.data.error || null)},
+            {title: 'Role', render: o => o.data.server_state || '—'}, {title: 'Version', render: o => (o.data.version || '—').replace(/-stable.*/, '')},
+            {title: 'Synced followers', render: o => (o.data.server_state === 'leader' ? `${o.data.synced_followers}/${o.data.followers}` : '—')},
+            {title: 'Znodes', className: 'num', render: o => (o.data.znodes !== undefined ? String(o.data.znodes) : '—')},
+            {title: 'Avg latency', className: 'num', render: o => (o.data.latency_avg !== undefined ? `${o.data.latency_avg} ms` : '—')},
+            {title: 'Observed', render: o => `${formatSeconds(o.age)} ago`},
+        ], members, 'Not observed yet.', 'Keeper members')),
+        h('div', {className: 'box'}, h('h2', {}, 'Membership changes'), paragraph('Not implemented. The docker-compose provider creates the ensemble at provisioning; '
+            + 'reconfiguring a running ensemble needs a procedure verified for the deployed version. Changing ClickHouse replicas never resizes Keeper.'),
+        paragraph('Keeper backup and recovery are separate from table backups: Keeper keeps its log and snapshots in its own volumes. Table backups contain the table data '
+            + 'and metadata needed to recreate replicated tables, not the coordination state.')),
+    ];
+}
+
+function clusterConfiguration(state, cluster) {
+    const settings = (cluster.spec && cluster.spec.settings) || {server: {}, profile: {}};
+    const drift = cluster.drift && cluster.drift.state === 'drift' ? cluster.drift.data : null;
+    const out = [];
+    out.push(h('div', {className: 'box'}, h('div', {className: 'admin-head'}, h('h2', {}, 'Desired settings'), h('span', {className: 'spacer'}),
+        managed(cluster) ? capabilityButton('Change settings', 'configure', () => configureDialog(cluster)) : null),
+    dataTable([{title: 'Setting', render: s => [h('code', {}, s.name), h('div', {className: 'note'}, s.hint)]},
+        {title: 'Scope', render: s => (s.scope === 'server' ? 'server configuration' : 'default settings profile')},
+        {title: 'Desired', render: s => { const v = settings[s.scope][s.name]; return v === undefined ? h('span', {className: 'note'}, 'server default') : String(v); }},
+        {title: 'Observed differences', render: s => {
+            const items = drift ? drift.items.filter(i => i.setting === s.name) : [];
+            return items.length ? items.map(i => h('div', {}, `${i.node}: ${i.observed}`)) : h('span', {className: 'note'}, '—');
+        }}], CLUSTER_SETTINGS, null, 'Settings'),
+    h('p', {className: 'note'}, 'Source of truth: the desired configuration of the console, written by the agent into managed files per node '
+        + '(config.d/console-settings.xml, users.d/console-users.xml). Whether a change needs a restart is read from the server (changeable_without_restart); '
+        + 'restarts are rolling, one replica at a time. Other settings are not managed and are never overwritten. Secrets are referenced, never stored in revisions.')));
+    if (cluster.drift) {
+        const d = cluster.drift.data;
+        out.push(h('div', {className: 'box'}, h('h2', {}, 'Drift'), cluster.drift.state === 'drift'
+            ? [h('div', {className: 'message warning'}, `Detected ${cluster.drift.at} UTC: the deployment differs from revision ${d.revision}.`),
+                d.items.length ? dataTable([{title: 'Node', render: i => i.node}, {title: 'Setting', render: i => i.setting}, {title: 'Desired', render: i => i.desired}, {title: 'Observed', render: i => i.observed}], d.items, null, 'Differences') : null,
+                d.files.length ? paragraph(`Managed files edited outside the console: ${d.files.join(', ')}.`) : null,
+                managed(cluster) ? h('div', {className: 'actions-row'},
+                    capabilityButton('Apply the desired configuration', 'configure', () => submitClusterOperation(cluster, 'reconcile', {capability: 'configure',
+                        summary: `Reconcile ${cluster.name} to revision ${cluster.revision}`, warning: 'The managed files are written again from the desired configuration: changes made by hand to them are overwritten.'})),
+                    capabilityButton('Adopt the observed values', 'configure', () => adoptObservedDialog(cluster, d))) : null]
+            : paragraph(`In sync with revision ${d.revision} (checked ${cluster.drift.at} UTC).`)));
+    }
+    out.push(h('div', {className: 'box'}, h('h2', {}, 'History'), dataTable([
+        {title: 'Revision', className: 'num', render: r => String(r.revision)}, {title: 'Source', render: r => r.source}, {title: 'By', render: r => r.created_by},
+        {title: 'At', render: r => `${r.created_at} UTC`}, {title: 'Note', render: r => r.note},
+        {title: 'Change', render: r => {
+            const prev = cluster.revisions.find(p => p.revision === r.revision - 1);
+            return revisionDiff(prev && prev.spec, r.spec);
+        }},
+    ], cluster.revisions, 'No revision.', 'Revisions')));
+    return out;
+}
+
+/// What changed between two revisions, in words: settings, nodes, images, resources.
+function revisionDiff(before, after) {
+    if (!before || !after) return h('span', {className: 'note'}, before ? '—' : 'initial');
+    const changes = [];
+    for (const scope of ['server', 'profile']) {
+        const a = ((before.settings || {})[scope]) || {};
+        const b = ((after.settings || {})[scope]) || {};
+        for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (String(a[k]) !== String(b[k])) changes.push(`${k}: ${a[k] ?? 'default'} → ${b[k] ?? 'default'}`);
+    }
+    if (before.shards && after.shards) {
+        const names = spec => activeNodes(spec).map(n => n.name);
+        const added = names(after).filter(n => !names(before).includes(n));
+        const removed = names(before).filter(n => !names(after).includes(n));
+        if (added.length) changes.push(`nodes added: ${added.join(', ')}`);
+        if (removed.length) changes.push(`nodes removed: ${removed.join(', ')}`);
+        const images = spec => activeNodes(spec).map(n => `${n.name}=${n.image || spec.image}`);
+        const changed_images = images(after).filter(i => !images(before).includes(i) && !added.some(a => i.startsWith(`${a}=`)));
+        if (changed_images.length) changes.push(`images: ${changed_images.join(', ')}`);
+        const ports = spec => activeNodes(spec).filter(n => n.http_port).length;
+        if (ports(after) > ports(before)) changes.push('host ports assigned');
+    }
+    if (JSON.stringify(before.resources) !== JSON.stringify(after.resources)) changes.push(`resources: ${JSON.stringify(before.resources)} → ${JSON.stringify(after.resources)}`);
+    return changes.length ? changes.join('; ') : h('span', {className: 'note'}, 'no change');
+}
+
+function configureDialog(cluster) {
+    const spec = JSON.parse(JSON.stringify(cluster.spec));
+    spec.settings = spec.settings || {server: {}, profile: {}};
+    const inputs = CLUSTER_SETTINGS.map(s => ({s, input: h('input', {type: 'number', value: spec.settings[s.scope][s.name] ?? '', placeholder: 'server default', min: s.min, max: s.max, step: s.float ? 0.05 : 1})}));
+    formDialog(`Change settings of ${cluster.name}`, [
+        ...inputs.map(({s, input}) => adminField(`${s.name} (${s.scope})`, input, s.hint)),
+        h('p', {className: 'note'}, 'Empty: the server default (the setting is removed from the managed file).'),
+    ], 'Review', () => {
+        const before = JSON.parse(JSON.stringify(spec.settings));
+        for (const {s, input} of inputs) {
+            if (input.value === '') { delete spec.settings[s.scope][s.name]; continue; }
+            const v = Number(input.value);
+            if (!(v >= s.min && v <= s.max) || (!s.float && !Number.isInteger(v))) return `${s.name}: enter ${s.float ? 'a number' : 'an integer'} from ${s.min} to ${s.max}.`;
+            spec.settings[s.scope][s.name] = v;
+        }
+        const diff = revisionDiff({settings: before}, {settings: spec.settings});
+        if (typeof diff !== 'string') return 'Nothing changed.';
+        return operationPlan(cluster, 'configure', {spec, note: diff, capability: 'configure', summary: `Change settings of ${cluster.name}: ${diff}`,
+            warning: 'Settings that the server cannot change without a restart are applied with a rolling restart, one replica at a time; a shard with one replica is unavailable while its node restarts. '
+                + 'Reverting means submitting the previous values again; values persisted by the server meanwhile are not reverted.'});
+    });
+}
+
+function adoptObservedDialog(cluster, drift) {
+    const spec = JSON.parse(JSON.stringify(cluster.spec));
+    const values = {};
+    for (const item of drift.items) {
+        const setting = CLUSTER_SETTINGS.find(s => s.name === item.setting);
+        if (!setting) continue;
+        if (values[item.setting] !== undefined && values[item.setting] !== item.observed) {
+            openDialog('Adopt observed values', [h('div', {className: 'message error'}, `The nodes report different values for ${item.setting}: choose the desired value with Change settings.`)], [button('Close', closeDialog)]);
+            return;
+        }
+        values[item.setting] = item.observed;
+        spec.settings[setting.scope][item.setting] = Number(item.observed);
+    }
+    if (!Object.keys(values).length) {
+        openDialog('Adopt observed values', [paragraph('No managed setting differs; the drift is in files edited by hand. Apply the desired configuration to restore them.')], [button('Close', closeDialog)]);
+        return;
+    }
+    submitClusterOperation(cluster, 'configure', {spec, note: `adopted observed values: ${JSON.stringify(values)}`, capability: 'configure',
+        summary: `Adopt the observed values of ${cluster.name}`, warning: 'The desired configuration takes the values the nodes report, and the managed files are written again with them.'});
+}
+
+function clusterScaling(state, cluster) {
+    const out = [];
+    const nodes = cluster.observations.filter(o => o.role === 'clickhouse');
+    out.push(h('div', {className: 'box'}, h('h2', {}, 'Capacity'), dataTable([
+        {title: 'Node', render: o => o.data.name || o.node_id},
+        {title: 'Disk', render: o => (o.data.disk_total ? `${formatBytes(Number(o.data.disk_total) - Number(o.data.disk_free))} used of ${formatBytes(Number(o.data.disk_total))}` : '—')},
+        {title: 'Memory', render: o => (o.data.memory_used !== undefined ? formatBytes(Number(o.data.memory_used)) : '—')},
+        {title: 'Load (1 min)', className: 'num', render: o => (o.data.load_1m !== undefined ? String(o.data.load_1m) : '—')},
+        {title: 'Queries', render: o => (o.data.queries_total !== undefined ? `${o.data.running_queries} running; ${o.data.failed_queries_total} of ${o.data.queries_total} failed since start` : '—')},
+        {title: 'Observed', render: o => `${formatSeconds(o.age)} ago`},
+    ], nodes, 'Not observed yet.', 'Capacity'),
+    h('p', {className: 'note'}, `Requirements recorded at creation: ${JSON.stringify(cluster.requirements || {})}. Disk shows the host file system that holds the Docker volumes.`)));
+    if (!managed(cluster)) return [...out, paragraph('Scaling needs a managed cluster with a provider integration.')];
+    const spec = cluster.spec;
+    out.push(h('div', {className: 'box'}, h('h2', {}, 'Change resources or topology'), dataTable([
+        {title: 'Operation', render: r => h('strong', {}, r[0])}, {title: 'What it involves', render: r => r[1]}, {title: '', render: r => r[2]},
+    ], [
+        ['Change CPU or memory', `Now ${spec.resources.cpus} CPU and ${spec.resources.memory_mb} MiB per node. Recreates the containers one at a time (a restart per node); decreasing needs headroom: check memory use above.`,
+            capabilityButton('Resize', 'scale', () => resizeDialog(cluster))],
+        ['Add a replica', 'A new node in a shard. The agent creates the schema of a peer, waits until replication has caught up, compares row counts, then updates the topology. Ready only after synchronization.',
+            capabilityButton('Add replica', 'scale', () => addReplicaDialog(cluster))],
+        ['Remove a replica', 'Decommission, on Nodes & Topology: refused for the last replica of a shard or without a synchronized remaining replica.', null],
+        ['Add a shard', 'New nodes with the schema of shard 1, empty. Existing rows are not redistributed; Distributed tables place new rows by their sharding key, which now spans more shards.',
+            capabilityButton('Add shard', 'scale', () => addShardDialog(cluster))],
+        ['Remove a shard', 'Only an empty shard: moving data off a shard needs a migration that the console does not perform.',
+            capabilityButton('Remove shard', 'scale', () => removeShardDialog(cluster))],
+        ['Expand or reduce storage', 'Not supported by this provider: Docker volumes have no size; they use the host file system. Reducing storage in place is never assumed.', null],
+    ], null, 'Scaling operations')));
+    return out;
+}
+
+function resizeDialog(cluster) {
+    const cpus = h('input', {type: 'number', value: cluster.spec.resources.cpus, min: 0.5, step: 0.5});
+    const memory = h('input', {type: 'number', value: cluster.spec.resources.memory_mb, min: 512, step: 256});
+    formDialog(`Resize ${cluster.name}`, [adminField('CPUs per node', cpus), adminField('Memory per node (MiB)', memory)], 'Review', () => {
+        const spec = JSON.parse(JSON.stringify(cluster.spec));
+        spec.resources = {...spec.resources, cpus: Number(cpus.value), memory_mb: Number(memory.value)};
+        if (!(spec.resources.cpus >= 0.5) || !(spec.resources.memory_mb >= 512)) return 'At least 0.5 CPU and 512 MiB.';
+        const decrease = spec.resources.memory_mb < cluster.spec.resources.memory_mb || spec.resources.cpus < cluster.spec.resources.cpus;
+        return operationPlan(cluster, 'resize', {spec, capability: 'scale', note: `resources ${JSON.stringify(spec.resources)}`, summary: `Resize ${cluster.name}`,
+            warning: `Every node is recreated with the new limits, one at a time, after its peers have caught up. ${decrease ? 'This decreases resources: queries that need more memory than the new limit fail. ' : ''}`
+                + 'A shard with one replica is unavailable while its node is recreated.'});
+    });
+}
+
+function addReplicaDialog(cluster) {
+    const shards = cluster.spec.shards.filter(sh => sh.replicas.some(r => r.state !== 'removed'));
+    const shard = select(shards.map(sh => [String(sh.index), `Shard ${sh.index} (${sh.replicas.filter(r => r.state !== 'removed').length} replicas)`]), String(shards[0].index));
+    formDialog(`Add a replica to ${cluster.name}`, [adminField('Shard', shard),
+        paragraph('The new replica gets its own container and volume, the schema of a peer, and fetches the data of replicated tables. Tables that are not replicated are created empty, '
+            + 'and the plan result lists them. Keeper is not resized.')], 'Review', () => {
+        const spec = JSON.parse(JSON.stringify(cluster.spec));
+        const target = spec.shards.find(sh => sh.index === Number(shard.value));
+        const used = new Set(spec.shards.flatMap(sh => sh.replicas.map(r => r.name)));
+        let n = 1;
+        while (used.has(`s${target.index}r${n}`)) n++;
+        const name = `s${target.index}r${n}`;
+        target.replicas.push({node_id: crypto.randomUUID(), name, state: 'active'});
+        return operationPlan(cluster, 'add_replica', {spec, parameters: {nodes: [name]}, capability: 'scale', note: `replica ${name} added to shard ${target.index}`,
+            summary: `Add replica ${name} to shard ${target.index} of ${cluster.name}`, warning: 'The replica is declared ready only after its replicated tables have caught up and their row counts match a peer.'});
+    });
+}
+
+function addShardDialog(cluster) {
+    const replicas = h('input', {type: 'number', value: 2, min: 1, max: 3});
+    const ack = checkbox('I understand that existing rows stay on their shards: nothing is redistributed, and the sharding of new rows changes.', false);
+    formDialog(`Add a shard to ${cluster.name}`, [adminField('Replicas of the new shard', replicas), ack.element,
+        paragraph('Data placement after the change: a Distributed table computes the shard of each new row from its sharding key over all shards, '
+            + 'so rows with the same key may land on a different shard than before. Queries that read through Distributed tables see all rows; '
+            + 'queries that rely on key locality (for example JOIN or IN on the sharding key without GLOBAL) may give different results. '
+            + 'Moving historical rows needs a migration (INSERT SELECT with a sharding expression, checks for duplicates and missing rows, and a cutover), which the console does not run.')], 'Review', () => {
+        if (!ack.input.checked) return 'Confirm that you understand the data placement.';
+        const count = Number(replicas.value);
+        if (!(count >= 1 && count <= 3)) return 'Choose 1 to 3 replicas.';
+        const spec = JSON.parse(JSON.stringify(cluster.spec));
+        const index = Math.max(...spec.shards.map(sh => sh.index)) + 1;
+        const names = Array.from({length: count}, (_, r) => `s${index}r${r + 1}`);
+        spec.shards.push({index, replicas: names.map(name => ({node_id: crypto.randomUUID(), name, state: 'active'}))});
+        return operationPlan(cluster, 'add_shard', {spec, parameters: {nodes: names}, capability: 'scale', note: `shard ${index} added`, summary: `Add shard ${index} to ${cluster.name}`,
+            warning: 'Existing rows are not moved. The new shard receives new rows routed to it by Distributed tables.'});
+    });
+}
+
+function removeShardDialog(cluster) {
+    const shards = cluster.spec.shards.filter(sh => sh.replicas.some(r => r.state !== 'removed'));
+    if (shards.length < 2) {
+        openDialog('Remove shard', [paragraph('The cluster has one shard: it cannot be removed.')], [button('Close', closeDialog)]);
+        return;
+    }
+    const shard = select(shards.map(sh => [String(sh.index), `Shard ${sh.index}`]), String(shards[shards.length - 1].index));
+    formDialog(`Remove a shard of ${cluster.name}`, [adminField('Shard', shard), paragraph('The agent refuses a shard that holds rows in any table. Its nodes are stopped and removed; their volumes are kept.')],
+        'Review', () => {
+            return operationPlan(cluster, 'remove_shard', {parameters: {shard: Number(shard.value)}, capability: 'scale', summary: `Remove shard ${shard.value} of ${cluster.name}`, danger: true,
+                warning: 'Refused when the shard holds data. Routing: Distributed tables stop sending rows to it once the topology is updated.'});
+        });
+}
+
+function decommissionDialog(cluster, node) {
+    const peers = cluster.spec.shards.find(sh => sh.index === node.shard).replicas.filter(r => r.state !== 'removed' && r.name !== node.name);
+    const keep = select([['keep', 'Keep its volume (recorded as retained)'], ['delete', 'Delete its volume (needs the capability destroy)']], 'keep');
+    const retention = h('input', {type: 'date'});
+    const confirm = h('input', {type: 'text', autocomplete: 'off'});
+    formDialog(`Decommission ${node.name}`, [
+        kvList([['Shard', String(node.shard)], ['Remaining replicas', peers.map(p => p.name).join(', ') || 'none']]),
+        !peers.length ? h('div', {className: 'message error'}, `${node.name} is the last replica of shard ${node.shard}: the agent refuses to remove it.`) : null,
+        h('ol', {className: 'steps'}, ...['Identify its roles (refused for a Keeper member or the last replica of a shard).',
+            'Check that the remaining replicas are caught up and the Keeper quorum is healthy; compare row counts when the node answers.',
+            'Check running queries and queued distributed inserts on it.', 'Stop it (the irreversible boundary: cancelling is no longer possible after this).',
+            'Remove it from the cluster definition of the other nodes.', 'Remove its replica metadata from Keeper (SYSTEM DROP REPLICA, only because the agent stopped and removed it).',
+            'Check the remaining cluster.', 'Remove the container; keep or delete the volume as chosen.'].map(t => h('li', {}, t))),
+        adminField('Volume', keep), adminField('Keep until (optional)', retention),
+        paragraph('Clients connected to this node directly lose their connection; this lab has no load balancer to update.'),
+        adminField(`Type ${node.name} to confirm`, confirm),
+    ], 'Review', () => {
+        if (confirm.value !== node.name) return 'The name does not match.';
+        if (keep.value === 'delete' && !session.admin.can.cap_destroy) return 'Deleting the volume needs the capability destroy.';
+        return operationPlan(cluster, 'remove_replica', {parameters: {node: node.name, delete_volume: keep.value === 'delete', retention_until: retention.value || null},
+            capability: 'decommission', danger: true, summary: `Decommission ${node.name} of ${cluster.name}`,
+            warning: 'An unreachable node is not proof that its data may be deleted: the agent refuses when the remaining replicas are not caught up.'});
+    });
+}
+
+function restartDialog(cluster, names) {
+    submitClusterOperation(cluster, 'restart_node', {parameters: {nodes: names}, capability: 'maintain', summary: `Restart ${names.join(', ')} of ${cluster.name}`,
+        warning: 'Before each node, the other replicas of its shard must be caught up; after it, the node must answer and catch up. '
+            + 'ClickHouse has no drain command: queries running on the node fail when it stops, and clients must reconnect; queued distributed inserts are sent after the restart.'});
+}
+
+function clusterMaintenance(state, cluster) {
+    if (!managed(cluster)) return [paragraph('Maintenance and upgrades need a managed cluster with a provider integration.')];
+    const versions = clusterHealth(cluster).versions;
+    return [
+        h('div', {className: 'box'}, h('h2', {}, 'Maintenance window'), kvList([['Window', cluster.policies.maintenance_window || 'not set'],
+            ['Note', 'Recorded for coordination; operations start when submitted.']])),
+        h('div', {className: 'box'}, h('div', {className: 'admin-head'}, h('h2', {}, 'Rolling restart'), h('span', {className: 'spacer'}),
+            capabilityButton('Restart all nodes', 'maintain', () => restartDialog(cluster, activeNodes(cluster.spec).map(n => n.name)))),
+        paragraph('One node at a time, after its peers have caught up. There is no universal drain: new queries to a stopping node fail and clients reconnect to another node; '
+            + 'inserts queued for distribution are sent after the restart; merges resume.')),
+        h('div', {className: 'box'}, h('div', {className: 'admin-head'}, h('h2', {}, 'Version upgrade'), h('span', {className: 'spacer'}),
+            capabilityButton('Upgrade', 'upgrade', () => upgradeDialog(cluster))),
+        kvList([['Running versions', versions.join(', ') || 'unknown'], ['Desired image', cluster.spec.image]]),
+        h('ol', {className: 'steps'}, ...['The agent checks the path: no downgrade, at most one year of releases at once.',
+            'A verified backup of the cluster from the last 24 hours is required (or a recorded reason to waive it).',
+            'Validate the target in a lab cluster first: create one with the target image and run your workload.',
+            'Order: per shard, the other replicas before the first one, so that every shard keeps a node on the old version until its replicas have passed.',
+            'Mixed versions are expected only during the rollout. After each node: it must answer, report the target version, catch up, and show no load or data errors.',
+            'A failed check stops the rollout: the remaining nodes stay on the old version.', 'After the last node: topology and replication checks.'].map(t => h('li', {}, t))),
+        h('div', {className: 'message warning'}, 'Rollback: changing the image back is not a downgrade path, because a newer version may write data or metadata that an older one cannot read. '
+            + 'The recovery alternative is a restore of the pre-upgrade backup into a new cluster of the old version.')),
+        h('div', {className: 'box'}, h('h2', {}, 'Certificates and credentials'), paragraph('This provider configures no TLS certificates. Rotating the generated credentials is not implemented: '
+            + 'they are in the secrets file of the deployment on the agent host.'))];
+}
+
+function upgradeDialog(cluster) {
+    const image = h('input', {type: 'text', value: cluster.spec.image, spellcheck: false});
+    const waive = h('input', {type: 'text', placeholder: 'only if no recent verified backup exists'});
+    formDialog(`Upgrade ${cluster.name}`, [adminField('Target image', image, 'repository:tag, already on the Docker host.'),
+        adminField('Reason to waive the backup requirement', waive, 'Recorded with the operation.')], 'Review', () => {
+        if (!/^[a-z0-9./_-]+:[0-9][A-Za-z0-9._-]*$/.test(image.value)) return 'Enter repository:version.';
+        return operationPlan(cluster, 'upgrade', {parameters: {image: image.value, waive_backup: waive.value.trim() || undefined}, capability: 'upgrade',
+            summary: `Upgrade ${cluster.name} to ${image.value}`, danger: true,
+            warning: 'The rollout stops at the first failed check. A downgrade is refused. Changing the image back does not undo data written by the new version.'});
+    });
+}
+
+function clusterProtection(state, cluster) {
+    const backups = cluster.ops.filter(o => o.kind === 'backup');
+    const destination = cluster.policies.backup_destination_id;
+    return [
+        h('div', {className: 'box'}, h('div', {className: 'admin-head'}, h('h2', {}, 'Backups of this cluster'), h('span', {className: 'spacer'}),
+            managed(cluster) ? capabilityButton('Back up now', 'maintain', () => backupClusterDialog(cluster)) : null),
+        paragraph('The agent backs up every shard from a caught-up replica to an S3 destination of Backup & Restore, then opens each shard\'s backup and compares the tables and rows. '
+            + 'Only a backup with that verification counts as protection (for upgrades and retirement).'),
+        kvList([['Backup policy destination', destination || 'none set']]),
+        dataTable([{title: 'Backup', render: o => [h('code', {}, shortId(o.op_id)), h('div', {className: 'note'}, `${o.requested_at} UTC by ${o.requested_by}`)]},
+            {title: 'State', render: o => opBadge(o.state)},
+            {title: 'Verification', render: o => {
+                const v = o.steps.find(s => s.step === 'verify');
+                return v && v.state === 'done' ? `${(v.data.tables || []).length} tables read back: ${(v.data.tables || []).map(t => `${t.table} ${t.rows_in_backup} rows`).join(', ')}` : (v ? v.message : '—');
+            }},
+            {title: 'Location', render: o => { const b = o.steps.find(s => s.step === 'backup'); return b && b.data.location ? b.data.location : '—'; }},
+        ], backups, 'No backup of this cluster.', 'Cluster backups')),
+        h('div', {className: 'box'}, h('h2', {}, 'Recovery procedures'), dataTable([
+            {title: 'Situation', render: r => h('strong', {}, r[0])}, {title: 'Procedure', render: r => r[1]}, {title: 'In the console', render: r => r[2]}], [
+            ['A replica failed, others are healthy', 'Decommission the failed node, then add a replica: it copies the schema and fetches the data from the healthy replicas.', 'Implemented (Decommission, Add replica)'],
+            ['Data lost or corrupted on all replicas', 'Restore a verified backup into a new cluster, check it, then switch clients.', 'Not automated: create a cluster, then RESTORE from the backup location'],
+            ['Infrastructure replaced', 'Provision a new cluster with the same topology and restore its backup.', 'Partly: Create Cluster; restore not automated'],
+            ['Keeper metadata lost', 'Recreate the ensemble, then SYSTEM RESTORE REPLICA on each replicated table from the parts on disk.', 'Not automated'],
+            ['Switch traffic to a recovery site', 'Fence the old deployment first (stop it, or revoke its client access), switch client routing, measure the data freshness, plan failback.', 'Not automated: no cross-site provider'],
+        ], null, 'Recovery procedures'),
+        paragraph('The console never starts two authoritative deployments of the same data on its own: recovery into a new cluster leaves the switch of clients to an operator.')),
+    ];
+}
+
+async function backupClusterDialog(cluster) {
+    const rows = await detailRows(`SELECT id, name FROM ${clusterTable('backup_destinations')} FINAL WHERE NOT deleted AND enabled AND type = 's3' ORDER BY name`);
+    if (!rows.rows || !rows.rows.length) {
+        openDialog('Back up', [paragraph(rows.error ? `The destinations could not be read: ${rows.error}` : 'No enabled S3 destination in Backup & Restore. Add one there first.')], [button('Close', closeDialog)]);
+        return;
+    }
+    const destination = select(rows.rows.map(d => [d.id, d.name]), cluster.policies.backup_destination_id || rows.rows[0].id);
+    formDialog(`Back up ${cluster.name}`, [adminField('Destination', destination, 'The agent reads its credentials from <REF>_ACCESS_KEY_ID and _SECRET_ACCESS_KEY.')], 'Review', () => {
+        return operationPlan(cluster, 'backup', {parameters: {destination_id: destination.value}, capability: 'maintain', summary: `Back up ${cluster.name}`});
+    });
+}
+
+function clusterOperationsTable(cluster, ops) {
+    return dataTable([
+        {title: 'Operation', render: o => [h('strong', {}, OP_TITLES[o.kind] || o.kind), h('div', {className: 'note'}, h('code', {}, shortId(o.op_id)), ` · revision ${o.revision}`)]},
+        {title: 'Requested', render: o => [`${o.requested_at} UTC`, h('div', {className: 'note'}, o.requested_by)]},
+        {title: 'State', render: o => [opBadge(o.state), o.message ? h('div', {className: 'note'}, o.message.slice(0, 300)) : null]},
+        {title: 'Steps', render: o => (o.steps.length ? `${o.steps.filter(s => s.state === 'done').length}/${o.steps.length} done${o.steps.some(s => s.state === 'failed') ? ', a step failed' : ''}` : '—')},
+        {title: '', render: o => h('span', {className: 'actions-row'}, button('Details', () => operationDialog(cluster, o), {className: 'small'}),
+            ['queued', 'waiting', 'blocked', 'unknown', 'running'].includes(o.state) && !o.cancel_requested && session.admin.can.write_clusters
+                ? button('Cancel', () => requestDialog(cluster, o, 'cancel'), {className: 'small danger'}) : null,
+            o.state === 'blocked' && session.admin.can.write_clusters ? button('Retry', () => requestDialog(cluster, o, 'retry'), {className: 'small'}) : null)},
+    ], ops, 'No operation.', 'Operations');
+}
+
+function operationDialog(cluster, o) {
+    openDialog(`${OP_TITLES[o.kind] || o.kind} ${shortId(o.op_id)}`, [
+        kvList([['Operation', h('code', {}, o.op_id)], ['Cluster', cluster.name], ['Requested', `${o.requested_at} UTC by ${o.requested_by}`], ['Revision', String(o.revision)],
+            ['Parameters', h('code', {}, JSON.stringify(o.parameters))], ['State', [opBadge(o.state), ` ${o.message || ''}`]]]),
+        dataTable([{title: 'Step', render: s => [h('strong', {}, s.step), h('div', {className: 'note'}, s.message)]},
+            {title: 'State', render: s => badge(s.state === 'done' ? 'Done' : (s.state === 'failed' ? 'Failed' : 'Running'), s.state === 'done' ? 'ok' : (s.state === 'failed' ? 'bad' : 'warn'))},
+            {title: 'At', render: s => `${s.at} UTC`},
+            {title: 'Evidence', render: s => h('pre', {className: 'code'}, JSON.stringify(s.data, null, 1).slice(0, 2000))}], o.steps, 'No step has started.', 'Steps'),
+        h('p', {className: 'note'}, 'Steps marked done took effect and are not undone by a cancel or a failure. A failed operation can be submitted again: its steps are written to be safe to repeat.'),
+        h('a', {href: `${adminPath('admin-audit', null, 'console')}&q=${encodeURIComponent(o.op_id)}`, dataset: {route: ''}}, 'Audit records'),
+    ], [button('Close', closeDialog, {className: 'primary'})]);
+}
+
+function requestDialog(cluster, o, request) {
+    reviewPlan({action: `cluster_${request}_request`, target_type: 'cluster', target_name: cluster.name, summary: `${request === 'cancel' ? 'Cancel' : 'Retry'} ${OP_TITLES[o.kind]} ${shortId(o.op_id)}`,
+        local_only: true, correlation_id: o.op_id, danger: request === 'cancel',
+        steps: [insertStep('cluster_events', {op_id: o.op_id, cluster_id: cluster.cluster_id, kind: 'request', state: request, step: '', message: `${request} requested in the console`, data: '{}'},
+            request === 'cancel' ? 'Request the cancellation' : 'Request a retry of the blocked step')],
+        warning: request === 'cancel' ? 'A running operation stops at its next step, unless it has passed its irreversible boundary. Steps already done are not undone.'
+            : 'The agent runs the operation again from its first step that is not done, with the attempts counted from zero.'});
+}
+
+function clusterOperations(state, cluster) {
+    return [h('p', {className: 'note'}, 'Operations run one at a time per cluster, in the order they were requested; later ones wait. The agent records every step with its evidence; '
+        + 'a restarted agent continues after the last completed step. States: queued, waiting, running, succeeded, failed, rejected (not authorized or unsafe), '
+        + 'needs an operator (blocked after repeated failures: retry or cancel), outcome unknown (checked again), cancelled.'),
+    clusterOperationsTable(cluster, cluster.ops)];
+}
+
+const DEPENDENCY_KINDS = ['Applications and client connections', 'Ingestion pipelines', 'Scheduled jobs and automation', 'Database users and integrations',
+    'Dashboards and reports', 'Backup schedules', 'Other'];
+
+function clusterRetirement(state, cluster) {
+    const out = [];
+    out.push(h('div', {className: 'box'}, h('h2', {}, 'Resources'), dataTable([
+        {title: 'Resource', render: r => [h('strong', {}, r.name), h('div', {className: 'note'}, r.kind)]},
+        {title: 'Disposition', render: r => badge(r.disposition, {deleted: '', retained: 'ok', stopped: 'warn', present: 'ok'}[r.disposition] || '')},
+        {title: 'Owner', render: r => (r.owner_op ? `operation ${shortId(r.owner_op)}` : '—')},
+        {title: 'Retention deadline', render: r => r.retention_until || '—'},
+        {title: 'Evidence', render: r => [r.evidence, h('div', {className: 'note'}, `${r.updated_at} UTC by ${r.updated_by}`)]},
+    ], cluster.resources, cluster.provider === 'external' ? 'Registered deployments have no resources owned by the console.' : 'No resource recorded.', 'Resources'),
+    paragraph('Backups made through Backup & Restore and the console\'s records and audit log are kept after retirement and deletion; delete backups in Backup & Restore.')));
+    if (cluster.provider === 'external') {
+        out.push(h('div', {className: 'box'}, h('h2', {}, 'Remove from the inventory'), paragraph('A registered deployment is retired from the inventory only; '
+            + 'the console has no access to its infrastructure.'), capabilityButton('Retire from the inventory', 'retire', () => reviewPlan({action: 'cluster_unregister', target_type: 'cluster',
+            target_name: cluster.name, summary: `Retire ${cluster.name} from the inventory`, local_only: true, danger: true,
+            steps: [insertStep('cluster_events', {op_id: '', cluster_id: cluster.cluster_id, kind: 'mode', state: 'retired', step: '', message: 'retired from the inventory', data: '{}'}, 'Set the mode to Retired'),
+                insertStep('cluster_events', {op_id: '', cluster_id: cluster.cluster_id, kind: 'lifecycle', state: 'retired', step: '', message: 'retired from the inventory; the deployment is unchanged', data: '{}'}, 'Set the lifecycle to Retired')]}))));
+        return out;
+    }
+    if (cluster.mode !== 'retired') {
+        out.push(h('div', {className: 'box'}, h('h2', {}, 'Retire the cluster'), paragraph('Retirement stops the managed containers and keeps the volumes, the network, '
+            + 'the generated configuration, the backups, and the records. It is separate from deleting infrastructure, which is a second, explicit operation below.'),
+        capabilityButton('Start retirement', 'retire', () => retireWizard(state, cluster), {className: 'primary'})));
+    }
+    const deletable = cluster.resources.filter(r => r.disposition !== 'deleted');
+    if ((cluster.mode === 'retired' || cluster.lifecycle === 'failed') && deletable.length) {
+        out.push(h('div', {className: 'box'}, h('h2', {}, 'Delete resources'), paragraph('Irreversible. Only the resources you select are deleted, and only when Docker labels them as this cluster\'s. '
+            + 'Deleting a volume deletes its data; deleting the directory deletes the generated credentials.'),
+        capabilityButton('Delete resources', 'destroy', () => destroyDialog(cluster, deletable), {className: 'small danger'})));
+    }
+    return out;
+}
+
+function retireWizard(state, cluster) {
+    const backups = cluster.ops.filter(o => o.kind === 'backup' && o.state === 'succeeded' && o.steps.some(s => s.step === 'verify' && s.state === 'done'));
+    const w = {dependencies: DEPENDENCY_KINDS.map(item => ({item, disposition: '', note: ''})), final_backup_op: backups[0] ? backups[0].op_id : '', no_backup_reason: '',
+        retention_until: '', holds: '', exports: true};
+    const dispositions = [['', 'Choose…'], ['none', 'None exist'], ['redirected', 'Redirected to another cluster'], ['stopped', 'Stopped'], ['accepted', 'Accepted: will stop working']];
+    wizard(`Retire ${cluster.name}`, [
+        {title: 'Dependency review', render: () => h('div', {},
+            paragraph('The console cannot see who uses this cluster: review each kind of dependency and record its disposition. Unknown is not a disposition.'),
+            dataTable([{title: 'Dependency', render: d => d.item},
+                {title: 'Disposition', render: d => select(dispositions, d.disposition, {onchange: e => { d.disposition = e.target.value; }})},
+                {title: 'Notes', render: d => h('input', {type: 'text', value: d.note, oninput: e => { d.note = e.target.value; }})}], w.dependencies, null, 'Dependencies'),
+            kvList([['Observed activity', (() => {
+                const nodes = cluster.observations.filter(o => o.role === 'clickhouse' && o.data.queries_total !== undefined);
+                return nodes.length ? nodes.map(o => `${o.data.name}: ${o.data.queries_total} queries since start, ${o.data.running_queries} running`).join('; ') : 'not observed';
+            })()]])),
+        validate: () => (w.dependencies.some(d => !d.disposition) ? 'Every dependency needs a disposition.' : null)},
+        {title: 'Protection and disposition', render: () => h('div', {},
+            adminField('Final backup', select([['', 'No final backup'], ...backups.map(b => [b.op_id, `${shortId(b.op_id)} · ${b.requested_at} UTC (verified)`])], w.final_backup_op,
+                {onchange: e => { w.final_backup_op = e.target.value; }}), backups.length ? 'Only verified backups are offered.' : 'No verified backup: back up first on Protection & Recovery.'),
+            adminField('Reason no backup is needed', h('input', {type: 'text', value: w.no_backup_reason, oninput: e => { w.no_backup_reason = e.target.value; }}),
+                'Required without a final backup; the agent then also refuses a cluster that holds data.'),
+            adminField('Keep retained resources until', h('input', {type: 'date', value: w.retention_until, oninput: e => { w.retention_until = e.target.value; }})),
+            adminField('Legal or operational holds', h('input', {type: 'text', value: w.holds, oninput: e => { w.holds = e.target.value; }})),
+            kvList([['Infrastructure', 'Containers stopped; volumes, network, and generated configuration retained.'],
+                ['Backups and secrets', 'Backups stay in their Backup & Restore destination and keep its credentials; delete them there. The cluster\'s generated credentials stay on the agent host until the directory is deleted.'],
+                ['Records', 'Configuration history, operations, observations (7 days), and audit records stay in the console tables.']])),
+        validate: () => (!w.final_backup_op && !w.no_backup_reason.trim() ? 'Choose a verified final backup, or record why none is needed.' : null)},
+        {title: 'Execution', render: () => h('ol', {className: 'steps'}, ...[
+            'The agent checks that every dependency has a disposition and that no other operation is in progress.',
+            'It checks the protection gate: the final backup succeeded with its verification, or the cluster holds no data.',
+            'Irreversible boundary: from here the operation cannot be cancelled.',
+            'It stops the managed containers and records every resource with its disposition and retention deadline.',
+            'It sets the mode to Retired: lifecycle operations and observation stop. Deleting resources stays a separate operation.'].map(t => h('li', {}, t)))},
+    ], 'Review', () => submitClusterOperation(cluster, 'retire', {capability: 'retire', danger: true, summary: `Retire ${cluster.name}`,
+        parameters: {dependencies: w.dependencies, final_backup_op: w.final_backup_op || undefined, no_backup_reason: w.no_backup_reason.trim() || undefined,
+            retention_until: w.retention_until || undefined, holds: w.holds || undefined},
+        warning: 'Client traffic and ingestion must already be stopped or redirected by their owners: the lab has no load balancer to change.'}));
+}
+
+function destroyDialog(cluster, resources) {
+    const boxes = resources.map(r => ({r, box: checkbox(`${r.kind} ${r.name} (${r.disposition}${r.retention_until ? `, keep until ${r.retention_until}` : ''})`, false)}));
+    const confirm = h('input', {type: 'text', autocomplete: 'off'});
+    formDialog(`Delete resources of ${cluster.name}`, [h('fieldset', {className: 'box'}, h('legend', {}, 'Resources'), boxes.map(b => b.box.element)),
+        adminField(`Type ${cluster.name} to confirm`, confirm)], 'Review', () => {
+        const chosen = boxes.filter(b => b.box.input.checked).map(b => b.r);
+        if (!chosen.length) return 'Choose the resources to delete.';
+        if (confirm.value !== cluster.name) return 'The name does not match.';
+        const early = chosen.filter(r => r.retention_until && r.retention_until > new Date().toISOString().slice(0, 10));
+        if (early.length) return `Retained until a later date: ${early.map(r => r.name).join(', ')}.`;
+        return operationPlan(cluster, 'destroy', {parameters: {resources: chosen.map(r => r.resource_id.replace(/^directory:.*$/, `directory:chc-${cluster.cluster_id.replace(/-/g, '').slice(0, 10)}`))},
+            capability: 'destroy', danger: true, summary: `Delete ${chosen.length} resources of ${cluster.name}`,
+            warning: `Irreversible: ${chosen.map(r => r.name).join(', ')}. Resources not selected are kept.`});
     });
 }
 
