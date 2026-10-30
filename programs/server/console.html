@@ -7108,7 +7108,10 @@ async function backupWizard(state) {
             const outside = views.filter(v => (v.dependencies_database || []).some(db => !scopeDatabases(s).includes(db)));
             const busy = await detailRows(`SELECT database, table, count() AS n FROM system.mutations WHERE NOT is_done AND database IN {dbs:Array(String)} GROUP BY database, table`,
                 {dbs: arrayParam(scopeDatabases(s))});
-            const ddl = await detailRows(`SELECT count() AS n FROM system.processes WHERE query_kind IN ('Create', 'Drop', 'Alter', 'Rename') AND hasAny(databases, {dbs:Array(String)})`,
+            /// system.processes does not list the databases of a query: a schema change counts when the backed-up databases
+            /// are its current database or appear in its text.
+            const ddl = await detailRows(`SELECT count() AS n FROM system.processes WHERE query_kind IN ('Create', 'Drop', 'Alter', 'Rename')
+                AND (current_database IN {dbs:Array(String)} OR multiSearchAny(query, {dbs:Array(String)}))`,
                 {dbs: arrayParam(scopeDatabases(s))});
             const destination = state.destinations_by_id.get(w.destination_id);
             review = {scope: s, objects: objects.map(o => ({database: o.database, name: o.name, engine: o.engine})), destination};
@@ -7128,7 +7131,7 @@ async function backupWizard(state) {
             !busy.rows ? h('div', {className: 'message warning'}, `Unfinished mutations: unknown (${busy.error}).`)
                 : busy.rows.length ? h('div', {className: 'message warning'}, `Unfinished mutations: ${busy.rows.map(b => `${b.database}.${b.table} (${b.n})`).join(', ')}. The backup contains the parts as they are when each table is copied.`) : null,
             !ddl.rows ? h('div', {className: 'message warning'}, `Running schema changes: unknown (${ddl.error}).`)
-                : Number(ddl.rows[0].n) ? h('div', {className: 'message warning'}, `${ddl.rows[0].n} schema changes are running on these databases now.`) : null,
+                : Number(ddl.rows[0].n) ? h('div', {className: 'message warning'}, `${ddl.rows[0].n} schema changes (CREATE, DROP, ALTER, RENAME) that name these databases are running now. The backup contains each table as it is when the table is copied.`) : null,
             h('p', {className: 'note'}, 'Consistency: each table is backed up from the data parts it has when its backup starts. Tables are not copied at the same instant, '
                 + 'so the backup is not a transactionally consistent snapshot of several tables; rows inserted during the backup may or may not be included. '
                 + 'Not included: the server configuration, named collections and other secrets, Keeper data, and data stored outside the server.')];
