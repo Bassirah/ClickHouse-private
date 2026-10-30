@@ -62,6 +62,15 @@
     --warning-bg: #fff4e0;
     --info-bg: #eaf1fd;
     --shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+    /* Administration pages, in the colors of ClickStack. */
+    --hairline: #e6e7e9;
+    --input-bg: #fbfcff;
+    --input-border: #e6e7e9;
+    --row-hover: #f6f7fa;
+    --link: #2d6bd4;
+    --tab-active: #161517;
+    --control-accent: #302e32;
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23868e96' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m8 9 4-4 4 4M16 15l-4 4-4-4'/%3E%3C/svg%3E");
     --sidebar-width: 15rem;
     --header-height: 3.25rem;
     font-family: Inter, -apple-system, "Segoe UI", Roboto, "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
@@ -93,6 +102,14 @@
     --warning-bg: #3a2c17;
     --info-bg: #1f2c44;
     --shadow: none;
+    --hairline: #353532;
+    --input-bg: #2a2a27;
+    --input-border: #3b3b38;
+    --row-hover: #262623;
+    --link: #faff69;
+    --tab-active: #faff69;
+    --control-accent: #faff69;
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m8 9 4-4 4 4M16 15l-4 4-4-4'/%3E%3C/svg%3E");
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -379,6 +396,92 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; }
 .matrix td:not(:first-child), .matrix th:not(:first-child) { text-align: center; }
 .matrix td.enforced { text-align: left; font-size: 0.82rem; color: var(--muted); min-width: 14rem; }
+
+/* Administration pages and their dialog follow the look of ClickStack (Mantine): 13px text, filled inputs
+   with hairline borders, a slim header bar with a breadcrumb, compact tables, and dialogs with the labels
+   beside the fields. Sizes are in px, as in ClickStack, because the root font size of the console is larger. */
+#admin-view, #admin-dialog { font-size: 13px; line-height: 1.5; }
+#admin-view { padding: 0; }
+#admin-view > .admin-page { max-width: none; padding: 0 16px 24px; gap: 14px; }
+#admin-view .admin-page .admin-page { padding: 0; }
+#admin-view .admin-head
+{
+    position: sticky; top: 0; z-index: 3; margin: 0 -16px; padding: 8px 16px; min-height: 52px; gap: 8px;
+    background: var(--bg); border-bottom: 1px solid var(--hairline);
+}
+#admin-view .admin-head .icon { width: 16px; height: 16px; color: var(--muted); }
+#admin-view .admin-head .page-title { font-size: 14px; font-weight: 600; }
+#admin-view .admin-head .crumbs { flex-basis: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+#admin-view .admin-head .crumbs a { text-decoration: none; }
+#admin-view .admin-head .crumbs a:hover { color: var(--text); text-decoration: underline; }
+#admin-view .admin-head .button { min-height: 30px; padding: 0 12px; }
+#admin-view .note, #admin-dialog .note { font-size: 12px; }
+#admin-view .admin-page h2 { font-size: 14px; font-weight: 600; }
+#admin-view .box h3, #admin-dialog .box h3 { font-size: 13px; }
+
+#admin-view .button, #admin-dialog .button { min-height: 34px; padding: 0 14px; font-size: 13px; font-weight: 500; }
+#admin-view .button.primary, #admin-dialog .button.primary { font-weight: 600; }
+#admin-view .button.small, #admin-dialog .button.small { min-height: 26px; padding: 0 10px; font-size: 12px; }
+
+#admin-view .field, #admin-dialog .field { gap: 4px; }
+#admin-view .field label, #admin-dialog .field label { font-size: 13px; font-weight: 500; }
+#admin-view .field .hint, #admin-dialog .field .hint { font-size: 12px; }
+:is(#admin-view, #admin-dialog) :is(input:not([type]), input[type="text"], input[type="search"], input[type="password"], input[type="number"],
+    input[type="date"], input[type="datetime-local"], input[type="time"], select, textarea)
+{
+    min-height: 36px; padding: 0 12px; font-size: 13px; color: var(--text);
+    background-color: var(--input-bg); border: 1px solid var(--input-border); border-radius: 4px;
+}
+:is(#admin-view, #admin-dialog) textarea { padding: 8px 12px; min-height: 72px; }
+:is(#admin-view, #admin-dialog) select:not([multiple])
+{
+    appearance: none; padding-right: 32px; cursor: pointer;
+    background-image: var(--select-chevron); background-repeat: no-repeat; background-position: right 10px center; background-size: 14px;
+}
+:is(#admin-view, #admin-dialog) :is(input, select, textarea):focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; border-color: var(--focus); }
+:is(#admin-view, #admin-dialog) :is(input, select, textarea)::placeholder { color: var(--muted); opacity: 0.8; }
+#admin-view .toolbar :is(input, select) { min-height: 30px; }
+:is(#admin-view, #admin-dialog) :is(.check input, input[type="checkbox"], input[type="radio"]) { accent-color: var(--control-accent); }
+#admin-view .check, #admin-dialog .check { font-size: 13px; }
+:is(#admin-view, #admin-dialog) fieldset.box { padding: 8px 12px 12px; gap: 8px; margin: 0; }
+:is(#admin-view, #admin-dialog) legend { padding: 0 4px; font-size: 13px; font-weight: 500; }
+
+#admin-view .box, #admin-dialog .box { border-color: var(--hairline); border-radius: 4px; padding: 12px 16px; gap: 10px; }
+#admin-view .box h2 { font-size: 14px; }
+/* A box that only holds a table (and its pager) shows the table's own border, without a frame around it. */
+#admin-view .box:is(:has(> .table-wrap:first-child), :has(> div:only-child > .table-wrap:first-child)) { border: 0; padding: 0; background: none; }
+#admin-view .kv, #admin-dialog .kv { gap: 6px 24px; }
+
+#admin-view .tablist { border-bottom-color: var(--hairline); gap: 2px; }
+#admin-view .tablist a { padding: 8px 12px; font-size: 13px; font-weight: 500; }
+#admin-view .tablist a[aria-current="page"] { border-bottom-color: var(--tab-active); font-weight: 600; }
+
+:is(#admin-view, #admin-dialog) .table-wrap { border-color: var(--hairline); border-radius: 4px; }
+:is(#admin-view, #admin-dialog) table.data { font-size: 13px; }
+:is(#admin-view, #admin-dialog) table.data :is(th, td) { padding: 8px 10px; border-bottom-color: var(--hairline); }
+:is(#admin-view, #admin-dialog) table.data th
+{
+    font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); background: var(--bg);
+}
+:is(#admin-view, #admin-dialog) table.data tbody tr:hover td { background: var(--row-hover); }
+:is(#admin-view, #admin-dialog) :is(td a:not(.button), .note a, .message a) { color: var(--link); text-decoration: none; }
+:is(#admin-view, #admin-dialog) :is(td a:not(.button), .note a, .message a):hover { text-decoration: underline; }
+
+:is(#admin-view, #admin-dialog) .badge { font-size: 11px; font-weight: 500; padding: 1px 8px; border-color: var(--hairline); }
+:is(#admin-view, #admin-dialog) .message { border-color: transparent; padding: 10px 12px; }
+:is(#admin-view, #admin-dialog) pre.code { font-size: 12px; border-color: var(--hairline); }
+
+dialog#admin-dialog { width: min(40rem, calc(100vw - 2rem)); border-color: var(--hairline); border-radius: 8px; box-shadow: 0 12px 40px rgb(0 0 0 / 0.22); }
+dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+#admin-dialog .dialog-body { padding: 18px 20px 20px; gap: 12px; }
+#admin-dialog .dialog-body h2 { font-size: 15px; font-weight: 500; margin-bottom: 4px; }
+#admin-dialog .dialog-actions { margin-top: 4px; gap: 8px; }
+@media (min-width: 40rem)
+{
+    /* Labels beside the fields, as in the settings forms of ClickStack; not inside multi-column grids. */
+    #admin-dialog .field:not(:is(.form-grid, .toolbar) *) { display: grid; grid-template-columns: 10.5rem minmax(0, 1fr); column-gap: 16px; row-gap: 4px; align-items: center; }
+    #admin-dialog .field:not(:is(.form-grid, .toolbar) *) > :not(label) { grid-column: 2; }
+}
 
 .spinner
 {
@@ -2699,10 +2802,11 @@ function select(options, value, props = {}) {
     }));
 }
 
+/// The header bar of an administration page: `crumbs` are the parent pages, shown before the title as in ClickStack.
 function pageHeader(c, title, crumbs, actions) {
     return h('div', {className: 'admin-head'},
-        crumbs ? h('div', {className: 'crumbs'}, crumbs) : null,
-        icon(c.icon), h('h1', {className: 'page-title', tabIndex: -1}, title), h('span', {className: 'spacer'}), actions || null);
+        icon(c.icon), crumbs ? h('nav', {className: 'crumbs', 'aria-label': 'Breadcrumb'}, crumbs, h('span', {'aria-hidden': 'true'}, '›')) : null,
+        h('h1', {className: 'page-title', tabIndex: -1}, title), h('span', {className: 'spacer'}), actions || null);
 }
 
 function tabList(c, sub, tabs, active) {
@@ -3243,7 +3347,7 @@ function renderUserDetails(root, route, page) {
     const c = page.component;
     const name = route.sub;
     const tab = USER_TABS.some(([key]) => key === route.tab) ? route.tab : 'overview';
-    const crumbs = [adminLink('Users', 'admin-users'), ' / ', name];
+    const crumbs = adminLink('Users', 'admin-users');
     const body = h('div', {className: 'admin-page'});
     root.replaceWith(body);
     put(body, pageHeader(c, name, crumbs));
@@ -4368,7 +4472,7 @@ function renderRoleDetails(root, route, page) {
     const tab = ROLE_TABS.some(([key]) => key === route.tab) ? route.tab : 'privileges';
     const body = h('div', {className: 'admin-page'});
     root.replaceWith(body);
-    put(body, pageHeader(c, name, [adminLink('Roles & Permissions', 'admin-roles'), ' / ', name]));
+    put(body, pageHeader(c, name, adminLink('Roles & Permissions', 'admin-roles')));
     const content = h('div', {className: 'admin-page'});
     put(body, content);
     loadInto(page, content, async () => {
@@ -5814,7 +5918,7 @@ async function reconcileAll(state) {
 function reconcileNotice(state, page) {
     const unfinished = state.operations.filter(o => !TERMINAL_STATES.includes(o.state) && ['backup', 'restore', 'verify'].includes(o.kind));
     if (!unfinished.length) return null;
-    const notice = h('div', {role: 'status'}, h('p', {className: 'note'}, h('span', {className: 'spinner'}), ` Checking ${unfinished.length} unfinished operations with the server…`));
+    const notice = h('div', {role: 'status', className: 'reconcile-notice'}, h('p', {className: 'note'}, h('span', {className: 'spinner'}), ` Checking ${unfinished.length} unfinished operations with the server…`));
     reconcileAll(state).then(({changed, errors}) => {
         if (!isCurrent(page)) return;
         notice.replaceChildren(
