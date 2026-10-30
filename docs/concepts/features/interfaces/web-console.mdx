@@ -430,6 +430,220 @@ As with the other console tables, the requester and the time are filled in by th
 - **A restore test failed.** The checks list the tables whose counts or fingerprints differ. A fingerprint difference with equal counts usually means the source changed during the backup without the console capturing it; test the next backup before relying on this one.
 - **Recovering the console tables.** They are ordinary tables and can be in a backup's scope. Restore them into a new database and set `admin_database` to it, or copy their rows back.
 
+## Cluster Management {#cluster-management}
+
+The **Clusters** page of the **Administration** category manages the lifecycle of ClickHouse deployments: planning, provisioning, registration, configuration, scaling, maintenance, upgrades, recovery, decommissioning, and retirement.
+
+ClickHouse has no SQL statement that creates servers, provisions infrastructure, or redistributes data, so the console does not pretend to. It records plans, versioned desired configurations, and operations in the console tables. The **cluster agent** (`utils/web-console/cluster_agent.mjs`), a process on the infrastructure host, executes them through a provider, checks every result, and records what it observes. The console never connects to the managed clusters and never handles their credentials: what it shows comes from the agent's observations, with the time they were made.
+
+| View | What it shows |
+|---|---|
+| Cluster Inventory | Registered clusters with their environment, owner, provider, mode, lifecycle state, health, versions, the age of the last observation, drift, and operations that need attention; the state of the cluster agent. |
+| Create Cluster | The creation wizard. |
+| Register Existing | Read-only registration of an existing deployment. |
+| Overview | Identity, endpoints, secret references, health, recovery targets and measured evidence, recent operations. |
+| Nodes & Topology | Shards, replicas, and their observed state, version, replication, background work, disk, and memory; restart and decommission. For registered deployments: the discovered topology with its provenance and conflicts. |
+| Keeper | Members, roles, quorum, versions, and latency. |
+| Configuration | Desired settings, observed differences, drift, and the revision history. |
+| Capacity & Scaling | Capacity per node; resize, add a replica, add or remove a shard. |
+| Maintenance & Upgrades | Rolling restarts and version upgrades. |
+| Protection & Recovery | Verified backups of the cluster and the recovery procedures. |
+| Operations | Every lifecycle operation with its steps, evidence, and state; cancel and retry. |
+| Retirement | Resources with their disposition; retirement and resource deletion. |
+
+### Supported capabilities {#cluster-capability-matrix}
+
+One provider is implemented: **docker-compose**, a local lab. All its containers run on one Docker host, so they are not independent failure domains: the lab is for development and tests, not for high availability. Kubernetes and Linux-server providers are listed in the wizard as not available.
+
+| Capability | Native ClickHouse support | Infrastructure dependency | Implementation | Verified limitations |
+|---|---|---|---|---|
+| Provision a cluster | None (no SQL creates servers) | Docker with Compose v2, the image on the host | Agent generates compose and node configuration; checkpointed operation; readiness checks | One host; no TLS; the agent does not pull images |
+| Register an existing deployment | `system.clusters`, `system.macros`, `system.zookeeper_connection`, `system.disks` | Network access from the agent; credentials in its environment | Read-only discovery with provenance | A `system.clusters` entry is not proof of membership; external Keeper members are not contacted |
+| Monitoring | System tables, Keeper `mntr` | Agent reaches the nodes and Keeper ports | Observation every 30 seconds, kept 7 days | Memory is the host's, not the container limit; no certificate expiry (no TLS) |
+| Configuration | `SYSTEM RELOAD CONFIG`, `system.server_settings.changeable_without_restart` | Managed files on the agent host | Revisions, reload or rolling restart, verification, drift | A catalog of server settings and three profile settings |
+| Add or remove a replica | `ReplicatedMergeTree`, `SYSTEM SYNC REPLICA`, `SYSTEM DROP REPLICA` | Provider creates and removes containers | Schema copy, catch-up, count comparison; safety checks before removal | Tables whose replica name is not `{replica}` are skipped; non-replicated tables are created empty |
+| Add a shard | Distributed tables route new rows | Provider | New nodes with the schema of shard 1, empty | Existing data is never redistributed |
+| Remove a shard | None | Provider | Only an empty shard | Data migration is not automated |
+| Resize CPU and memory | None | Docker limits | Rolling recreation | Storage cannot be resized: Docker volumes have no size |
+| Restart and upgrade | None | Provider | Rolling, with peer checks; upgrade gates and stop on failure | No downgrade; no automatic rollback |
+| Keeper membership | Keeper reconfiguration | Provider | Not implemented: observed only | The ensemble is fixed at provisioning |
+| Backup and verification | `BACKUP`, the `Backup` database engine | An S3 destination of Backup & Restore | One verified backup per shard | Disk destinations are unreachable from lab nodes |
+| Restore into a replacement cluster | `RESTORE` | Provider | Not automated: documented procedure | |
+| Decommission a node | `SYSTEM DROP REPLICA` | Provider | Ten-step workflow with checks | No load balancer: clients of the node are not moved |
+| Retire and delete | None | Provider | Dependency review, protection gate, scoped deletion | Backups are deleted in Backup & Restore only |
+
+### Setting up {#cluster-setup}
+
+1. On the **Clusters** page, select **Set up**. This creates the [cluster tables](#cluster-tables) in the `admin_database`. It creates or changes no deployment.
+2. Create an account for the agent on the server that holds the console tables. It needs `SELECT` and `INSERT` on the cluster tables, `SELECT` on `backup_destinations`, `INSERT` on `audit_log`, and `IMPERSONATE` on the users who request operations, so that it can check their capabilities with `EXECUTE AS <user> CHECK GRANT`.
+3. Run the agent on the Docker host:
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=cluster_agent CLICKHOUSE_PASSWORD=... \
+CLUSTER_AGENT_STATE_DIR=/var/lib/clickhouse-console/clusters CLUSTER_AGENT_ENVIRONMENTS=lab,development \
+node utils/web-console/cluster_agent.mjs
+```
+
+| Variable | Meaning |
+|---|---|
+| `CLUSTER_AGENT_STATE_DIR` | Directory of the generated deployments and their secrets (required for docker-compose). |
+| `CLUSTER_AGENT_ENVIRONMENTS` | Environments the agent may change (default `lab,development`). Operations on clusters in other environments are rejected. |
+| `CLUSTER_AGENT_PORT_RANGE` | Host ports for lab endpoints, bound to `127.0.0.1` (default `31000-31999`). |
+| `CLUSTER_AGENT_IMAGES` | Image repositories allowed for lab nodes (default `clickhouse/clickhouse-server`). |
+| `CLUSTER_AGENT_HOST_ALIAS` | Name of the Docker host as seen from the containers, used to reach S3 endpoints published on it (default `host.docker.internal`). |
+| `<REF>_USER`, `<REF>_PASSWORD` | Credentials of a registered deployment whose credential reference is `<REF>`. |
+| `<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY` | Credentials of an S3 backup destination, as for the [backup worker](#backup-worker). |
+
+The agent runs only `docker` with fixed argument lists, never a shell, and never text from the browser as a command. Docker objects carry the labels `io.clickhouse.console.cluster` and `io.clickhouse.console.managed-by`; the agent stops or deletes only objects with the labels of the cluster it works on.
+
+### Modes and states {#cluster-modes}
+
+A cluster in the inventory is a platform-managed deployment. It is not the same as a named cluster in `remote_servers`: a deployment can define several, and an entry in `system.clusters` does not prove infrastructure ownership.
+
+| Mode | Meaning |
+|---|---|
+| Observe | Inventory and monitoring only. Registered deployments start here. |
+| Manage | Configuration and lifecycle operations through the provider. Clusters created in the console start here. |
+| Retired | A historical record: observation and operations stop; the remaining resources are listed with their disposition. |
+
+The lifecycle state (`planned`, `provisioning`, `validating`, `ready`, `degraded`, `unreachable`, `maintenance`, `failed`, `retiring`, `retired`) is separate from the state of each operation. A node is **unreachable** when it does not answer the agent; it is **failed** only when the provider confirms it, for example a container that is not running. An unreachable node is never taken as permission to delete its data or its replica metadata.
+
+### Creating a cluster {#creating-a-cluster}
+
+The wizard has eight steps:
+
+1. **Purpose and ownership**: name, environment, owner, workload, expected data and growth, concurrency, ingestion, availability goal, and RPO and RTO targets. Sizing from these numbers is an estimate.
+2. **Infrastructure provider**: only implemented providers can be chosen, and only when an agent offers them for the environment.
+3. **Topology**: shards, replicas per shard, Keeper members (1, 3, or 5), and the cluster name. The wizard explains what failures the topology tolerates, separately for replicas and for the Keeper quorum, and that a lab on one host is one failure domain.
+4. **Storage and resources**: CPU and memory per node, the image, and the storage model (a local volume per node and per Keeper member).
+5. **Security**: the administrative user. The agent generates its password, the cluster secret, and the interserver credentials on its host; they appear in no plan, URL, log, or console table.
+6. **Operational policies**: backup destination, maintenance window, and an optional notification reference.
+7. **Plan**: the containers, volumes, network, endpoints, configuration, expected disruption, preconditions, readiness checks, and what happens if provisioning fails.
+8. **Readiness**, done by the agent after submission: every node answers and authenticates, Keeper has a leader and a quorum, every node lists the topology, and a test database is written, replicated, read through the cluster, and dropped. The cluster is **ready** only after these checks, not when its containers run.
+
+Provisioning is one durable operation. Submitting the same plan twice provisions once: the second operation is rejected. Every created resource is recorded with its owner operation. When provisioning fails, the resources created so far are listed under **Retirement**; submitting again reuses them, and **Delete resources** removes them.
+
+### Registering an existing deployment {#registering-a-cluster}
+
+**Register Existing** records a name, the HTTP endpoints of the nodes, and a credential reference: the agent reads `<REF>_USER` and `<REF>_PASSWORD` from its environment, so the browser never sees the credentials. Use a read-only account.
+
+The agent connects to each endpoint and records the version, host name, macros, disks, Keeper sessions, users, and replicated tables of each node, and the named clusters each node reports. It records conflicting observations, such as different versions or different members for the same shard, and the provenance and confidence of every part. It changes, recreates, and rotates nothing. Endpoints that do not answer are recorded as unreachable.
+
+A registered deployment stays in **Observe** mode. **Adopt** is offered only for providers that implement management; no provider integration exists for external deployments, so their adoption is rejected with that reason.
+
+### Operations {#cluster-operations}
+
+Every change is an operation with an identifier, the requester (filled in by the server), the revision of the desired configuration, its parameters, and events for every step with its evidence. The agent:
+
+- runs operations one at a time per cluster, in the order they were requested;
+- checks the requester's capability on the server before starting (`EXECUTE AS`), the environment, the mode, and whether the provider implements the operation; a refusal is recorded as **rejected**;
+- records each step when it starts and when it is done; a restarted agent continues after the last completed step, and steps are written to be safe to repeat;
+- tries a failing step at most 3 times, then marks the operation **needs an operator**: **Retry** runs it again, **Cancel** stops it;
+- marks an operation **outcome unknown** when the provider does not answer in time, and checks again;
+- when several agents run, lets the earliest claim of an operation win; an operation without progress for 10 minutes is taken over.
+
+**Cancel** stops a running operation at its next step, until it passes its irreversible boundary (for example, stopping a node during decommissioning). Steps already done are not undone: infrastructure and database changes are not rolled back atomically. Each operation describes its recovery when it fails.
+
+### Monitoring {#cluster-monitoring}
+
+Every 30 seconds, the agent queries each node once (version, uptime, replication queue and delay, read-only replicas, merges, mutations, distributed queues, disk, memory, load, running and failed queries, Keeper sessions) and asks each Keeper member for `mntr`. Every value carries the time it was collected; the console marks observations older than two minutes as stale. The health of a cluster is derived from all its members, never from one node. Values the agent could not collect are shown as such.
+
+### Configuration and drift {#cluster-configuration}
+
+The desired configuration is versioned: every change is a new revision, with secrets referenced and never stored. **Change settings** edits a catalog of server settings (`max_concurrent_queries`, `max_connections`, `keep_alive_timeout`, `max_table_size_to_drop`, `background_pool_size`, `max_server_memory_usage_to_ram_ratio`) and settings of the default profile (`max_memory_usage`, `max_execution_time`, `max_threads`). The agent writes them to managed files on each node, reloads the configuration, and restarts the nodes, one at a time, only for settings that the server reports it cannot change without a restart (`changeable_without_restart`). It then checks the values on every node.
+
+For managed clusters, the agent compares the desired values with what the nodes report, and the managed files with what it wrote. Differences are shown as **drift**, with two explicit choices: **Apply the desired configuration** writes the files again, and **Adopt the observed values** makes them the desired ones. Nothing is overwritten silently. Settings outside the catalog are not managed.
+
+### Scaling {#cluster-scaling}
+
+- **Resize** changes CPU and memory per node and recreates the nodes one at a time, after their peers have caught up. Storage cannot be resized by this provider.
+- **Add replica** creates a node, copies the schema of a peer, waits until every replicated table has caught up and its row count matches, then updates the topology. The new replica is ready only after that.
+- **Decommission** (on Nodes & Topology) removes a replica. It is refused for the last replica of a shard, for a Keeper member, and when the remaining replicas are not caught up or the Keeper quorum is uncertain.
+- **Add shard** creates the nodes of a new shard with the schema of shard 1, empty. Existing rows stay where they are; Distributed tables route new rows by their sharding key over all shards from then on, which changes the shard of a key. The dialog requires an acknowledgement of this.
+- **Remove shard** is accepted only for a shard without rows. Moving data between shards (source and target mappings, a sharding expression, backfill and catch-up, duplicate and missing-row checks, cutover) is not automated.
+
+### Keeper {#cluster-keeper}
+
+Keeper is a separate ensemble, created at provisioning with 1, 3, or 5 members. The Keeper view shows each member's role, version, znode count, and latency, and whether a quorum exists. Changing the ClickHouse replicas never resizes Keeper, and membership changes are not implemented. Operations that remove nodes stop when the quorum is uncertain.
+
+Keeper keeps its log and snapshots in its own volumes. Table backups contain the data and metadata to recreate replicated tables, not the coordination state; after the loss of Keeper data, replicated tables are recovered with `SYSTEM RESTORE REPLICA`.
+
+### Maintenance and upgrades {#cluster-upgrades}
+
+**Restart** restarts nodes one at a time. Before each node, the other replicas of its shard must be caught up; after it, the node must answer and catch up. ClickHouse has no drain command: queries running on a stopping node fail and clients reconnect; inserts queued for distribution are sent after the restart.
+
+**Upgrade** changes the image of the nodes:
+
+1. the agent refuses a downgrade and a jump of more than a year of releases, and an image that is not on the host;
+2. it requires a verified backup of the cluster from the last 24 hours, or a recorded reason to waive it;
+3. it upgrades the other replicas of each shard before the first one, one node at a time;
+4. after each node it checks that the node answers, reports the target version, catches up, and shows no load or data errors;
+5. a failed check stops the rollout, and the remaining nodes keep the previous version;
+6. after the last node, it checks the topology and replication.
+
+Changing the image back does not downgrade data that the new version may have written. The recovery path is a restore of the pre-upgrade backup into a new cluster of the old version. Validate a target version in a lab cluster first.
+
+### Protection and recovery {#cluster-recovery}
+
+**Back up now** backs up every shard from a caught-up replica, without `ON CLUSTER`, to an S3 destination of Backup & Restore, then opens each shard's backup with the `Backup` database engine and reads back the row count of every table. Only a backup with that verification counts for upgrades and retirement. The Overview shows the recovery targets next to the measured evidence: the time of the last verified backup.
+
+| Situation | Procedure |
+|---|---|
+| A replica failed, others are healthy | Decommission the failed node, then add a replica: it fetches the data from the healthy replicas. |
+| Data lost on all replicas | Restore a verified backup into a new cluster, check it, then switch clients (not automated). |
+| Infrastructure replaced | Create a cluster with the same topology, then restore its backup (restore not automated). |
+| Keeper data lost | Recreate the ensemble, then run `SYSTEM RESTORE REPLICA` on each replicated table (not automated). |
+| Switch to a recovery site | Fence the old deployment first, switch client routing, measure data freshness, plan failback (not automated; no cross-site provider). |
+
+The console never creates a second authoritative deployment on its own: switching clients to a recovered cluster is an operator's decision.
+
+### Decommissioning and retirement {#cluster-retirement}
+
+Decommissioning a node: identify its roles; check the remaining replicas and the Keeper quorum; compare row counts when the node answers; check running queries and queued distributed inserts; stop it (the irreversible boundary); remove it from the cluster definition; remove its replica metadata from Keeper with `SYSTEM DROP REPLICA` (justified because the agent stopped and removed the node); check the remaining cluster; remove the container; keep or delete its volume as chosen.
+
+Retirement is separate from deletion:
+
+1. **Dependency review**: applications and connections, ingestion pipelines, scheduled jobs, users and integrations, dashboards, backup schedules, and other dependencies each need a recorded disposition. Unknown is not accepted.
+2. **Protection**: a verified final backup, or a recorded reason why none is needed (refused when the cluster holds data); the retention deadline of the retained resources; legal or operational holds.
+3. **Execution**: the agent checks the dependencies, that no other operation is in progress, and the protection gate; then stops the containers, records every resource with its disposition and deadline, and sets the mode to Retired.
+4. **Deletion**, a separate operation that needs the capability `destroy`: only the resources selected, only when Docker labels them as the cluster's, and not before their retention deadline. The result lists every resource as retained, stopped, or deleted, with its owner and evidence.
+
+Backups made through Backup & Restore, the configuration history, the operations, and the audit records remain after retirement and deletion. A registered deployment is only retired from the inventory.
+
+### Capabilities and audit {#cluster-capabilities}
+
+Each capability is a column of the `cluster_capabilities` table, granted as `INSERT(<column>)`: `view_clusters`, `register`, `create_cluster`, `adopt`, `configure`, `scale`, `keeper`, `maintain`, `upgrade`, `recover`, `decommission`, `retire`, and `destroy`. The console checks them with `CHECK GRANT` to offer actions; the agent checks them again with `EXECUTE AS <requester> CHECK GRANT` before it executes an operation. Requesting an operation also needs `INSERT` on `cluster_operations`, `cluster_events`, and `cluster_revisions`.
+
+| Template | Grants |
+|---|---|
+| Cluster Viewer | `SELECT` on the cluster tables and `backup_destinations`; `view_clusters`. |
+| Cluster Operator | The viewer's, plus requesting operations, and `register`, `configure`, `maintain`, `scale`, `decommission`. |
+| Cluster Administrator | Every capability, optionally including `destroy`, and `INSERT` on `clusters`. |
+
+Plans, submissions, cancellations, and retries are audited by the console with the operation ID as correlation ID; the agent audits each result, failure, and rejection.
+
+### Cluster tables {#cluster-tables}
+
+| Table | Contents |
+|---|---|
+| `clusters` | `ReplacingMergeTree`: identity, environment, owner, provider, connection (endpoints and credential reference), requirements, and policies. |
+| `cluster_revisions` | `MergeTree`: versioned desired configurations, and discovered descriptions of registered deployments. |
+| `cluster_operations` | `MergeTree`: one row per operation, written once. |
+| `cluster_events` | `MergeTree`: operation states and steps with evidence, claims, lifecycle, mode, drift, and agent heartbeats (kept 30 days). |
+| `cluster_observations` | `MergeTree`: health observations, kept 7 days. |
+| `cluster_resources` | `ReplacingMergeTree`: provider resources with their disposition, owner operation, retention deadline, and evidence. |
+| `cluster_capabilities` | `Null` engine: holds no data; its columns are the capabilities. |
+
+### Cluster runbooks {#cluster-runbooks}
+
+- **Operations stay queued.** The inventory shows the agent's last heartbeat. Start the agent, and check that it serves the cluster's environment.
+- **An operation is rejected.** The message names the missing capability, the environment, the mode, or the unsafe condition.
+- **An operation needs an operator.** The failing step shows its message and evidence. Fix the cause (for example, pull a missing image), then **Retry**, or **Cancel**.
+- **Provisioning failed.** The resources created so far are listed under Retirement. Submit the creation again from the plan, or delete the resources.
+- **A cluster is degraded.** Nodes & Topology shows which nodes do not answer, and whether the provider confirms them failed. Keeper shows the quorum.
+- **Drift.** Configuration lists the differences; apply the desired configuration or adopt the observed values.
+- **An upgrade stopped.** The operation lists the upgraded nodes. Find the cause before continuing; to return, restore the pre-upgrade backup into a new cluster.
+
 ## Integration contract {#integration-contract}
 
 The pages served by the server (`/dashboard`, `/binary`, `/merges`, `/schema`, `/jemalloc`, `/processors-profile`, and `/docs`) call `window.parent.clickhouseConsole.getConnection(window)` once at startup. When the page is embedded by the console on the same origin, this returns the server URL, the user, and the password, and the page hides its own connection fields. The console returns the connection only to frames it created for these pages, and only while you are signed in. When the page is opened on its own, or embedded by a page of another origin, the call is not made and the page behaves as before.
@@ -455,3 +669,6 @@ ClickStack is a separate application with its own connection settings, entered i
 - The server does not check `remote_url_allow_hosts` for the endpoint of `BACKUP TO S3`; the console restricts endpoints with `backup_s3_endpoints` (see [Backup destinations](#backup-destinations)).
 - Restore tests run on the server the console is connected to, which shares resources with the production workload.
 - Schedules, retention, and deletions need the [backup worker](#backup-worker). Without it, the page shows that no worker is running, and requested deletions stay `queued`.
+- Cluster Management implements one provider, a Docker Compose lab on one host: its nodes are one failure domain, without TLS, load balancing, storage resizing, or Keeper membership changes (see [Supported capabilities](#cluster-capability-matrix)).
+- Lifecycle operations need the [cluster agent](#cluster-setup). Without it, operations stay queued and observations become stale.
+- Restoring a backup into a replacement cluster, moving data between shards, and switching traffic to a recovery site are not automated.
