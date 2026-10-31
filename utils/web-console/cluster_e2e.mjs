@@ -141,6 +141,8 @@ const shot = async name => { if (SCREENSHOTS) await page.screenshot({path: path.
 // ---------------------------------------------------------------------------------------------
 
 const NAME = `e2e-${RUN}`;
+/// The administrator password typed in the wizard: it must not appear anywhere in the console tables or logs.
+const ADMIN_SECRET = `E2e-Admin-${RUN}-Pw`;
 let cluster = null;
 
 for (const statement of ['DROP USER IF EXISTS e2e_cluster_viewer', "CREATE USER e2e_cluster_viewer IDENTIFIED BY 'E2e-cluster-viewer-1'",
@@ -170,13 +172,18 @@ await test('Create a cluster in the wizard: provisioned by the agent and ready o
     await dialog().getByLabel('CPUs per node').fill('1');
     await dialog().getByLabel('Memory per node (MiB)').fill('1536');
     check(!(await wizardNext()), 'storage step');
+    await dialog().getByLabel('Administrator user').fill('e2e_admin');
+    await dialog().getByLabel('Administrator password').fill(ADMIN_SECRET);
+    await dialog().getByLabel('Confirm the password').fill(`${ADMIN_SECRET}x`);
+    check((await wizardNext()).includes('do not match'), 'mismatched passwords accepted');
+    await dialog().getByLabel('Confirm the password').fill(ADMIN_SECRET);
     check(!(await wizardNext()), 'security step');
     check(!(await wizardNext()), 'policies step');
     const plan = await dialog().innerText();
     check(plan.includes('Containers to create') && plan.includes('If provisioning fails'), 'the plan is incomplete');
     await wizardNext();
     const statements = await dialog().innerText();
-    check(!/password|secret/i.test(statements.replace(/secrets?\.env|generated|Secrets?/g, '')), 'the plan shows a credential');
+    check(!statements.includes(ADMIN_SECRET) && statements.includes('encrypted for the agent'), 'the plan shows the administrator password, or does not say it is encrypted');
     check((await applyPlan()).includes('Applied.'), 'not submitted');
     cluster = await clusterId(NAME);
     check(cluster, 'no cluster recorded');
@@ -196,6 +203,20 @@ await test('Create a cluster in the wizard: provisioned by the agent and ready o
         hosts.add((await (await fetch(`http://127.0.0.1:${spec.routing.port}/?query=SELECT+hostName()`, {headers: {'X-ClickHouse-User': 'app', 'X-ClickHouse-Key': proxy_password}})).text()).trim());
     }
     check(JSON.stringify([...hosts].sort()) === '["s1r1","s1r2"]', `chproxy routed to ${[...hosts].join(', ')}`);
+    /// The administrator user signs in with the password typed in the wizard; chproxy forwards to it.
+    for (const r of spec.shards[0].replicas) {
+        const who = (await (await fetch(`http://127.0.0.1:${r.http_port}/?query=SELECT+currentUser()`, {headers: {'X-ClickHouse-User': 'e2e_admin', 'X-ClickHouse-Key': ADMIN_SECRET}})).text()).trim();
+        check(who === 'e2e_admin', `${r.name}: the administrator cannot sign in: ${who}`);
+    }
+    const via_proxy = (await (await fetch(`http://127.0.0.1:${spec.routing.port}/?query=SELECT+currentUser()`, {headers: {'X-ClickHouse-User': 'app', 'X-ClickHouse-Key': proxy_password}})).text()).trim();
+    check(via_proxy === 'e2e_admin', `chproxy forwards as ${via_proxy}`);
+    await sql('SYSTEM FLUSH LOGS');
+    for (const table of ['clusters', 'cluster_revisions', 'cluster_operations', 'cluster_events', 'cluster_observations', 'audit_log']) {
+        check(await sql(`SELECT count() FROM ${DB}.${table} WHERE position(toString(tuple(*)), {p:String}) > 0`, ADMIN_USER, ADMIN_PASSWORD, {p: ADMIN_SECRET}) === '0', `the password is in ${table}`);
+    }
+    check(await sql(`SELECT count() FROM system.query_log WHERE event_time > now() - 3600 AND position(query, {p:String}) > 0`, ADMIN_USER, ADMIN_PASSWORD, {p: ADMIN_SECRET}) === '0', 'the password is in the query log');
+    check(!fs.readFileSync(path.join(dir, 'compose.yaml'), 'utf8').includes(ADMIN_SECRET) && !fs.readFileSync(path.join(dir, 's1r1', 'console-users.xml'), 'utf8').includes(ADMIN_SECRET),
+        'the password is in a generated configuration file');
     check((await fetch(`http://127.0.0.1:${spec.routing.port}/?query=SELECT+1`, {headers: {'X-ClickHouse-User': 'app', 'X-ClickHouse-Key': 'wrong'}})).status !== 200, 'chproxy accepted a wrong password');
     await tab(cluster, 'nodes');
     const routing = await page.locator('#admin-view .box', {hasText: 'Client routing'}).innerText();
@@ -293,7 +314,7 @@ await test('Add a replica: synchronization completes before readiness', async ()
         ADMIN_USER, ADMIN_PASSWORD, {c: cluster});
     const secrets = fs.readFileSync(path.join(dir, 'secrets.env'), 'utf8');
     const password = secrets.match(/CH_ADMIN_PASSWORD=(.*)/)[1];
-    const node = q => fetch(`http://127.0.0.1:${ports.shards[0].replicas[0].http_port}/`, {method: 'POST', body: q, headers: {'X-ClickHouse-User': 'console_admin', 'X-ClickHouse-Key': password}}).then(r => r.text());
+    const node = q => fetch(`http://127.0.0.1:${ports.shards[0].replicas[0].http_port}/`, {method: 'POST', body: q, headers: {'X-ClickHouse-User': 'console_service', 'X-ClickHouse-Key': password}}).then(r => r.text());
     await node('CREATE DATABASE IF NOT EXISTS app ON CLUSTER main');
     await node("CREATE TABLE IF NOT EXISTS app.events ON CLUSTER main (id UInt64, v String) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/app/events', '{replica}') ORDER BY id");
     await node("INSERT INTO app.events SELECT number, toString(number) FROM numbers(50000)");
@@ -410,7 +431,7 @@ await test('Retire a cluster, then delete only the approved resources: records r
         ADMIN_USER, ADMIN_PASSWORD, {c: cluster});
     const password = fs.readFileSync(path.join(dir, 'secrets.env'), 'utf8').match(/CH_ADMIN_PASSWORD=(.*)/)[1];
     await fetch(`http://127.0.0.1:${spec.shards[0].replicas[0].http_port}/`, {method: 'POST', body: 'DROP DATABASE app ON CLUSTER main SYNC',
-        headers: {'X-ClickHouse-User': 'console_admin', 'X-ClickHouse-Key': password}}).then(r => r.text());
+        headers: {'X-ClickHouse-User': 'console_service', 'X-ClickHouse-Key': password}}).then(r => r.text());
     await tab(cluster, 'retirement');
     await page.locator('#admin-view button', {hasText: 'Start retirement'}).click();
     for (const select of await dialog().locator('select').all()) await select.selectOption('none');
@@ -443,11 +464,14 @@ await test('Retire a cluster, then delete only the approved resources: records r
     /// Cleanup: the volumes of the test cluster.
     await tab(cluster, 'retirement');
     await clickButton('Delete resources');
-    for (const label of await dialog().locator('label', {hasText: /^(volume|directory) /}).all()) await label.locator('input').check();
+    await dialog().locator('label', {hasText: /^Select all /}).locator('input').check();
+    const boxes = dialog().locator('label', {hasText: /^(volume|directory) /}).locator('input');
+    check(await boxes.count() > 0 && (await boxes.evaluateAll(inputs => inputs.every(i => i.checked))), 'Select all left resources unselected');
     await dialog().getByLabel(`Type ${NAME} to confirm`).fill(NAME);
     await review();
     await applyPlan();
     check(await finished(await latestOp(cluster, 'destroy')) === 'succeeded', 'cleanup failed');
+    check(volumes().length === 0, `volumes remain after Select all: ${volumes().join(', ')}`);
 });
 
 await test('No script errors in the pages', async () => {

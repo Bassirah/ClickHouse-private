@@ -45,17 +45,15 @@ The Web Terminal is unavailable when it is disabled with the `enable_webterminal
 
 ## Signing in and out {#signing-in-and-out}
 
-The sign-in form has the same fields and URL rules as the [SQL Console](/interfaces/sql-console): the server URL, the username, and the password. The console checks them by running `SELECT currentUser(), version(), hostName()`, which needs no privileges. If the check fails, it tells apart:
+The sign-in form asks for a username and a password. The console signs in to the server that serves it, at the address of the page. It checks the credentials by running `SELECT currentUser(), version(), hostName()`, which needs no privileges. If the check fails, it tells apart:
 
 - an incorrect username or password;
 - a user that may not connect from your address, or that lacks permissions;
-- a server that cannot be reached;
-- a TLS certificate that the browser does not trust (the browser does not report the difference from an unreachable server, so the message names both);
-- a request that the browser blocked: mixed content, or a CORS policy that does not allow the console's origin.
+- a server that cannot be reached.
 
 If you open a panel's address without being signed in, the console asks you to sign in and then opens that panel.
 
-**Sign out** and **Switch connection** close every panel, which ends their queries, timers, and terminal sessions. They also discard the password and the ClickHouse connection that ClickStack stored for the current browser tab. After signing out, the Back button does not restore the signed-in state.
+**Sign out** and **Switch connection** (to sign in as another user) close every panel, which ends their queries, timers, and terminal sessions. They also discard the password and the ClickHouse connection that ClickStack stored for the current browser tab. After signing out, the Back button does not restore the signed-in state.
 
 The home page shows the connection status the server reported at the last check. The console checks the connection again every minute while the tab is visible, and when you select **Check connection**.
 
@@ -438,7 +436,7 @@ ClickHouse has no SQL statement that creates servers, provisions infrastructure,
 
 | View | What it shows |
 |---|---|
-| Cluster Inventory | Registered clusters with their environment, owner, provider, mode, lifecycle state, health, versions, the age of the last observation, drift, and operations that need attention; the state of the cluster agent. |
+| Cluster Inventory | Registered clusters with their environment, owner, provider, mode, lifecycle state, health, versions, the age of the last observation, drift, and operations that need attention; the state of the cluster agent. Filters: a search on name, identifier, owner, and workload; environment, provider, mode, and lifecycle; and **Needs attention** (drift, failed or blocked operations, or a cluster that is not healthy). |
 | Create Cluster | The creation wizard. |
 | Register Existing | Read-only registration of an existing deployment. |
 | Overview | Identity, endpoints, secret references, health, recovery targets and measured evidence, recent operations. |
@@ -487,7 +485,7 @@ node utils/web-console/cluster_agent.mjs
 
 | Variable | Meaning |
 |---|---|
-| `CLUSTER_AGENT_STATE_DIR` | Directory of the generated deployments and their secrets (required for docker-compose). |
+| `CLUSTER_AGENT_STATE_DIR` | Directory of the generated deployments and their secrets, and of the agent's key pair `agent-key.pem` (readable by its owner), whose public key the agent publishes for encrypting administrator passwords (required for docker-compose). |
 | `CLUSTER_AGENT_ENVIRONMENTS` | Environments the agent may change (default `lab,development`). Operations on clusters in other environments are rejected. |
 | `CLUSTER_AGENT_PORT_RANGE` | Host ports for lab endpoints, bound to `127.0.0.1` (default `31000-31999`). |
 | `CLUSTER_AGENT_IMAGES` | Image repositories allowed for lab containers (default `clickhouse/clickhouse-server,contentsquareplatform/chproxy`). |
@@ -517,7 +515,7 @@ The wizard has eight steps:
 2. **Infrastructure provider**: only implemented providers can be chosen, and only when an agent offers them for the environment.
 3. **Topology**: shards, replicas per shard, Keeper members (1, 3, or 5), the cluster name, and the [client routing](#cluster-client-routing): none, or chproxy. The wizard explains what failures the topology tolerates, separately for replicas, the Keeper quorum, and the routing, and that a lab on one host is one failure domain.
 4. **Storage and resources**: CPU and memory per node, the image, and the storage model (a local volume per node and per Keeper member).
-5. **Security**: the administrative user. The agent generates its password, the cluster secret, and the interserver credentials on its host; they appear in no plan, URL, log, or console table.
+5. **Security**: the administrator user of the cluster and its password (at least 12 characters, without spaces, quotes, `$`, `#`, or backslashes, typed twice). The browser encrypts the password with the public key that the cluster agent publishes (RSA-OAEP with SHA-256): the plan and the console tables contain only the ciphertext, which only that agent can decrypt. The agent writes the password to the secrets file of the deployment on its host, and the nodes read it from the environment; it appears in no plan, URL, log, or console table. The agent and chproxy use a separate user, `console_service`, with a password the agent generates, as it does the cluster secret and the interserver credentials. The cluster is ready only after the administrator user signs in on every node.
 6. **Operational policies**: backup destination, maintenance window, and an optional notification reference.
 7. **Plan**: the containers, volumes, network, endpoints, configuration, expected disruption, preconditions, readiness checks, and what happens if provisioning fails.
 8. **Readiness**, done by the agent after submission: every node answers and authenticates, Keeper has a leader and a quorum, every node lists the topology, and a test database is written, replicated, read through the cluster, and dropped. The cluster is **ready** only after these checks, not when its containers run.
@@ -625,7 +623,7 @@ Retirement is separate from deletion:
 1. **Dependency review**: applications and connections, ingestion pipelines, scheduled jobs, users and integrations, dashboards, backup schedules, and other dependencies each need a recorded disposition. Unknown is not accepted.
 2. **Protection**: a verified final backup, or a recorded reason why none is needed (refused when the cluster holds data); the retention deadline of the retained resources; legal or operational holds.
 3. **Execution**: the agent checks the dependencies, that no other operation is in progress, and the protection gate; then stops the containers, records every resource with its disposition and deadline, and sets the mode to Retired.
-4. **Deletion**, a separate operation that needs the capability `destroy`: only the resources selected, only when Docker labels them as the cluster's, and not before their retention deadline. The result lists every resource as retained, stopped, or deleted, with its owner and evidence.
+4. **Deletion**, a separate operation that needs the capability `destroy`: only the resources selected (**Select all** selects every remaining resource), only when Docker labels them as the cluster's, and not before their retention deadline. The result lists every resource as retained, stopped, or deleted, with its owner and evidence.
 
 Backups made through Backup & Restore, the configuration history, the operations, and the audit records remain after retirement and deletion. A registered deployment is only retired from the inventory.
 

@@ -326,6 +326,12 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 .admin-head .crumbs a { color: inherit; }
 .toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end; }
 .toolbar .field { flex: 0 1 18rem; }
+.filter-bar { flex-wrap: nowrap; }
+.filter-bar .field { flex: 1 1 8rem; min-width: 0; }
+.filter-bar .field.search { flex: 2 1 14rem; }
+.filter-bar :is(input, select) { width: 100%; min-width: 0; }
+.filter-bar .check { flex: none; white-space: nowrap; min-height: 30px; align-items: center; }
+@media (max-width: 900px) { .filter-bar { flex-wrap: wrap; } .filter-bar .field { flex-basis: 10rem; } }
 .field select, .field textarea, .inline-input
 {
     min-height: 2.4rem; padding: 0.4rem 0.65rem; border-radius: 4px; border: 1px solid var(--border);
@@ -334,6 +340,7 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 .field textarea { min-height: 4.5rem; resize: vertical; }
 .field input[type="checkbox"], .check input { min-height: 0; width: 1rem; height: 1rem; margin: 0.15rem 0 0; accent-color: var(--accent-border); }
 .check { display: flex; gap: 0.5rem; align-items: flex-start; font-size: 0.92rem; }
+.check.select-all { font-weight: 600; padding-bottom: 0.4rem; margin-bottom: 0.2rem; border-bottom: 1px solid var(--border); }
 .form-grid { display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
 .box
 {
@@ -535,14 +542,8 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
         <div class="login-title">
             <span id="login-logo"></span>
             <h1 id="login-heading">ClickHouse Console</h1>
-            <p>Sign in with a ClickHouse user to open the SQL Console, dashboards, and diagnostics.</p>
         </div>
         <div id="login-notice" class="message info" role="status" hidden></div>
-        <div class="field">
-            <label for="login-url">ClickHouse HTTP URL</label>
-            <input id="login-url" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" required aria-describedby="login-url-hint">
-            <span class="hint" id="login-url-hint">The HTTP interface of the server, without credentials or query parameters.</span>
-        </div>
         <div class="field">
             <label for="login-user">Username</label>
             <input id="login-user" name="username" type="text" autocomplete="username" spellcheck="false" autocapitalize="off" required>
@@ -554,7 +555,7 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
         <div id="login-warning" class="message warning" hidden></div>
         <div id="login-error" class="message error" role="alert" hidden></div>
         <button id="login-submit" class="button primary" type="submit">Connect</button>
-        <p class="login-footer">Credentials are kept in this tab's memory only and are sent only to the server above.</p>
+        <p class="login-footer">Credentials are kept in this tab's memory only and are sent only to this server.</p>
     </form>
 </div>
 
@@ -1069,15 +1070,13 @@ function showLogin() {
     $('login-view').hidden = false;
     $('skip-link').hidden = true;
     document.title = 'Sign in · ClickHouse Console';
-    const url_input = $('login-url');
-    if (!url_input.value) url_input.value = location.origin;
     if (!$('login-user').value) $('login-user').value = 'default';
     const next = parseRoute().next;
     if (next && !$('login-notice').dataset.persistent) {
         showLoginNotice(`Sign in to open ${COMPONENTS_BY_ID.get(next).title}.`);
     }
     updateLoginWarning();
-    (url_input.value && $('login-user').value ? $('login-password') : url_input).focus();
+    ($('login-user').value ? $('login-password') : $('login-user')).focus();
 }
 
 function showLoginNotice(text, persistent) {
@@ -1100,16 +1099,12 @@ function showLoginError(message, detail) {
     box.hidden = false;
 }
 
+/// The console signs in to the server that serves it.
 function updateLoginWarning() {
-    const result = validateServerURL($('login-url').value.trim());
+    const result = validateServerURL(location.origin);
     $('login-warning').textContent = result.warning || '';
     $('login-warning').hidden = !result.warning;
 }
-
-$('login-url').addEventListener('input', () => {
-    $('login-url').removeAttribute('aria-invalid');
-    updateLoginWarning();
-});
 
 $('login-form').addEventListener('submit', async e => {
     e.preventDefault();
@@ -1117,11 +1112,9 @@ $('login-form').addEventListener('submit', async e => {
     if (submit.disabled) return;
 
     $('login-error').hidden = true;
-    const url_check = validateServerURL($('login-url').value.trim());
+    const url_check = validateServerURL(location.origin);
     if (url_check.error) {
-        $('login-url').setAttribute('aria-invalid', 'true');
         showLoginError(url_check.error);
-        $('login-url').focus();
         return;
     }
     const user = $('login-user').value.trim();
@@ -1207,14 +1200,14 @@ function endSession() {
 
 function signOut() {
     endSession();
-    showLoginNotice('You have signed out.', true);
+    showLoginNotice('');
     navigate(loginPath(null), true);
 }
 
 function switchConnection() {
     const previous = session ? `${session.user} at ${session.url}` : '';
     endSession();
-    showLoginNotice(`Signed out of ${previous}. Sign in to another server or as another user. All panels were closed.`, true);
+    showLoginNotice(`Signed out of ${previous}. Sign in as another user. All panels were closed.`, true);
     navigate(loginPath(null), true);
 }
 
@@ -7823,22 +7816,51 @@ function agentBox(state) {
     return box;
 }
 
+/// Operations and drift that need someone's attention, and an unhealthy lifecycle.
+function clusterAttention(c) {
+    const failed = c.ops.filter(o => ['failed', 'blocked', 'unknown'].includes(o.state)).length;
+    const drift = !!(c.drift && c.drift.state === 'drift');
+    return {failed, drift, unhealthy: ['degraded', 'unreachable', 'failed'].includes(c.lifecycle), any: failed > 0 || drift || ['degraded', 'unreachable', 'failed'].includes(c.lifecycle)};
+}
+
 function renderClusterInventory(state) {
-    const rows = state.clusters;
-    return [agentBox(state), dataTable([
-        {title: 'Cluster', render: c => [adminLink(c.name, 'admin-clusters', c.cluster_id), h('div', {className: 'note'}, `${shortId(c.cluster_id)} · ${c.environment} · ${c.owner || 'no owner'}`)]},
-        {title: 'Provider / mode', render: c => [c.provider, h('div', {className: 'note'}, c.mode)]},
-        {title: 'Lifecycle', render: c => lifecycleBadge(c.lifecycle, c.lifecycle_message)},
-        {title: 'Health', render: c => healthSummary(c)},
-        {title: 'Versions', render: c => clusterHealth(c).versions.join(', ') || h('span', {className: 'note'}, 'unknown')},
-        {title: 'Last observation', render: c => observedAt(c)},
-        {title: 'Attention', render: c => {
-            const failed = c.ops.filter(o => ['failed', 'blocked', 'unknown'].includes(o.state)).length;
-            const drift = c.drift && c.drift.state === 'drift';
-            return h('span', {className: 'chips'}, drift ? badge('Drift', 'warn') : null, failed ? badge(`${failed} operations need attention`, 'bad') : null,
-                !drift && !failed ? h('span', {className: 'note'}, '—') : null);
-        }},
-    ], rows, 'No cluster is registered. Create one, or register an existing deployment.', 'Clusters')];
+    const values = key => [...new Set(state.clusters.map(c => c[key]).filter(Boolean))].sort();
+    const all = label => [['', label]];
+    const search = h('input', {type: 'search', placeholder: 'Name, identifier, owner, or workload', autocomplete: 'off', spellcheck: false});
+    const environment = select([...all('All environments'), ...values('environment')], '');
+    const provider = select([...all('All providers'), ...values('provider')], '');
+    const mode = select([...all('All modes'), ['observe', 'Observe'], ['manage', 'Manage'], ['retired', 'Retired']], '');
+    const lifecycle = select([...all('Any lifecycle'), ...Object.entries(LIFECYCLE_BADGES).map(([key, [title]]) => [key, title])], '');
+    const attention = checkbox('Needs attention', false, {title: 'Drift, failed operations, or not healthy'});
+    const count = h('p', {className: 'note', role: 'status'});
+    const list = h('div', {});
+    const draw = () => {
+        const text = search.value.trim().toLowerCase();
+        const rows = state.clusters.filter(c => (!text || `${c.name} ${c.cluster_id} ${c.owner} ${c.description}`.toLowerCase().includes(text))
+            && (!environment.value || c.environment === environment.value) && (!provider.value || c.provider === provider.value)
+            && (!mode.value || c.mode === mode.value) && (!lifecycle.value || c.lifecycle === lifecycle.value)
+            && (!attention.input.checked || clusterAttention(c).any));
+        count.textContent = rows.length === state.clusters.length ? `${rows.length} clusters.` : `${rows.length} of ${state.clusters.length} clusters match the filters.`;
+        list.replaceChildren(dataTable([
+            {title: 'Cluster', render: c => [adminLink(c.name, 'admin-clusters', c.cluster_id), h('div', {className: 'note'}, `${shortId(c.cluster_id)} · ${c.environment} · ${c.owner || 'no owner'}`)]},
+            {title: 'Provider / mode', render: c => [c.provider, h('div', {className: 'note'}, c.mode)]},
+            {title: 'Lifecycle', render: c => lifecycleBadge(c.lifecycle, c.lifecycle_message)},
+            {title: 'Health', render: c => healthSummary(c)},
+            {title: 'Versions', render: c => clusterHealth(c).versions.join(', ') || h('span', {className: 'note'}, 'unknown')},
+            {title: 'Last observation', render: c => observedAt(c)},
+            {title: 'Attention', render: c => {
+                const a = clusterAttention(c);
+                return h('span', {className: 'chips'}, a.drift ? badge('Drift', 'warn') : null, a.failed ? badge(`${a.failed} operations need attention`, 'bad') : null,
+                    !a.drift && !a.failed ? h('span', {className: 'note'}, '—') : null);
+            }},
+        ], rows, state.clusters.length ? 'No cluster matches the filters.' : 'No cluster is registered. Create one, or register an existing deployment.', 'Clusters'));
+    };
+    for (const control of [search, environment, provider, mode, lifecycle, attention.input]) control.addEventListener(control === search ? 'input' : 'change', draw);
+    draw();
+    const searchField = adminField('Search', search);
+    searchField.classList.add('search');
+    return [agentBox(state), h('div', {className: 'toolbar filter-bar'}, searchField, adminField('Environment', environment), adminField('Provider', provider),
+        adminField('Mode', mode), adminField('Lifecycle', lifecycle), attention.element), count, list];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -7874,7 +7896,7 @@ async function createClusterWizard(state) {
     const backup_destinations = await detailRows(`SELECT id, name, toString(type) AS type FROM ${clusterTable('backup_destinations')} FINAL WHERE NOT deleted AND enabled ORDER BY name`);
     const w = {name: '', environment: 'lab', owner: session.server_user, description: '', volume_gb: 10, growth: 10, concurrency: 10, ingestion: 'batch',
         availability: 'lab', rpo_hours: 24, rto_hours: 4, provider: 'docker-compose', shards: 1, replicas: 2, keepers: 3, cluster_name: 'main',
-        image: 'clickhouse/clickhouse-server:26.9.8.3', cpus: 2, memory_mb: 2048, admin_user: 'console_admin', backup_destination_id: '',
+        image: 'clickhouse/clickhouse-server:26.9.8.3', cpus: 2, memory_mb: 2048, admin_user: 'cluster_admin', admin_password: '', admin_password_confirm: '', backup_destination_id: '',
         routing: 'none', proxy_image: 'contentsquareplatform/chproxy:v1.30.0', proxy_user: 'app', proxy_max_concurrent: 20, proxy_max_execution: 300,
         maintenance_window: 'Sunday 02:00-04:00 UTC', notify_ref: ''};
     const field = (label, key, attrs = {}, hint) => {
@@ -7967,13 +7989,28 @@ async function createClusterWizard(state) {
             if (!/^[a-z0-9./_-]+:[A-Za-z0-9._-]+$/.test(w.image)) return 'Enter an image as repository:tag.';
             return null;
         }},
-        {title: 'Security', render: () => h('div', {}, field('Administrative user on the nodes', 'admin_user', {}, 'Created from the configuration with a generated password.'),
-            kvList([['Bootstrap credentials', 'Generated by the agent on its host (file secrets.env of the deployment, readable by its owner). Never sent to the browser, shown in plans, or logged.'],
+        {title: 'Security', render: () => h('div', {},
+            field('Administrator user', 'admin_user', {}, 'The ClickHouse user that administers the cluster, with access management, on every node.'),
+            field('Administrator password', 'admin_password', {type: 'password', autocomplete: 'new-password'},
+                'At least 12 characters, without spaces, quotes, $, #, or backslashes. Encrypted in this browser for the cluster agent, and stored only on the agent host.'),
+            field('Confirm the password', 'admin_password_confirm', {type: 'password', autocomplete: 'new-password'}),
+            kvList([['Administrator password', 'Encrypted in the browser with the public key of the cluster agent (RSA-OAEP); the console tables and the plan hold only the ciphertext. '
+                + 'The agent writes it to the secrets file of the deployment (readable by its owner), and the nodes read it from the environment. It is not shown again.'],
+                ['Service user', 'console_service, with a password the agent generates on its host: the agent and chproxy use it. It never reaches the browser.'],
                 ['Inter-node authentication', 'A generated cluster secret for distributed queries, and interserver credentials for replication.'],
                 ['Network', 'Endpoints bound to 127.0.0.1 on the Docker host; nodes reach each other on a private Docker network.'],
                 ['TLS', 'Not configured by this provider: traffic stays on the host. Use another provider for networks where TLS is required.'],
                 ['Access management', 'SQL users are local to each node (no replicated user directory); the administrative user comes from the configuration on every node.']])),
-        validate: () => (/^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(w.admin_user) ? null : 'Enter a valid user name.')},
+        validate: () => {
+            if (!/^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(w.admin_user)) return 'Enter a user name of letters, digits, and underscores.';
+            if (['default', 'console_service', 'interserver'].includes(w.admin_user)) return `${w.admin_user} is reserved: choose another user name.`;
+            if (w.admin_password.length < 12) return 'The password needs at least 12 characters.';
+            if (/[\s'"`$#\\]/.test(w.admin_password)) return 'The password cannot contain spaces, quotes, $, #, or backslashes.';
+            if (w.admin_password !== w.admin_password_confirm) return 'The passwords do not match.';
+            const agent = state.agents[0];
+            if (!agent || !agent.data.public_key) return 'The cluster agent publishes no key to encrypt the password with: start an agent with CLUSTER_AGENT_STATE_DIR.';
+            return null;
+        }},
         {title: 'Operational policies', render: () => h('div', {},
             adminField('Backup destination', select([['', 'None yet'], ...(backup_destinations.rows || []).filter(d => d.type === 's3').map(d => [d.id, d.name])], w.backup_destination_id,
                 {onchange: e => { w.backup_destination_id = e.target.value; }}), backup_destinations.error ? `The destinations could not be read: ${backup_destinations.error}`
@@ -7995,20 +8032,39 @@ async function createClusterWizard(state) {
                         + `and ${w.proxy_max_execution} s per query; a heartbeat every 5 s takes unhealthy nodes out of routing. Its configuration takes the passwords from the environment.` : 'None: clients connect to the nodes directly.'],
                     ['Configuration', 'remote_servers, macros, Keeper connection, interserver credentials, and the administrative user, generated per node.'],
                     ['Resources per node', `${w.cpus} CPU, ${w.memory_mb} MiB`], ['Image', w.image],
+                    ['Users', `${w.admin_user} (administrator, with the password you set), and console_service (for the agent and chproxy, generated)`],
                     ['Expected disruption', 'None: a new deployment.'],
                     ['Preconditions checked by the agent', 'Docker answers; the image is present and allowed; free ports; the host has the memory; your capability create_cluster.'],
-                    ['Readiness', `Every node answers and authenticates; Keeper has a leader and a quorum; every node lists the topology; a test database is written, replicated, read, and dropped${w.routing === 'chproxy' ? '; chproxy finds every node healthy, sends queries to them, and refuses a wrong password' : ''}.`],
+                    ['Readiness', `Every node answers and authenticates, also as ${w.admin_user}; Keeper has a leader and a quorum; every node lists the topology; a test database is written, replicated, read, and dropped${w.routing === 'chproxy' ? '; chproxy finds every node healthy, sends queries to them, and refuses a wrong password' : ''}.`],
                     ['If provisioning fails', 'The resources created so far are recorded with their owner operation and listed under Retirement. Retry reuses them; Delete resources removes them.']]),
                 h('p', {className: 'note'}, 'Submitting records the cluster and its desired configuration (revision 1) and queues the operation. The plan contains no credentials.'));
         }},
-    ], 'Review', () => {
+    ], 'Review', () => submitClusterCreation(state, w).catch(showFailure('Create cluster')));
+}
+
+/// Encrypts a password for the cluster agent with its public key (RSA-OAEP, SHA-256).
+async function encryptForAgent(agent, text) {
+    const der = Uint8Array.from(atob(agent.data.public_key), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey('spki', der, {name: 'RSA-OAEP', hash: 'SHA-256'}, false, ['encrypt']);
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({name: 'RSA-OAEP'}, key, new TextEncoder().encode(text)));
+    let binary = '';
+    for (const byte of ciphertext) binary += String.fromCharCode(byte);
+    return {ciphertext: btoa(binary), key_id: agent.data.key_id};
+}
+
+async function submitClusterCreation(state, w) {
+    /// The password leaves the page only encrypted for the agent.
+    const admin_password = await encryptForAgent(state.agents[0], w.admin_password);
+    w.admin_password = '';
+    w.admin_password_confirm = '';
+    {
         const cluster_id = crypto.randomUUID();
         const op_id = crypto.randomUUID();
         const spec = {schema: 1, cluster_name: w.cluster_name, image: w.image,
             keeper: {image: w.image, members: Array.from({length: w.keepers}, (_, i) => ({node_id: crypto.randomUUID(), name: `keeper${i + 1}`, server_id: i + 1}))},
             shards: Array.from({length: w.shards}, (_, i) => ({index: i + 1, replicas: Array.from({length: w.replicas}, (_, r) => ({node_id: crypto.randomUUID(), name: `s${i + 1}r${r + 1}`, state: 'active'}))})),
             resources: {cpus: w.cpus, memory_mb: w.memory_mb}, storage: {kind: 'local-volume'}, settings: {server: {}, profile: {}},
-            security: {admin_user: w.admin_user, tls: false, network: 'loopback'},
+            security: {admin_user: w.admin_user, service_user: 'console_service', tls: false, network: 'loopback'},
             routing: w.routing === 'chproxy' ? {kind: 'chproxy', image: w.proxy_image, user: w.proxy_user, max_concurrent_queries: w.proxy_max_concurrent,
                 max_execution_time_s: w.proxy_max_execution} : {kind: 'none'}};
         const cluster_row = {cluster_id, name: w.name, environment: w.environment, owner: w.owner, description: w.description, provider: w.provider, connection: '{}',
@@ -8020,11 +8076,12 @@ async function createClusterWizard(state) {
                 insertStep('cluster_revisions', {cluster_id, revision: 1, spec: JSON.stringify(spec), source: 'console', note: 'initial plan'}, 'Record the desired configuration (revision 1)'),
                 insertStep('cluster_events', {op_id: '', cluster_id, kind: 'mode', state: 'manage', step: '', message: 'created by the console', data: '{}'}, 'Set the management mode to Manage'),
                 insertStep('cluster_events', {op_id: '', cluster_id, kind: 'lifecycle', state: 'planned', step: '', message: 'planned', data: '{}'}, 'Set the lifecycle state to Planned'),
-                insertStep('cluster_operations', {op_id, cluster_id, kind: 'provision', revision: 1, parameters: '{}'}, `Request provisioning (${op_id})`),
+                insertStep('cluster_operations', {op_id, cluster_id, kind: 'provision', revision: 1, parameters: JSON.stringify({admin_password})},
+                    `Request provisioning (${op_id}), with the administrator password encrypted for the agent`),
                 insertStep('cluster_events', {op_id, cluster_id, kind: 'state', state: 'queued', step: '', message: '', data: '{}'}, 'Queue it for the cluster agent')],
             warning: 'The cluster agent provisions it and checks on the server that you hold the capability create_cluster. Submitting the same plan twice provisions it once.',
             onclose: () => navigate(adminPath('admin-clusters', cluster_id, 'operations'))});
-    });
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -8120,6 +8177,9 @@ function clusterOverview(state, cluster) {
             ['Desired configuration', cluster.revision ? `revision ${cluster.revision}` : 'none yet'],
             ['Endpoints', cluster.provider === 'external' ? (cluster.connection.endpoints || []).join(', ') : (cluster.spec ? activeNodes(cluster.spec).map(n => n.http_port ? `${n.name} http://127.0.0.1:${n.http_port}` : `${n.name} (port not assigned yet)`).join(', ') : '—')],
             ...(clusterRouting(cluster) ? [['Client endpoint (chproxy)', clusterRouting(cluster).port ? `http://127.0.0.1:${clusterRouting(cluster).port}, user ${clusterRouting(cluster).user}` : 'port not assigned yet']] : []),
+            ...(cluster.provider === 'docker-compose' && cluster.spec && cluster.spec.security ? [['Administrator user', cluster.spec.security.service_user
+                ? `${cluster.spec.security.admin_user} (password set at creation; CH_USER_PASSWORD on the agent host). The agent and chproxy use ${cluster.spec.security.service_user}.`
+                : `${cluster.spec.security.admin_user} (generated password; CH_ADMIN_PASSWORD on the agent host)`]] : []),
             ['Secrets', cluster.provider === 'docker-compose' ? `Referenced: secrets.env of the deployment on the agent host${clusterRouting(cluster) ? ' (CH_PROXY_PASSWORD is the password of the proxy user)' : ''}` : `Referenced: ${cluster.connection.credential_ref || '—'}_USER / _PASSWORD on the agent host`],
         ])),
         h('div', {className: 'box'}, h('h2', {}, 'Health'), kvList([
@@ -8663,8 +8723,16 @@ function retireWizard(state, cluster) {
 
 function destroyDialog(cluster, resources) {
     const boxes = resources.map(r => ({r, box: checkbox(`${r.kind} ${r.name} (${r.disposition}${r.retention_until ? `, keep until ${r.retention_until}` : ''})`, false)}));
+    const all = checkbox(`Select all (${resources.length} resources)`, false);
+    all.element.classList.add('select-all');
+    all.input.addEventListener('change', () => { for (const b of boxes) b.box.input.checked = all.input.checked; });
+    for (const b of boxes) b.box.input.addEventListener('change', () => {
+        const checked = boxes.filter(x => x.box.input.checked).length;
+        all.input.checked = checked === boxes.length;
+        all.input.indeterminate = checked > 0 && checked < boxes.length;
+    });
     const confirm = h('input', {type: 'text', autocomplete: 'off'});
-    formDialog(`Delete resources of ${cluster.name}`, [h('fieldset', {className: 'box'}, h('legend', {}, 'Resources'), boxes.map(b => b.box.element)),
+    formDialog(`Delete resources of ${cluster.name}`, [h('fieldset', {className: 'box'}, h('legend', {}, 'Resources'), all.element, boxes.map(b => b.box.element)),
         adminField(`Type ${cluster.name} to confirm`, confirm)], 'Review', () => {
         const chosen = boxes.filter(b => b.box.input.checked).map(b => b.r);
         if (!chosen.length) return 'Choose the resources to delete.';

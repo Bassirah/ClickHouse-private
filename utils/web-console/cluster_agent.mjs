@@ -53,6 +53,26 @@ const MANAGED_BY = 'console-cluster-agent';
 
 if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(DB)) throw new Error(`Invalid ADMIN_DATABASE: ${DB}`);
 
+/// The agent's key pair: the console encrypts the administrator password of a new cluster with the public key, so
+/// that only this agent can read it; the console tables hold only the ciphertext.
+let agent_key = null;
+function agentKey() {
+    if (agent_key || !STATE_DIR) return agent_key;
+    fs.mkdirSync(STATE_DIR, {recursive: true, mode: 0o700});
+    const file = path.join(STATE_DIR, 'agent-key.pem');
+    if (!fs.existsSync(file)) {
+        const {privateKey} = crypto.generateKeyPairSync('rsa', {modulusLength: 3072});
+        fs.writeFileSync(file, privateKey.export({type: 'pkcs8', format: 'pem'}), {mode: 0o600});
+    }
+    const private_key = crypto.createPrivateKey(fs.readFileSync(file));
+    const spki = crypto.createPublicKey(private_key).export({type: 'spki', format: 'der'});
+    agent_key = {private_key, public_key: spki.toString('base64'), key_id: crypto.createHash('sha256').update(spki).digest('hex').slice(0, 16)};
+    return agent_key;
+}
+
+/// Characters a password may not contain: they would change its meaning in the environment file of the deployment.
+const PASSWORD_FORBIDDEN = /[\s'"`$#\\]/;
+
 function log(message, fields = {}) {
     console.log(JSON.stringify({time: new Date().toISOString(), agent: AGENT_ID, message, ...fields}));
 }
@@ -255,13 +275,24 @@ const docker = {
         return secrets;
     },
 
+    /// The user of the agent and chproxy, and the administrator user of people. Clusters created before they were separate
+    /// have one user for both, with the generated password.
+    serviceUser: spec => spec.security.service_user || spec.security.admin_user,
+    adminPasswordEnv: spec => (spec.security.service_user ? 'CH_USER_PASSWORD' : 'CH_ADMIN_PASSWORD'),
+
+    setSecret(cluster, name, value) {
+        const file = path.join(docker.dir(cluster), 'secrets.env');
+        const lines = fs.readFileSync(file, 'utf8').split('\n').filter(line => line && !line.startsWith(`${name}=`));
+        fs.writeFileSync(file, [...lines, `${name}=${value}`].join('\n') + '\n', {mode: 0o600});
+    },
+
     nodes: spec => spec.shards.flatMap(shard => shard.replicas.filter(r => r.state !== 'removed').map(r => ({...r, shard: shard.index}))),
 
     endpoint: node => `http://127.0.0.1:${node.http_port}`,
 
     async connect(cluster, node) {
         const secrets = docker.secrets(cluster, {create: false});
-        return (sql, options) => httpQuery(docker.endpoint(node), cluster.spec.security.admin_user, secrets.CH_ADMIN_PASSWORD, sql, options);
+        return (sql, options) => httpQuery(docker.endpoint(node), docker.serviceUser(cluster.spec), secrets.CH_ADMIN_PASSWORD, sql, options);
     },
 
     /// Host ports bound to 127.0.0.1 for every node that does not have one yet. Taken from the range, skipping
@@ -360,13 +391,20 @@ ${keeper.map(m => `            <server><id>${m.server_id}</id><hostname>${m.name
     <profiles><default>${profile_settings}</default></profiles>
     <users>
         <default remove="remove"/>
-        <${spec.security.admin_user}>
+        <${docker.serviceUser(spec)}>
             <password from_env="CH_ADMIN_PASSWORD"/>
             <networks><ip>::/0</ip></networks>
             <profile>default</profile><quota>default</quota>
             <access_management>1</access_management>
             <named_collection_control>1</named_collection_control>
-        </${spec.security.admin_user}>
+        </${docker.serviceUser(spec)}>${spec.security.service_user && spec.security.admin_user !== spec.security.service_user ? `
+        <${spec.security.admin_user}>
+            <password from_env="CH_USER_PASSWORD"/>
+            <networks><ip>::/0</ip></networks>
+            <profile>default</profile><quota>default</quota>
+            <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
+        </${spec.security.admin_user}>` : ''}
     </users>
 </clickhouse>
 `);
@@ -419,7 +457,7 @@ clusters:
       timeout: 3s
     users:
       - name: "${spec.security.admin_user}"
-        password: "\${CH_ADMIN_PASSWORD}"
+        password: "\${${docker.adminPasswordEnv(spec)}}"
 `);
             services.push(`  chproxy:
     image: ${r.image}
@@ -827,8 +865,13 @@ async function verifyTopology(cluster) {
         if (JSON.stringify(seen) !== JSON.stringify(expected)) throw new Error(`${n.name} lists the hosts ${seen.join(', ') || 'none'} for cluster ${spec.cluster_name}, expected ${expected.join(', ')}.`);
         const [z] = await query_node(`SELECT count() AS n FROM system.zookeeper_connection WHERE NOT is_expired`);
         if (Number(z.n) === 0) throw new Error(`${n.name} has no Keeper session.`);
+        if (spec.security.service_user) {
+            const secrets = docker.secrets(cluster, {create: false});
+            const [who] = await httpQuery(docker.endpoint(n), spec.security.admin_user, secrets.CH_USER_PASSWORD, 'SELECT currentUser() AS user', {timeout: 10000});
+            if (who.user !== spec.security.admin_user) throw new Error(`${n.name}: the administrator user ${spec.security.admin_user} cannot sign in.`);
+        }
     }
-    return {hosts: expected};
+    return {hosts: expected, administrator: spec.security.admin_user};
 }
 
 /// chproxy answers as the proxy user, refuses a wrong password, finds every node healthy, and sends queries to them.
@@ -957,6 +1000,24 @@ const HANDLERS = {
             const changed = await provider.assignPorts(state.clusters, cluster, cluster.spec);
             if (changed) await newRevision(ctx, cluster.spec, 'host ports assigned by the agent');
             return {docker: version, cpus: info.NCPU, memory_gib: Math.round(info.MemTotal / 2 ** 30), existing_resources: owned.length, revision: cluster.revision};
+        });
+        await ctx.step('credentials', 'Store the password of the administrator user on the agent host', async () => {
+            if (!cluster.spec.security.service_user) return {note: 'one user with a generated password'};
+            provider.secrets(cluster);
+            const encrypted = ctx.op.parameters.admin_password;
+            if (!encrypted || !encrypted.ciphertext) throw new Rejected('The operation has no administrator password.');
+            const key = agentKey();
+            if (!key || encrypted.key_id !== key.key_id) throw new Blocked(`The administrator password was encrypted for another agent key (${encrypted.key_id}); this agent has ${key ? key.key_id : 'no key'}. Submit the creation again.`);
+            let password;
+            try {
+                password = crypto.privateDecrypt({key: key.private_key, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256'},
+                    Buffer.from(encrypted.ciphertext, 'base64')).toString('utf8');
+            } catch (e) {
+                throw new Rejected('The administrator password cannot be decrypted with this agent\'s key.');
+            }
+            if (password.length < 12 || PASSWORD_FORBIDDEN.test(password)) throw new Rejected('The administrator password must have at least 12 characters, without spaces, quotes, $, #, or backslashes.');
+            provider.setSecret(cluster, 'CH_USER_PASSWORD', password);
+            return {user: cluster.spec.security.admin_user, stored: 'CH_USER_PASSWORD in the secrets file of the deployment'};
         });
         await ctx.step('render', 'Generate the deployment and the node configuration', async () => ({files: Object.keys(provider.render(cluster, cluster.spec)).length, directory: provider.dir(cluster)}));
         await lifecycle(cluster, 'provisioning', `operation ${ctx.op.op_id}`);
@@ -1602,7 +1663,9 @@ const last_observed = new Map();
 
 async function cycle() {
     const state = await loadState();
-    await recordEvent(`agent:${AGENT_ID}`, '', 'heartbeat', {state: 'alive', data: {providers: Object.keys(PROVIDERS), environments: ENVIRONMENTS, state_dir: !!STATE_DIR}});
+    const key = agentKey();
+    await recordEvent(`agent:${AGENT_ID}`, '', 'heartbeat', {state: 'alive', data: {providers: Object.keys(PROVIDERS), environments: ENVIRONMENTS, state_dir: !!STATE_DIR,
+        public_key: key ? key.public_key : null, key_id: key ? key.key_id : null}});
     await processOperations(state);
     for (const cluster of state.clusters) {
         if (cluster.mode === 'retired' || !cluster.spec || ['planned', 'provisioning', 'retiring', 'retired', 'destroyed'].includes(cluster.lifecycle)) continue;
