@@ -7768,6 +7768,8 @@ function healthSummary(c) {
     if (x.failed) parts.push(`${x.failed} failed`);
     if (x.unknown) parts.push(`${x.unknown} unknown`);
     if (x.keeper.length) parts.push(`Keeper ${x.quorum ? 'quorum' : 'NO quorum'} (${x.keeper_ok}/${x.keeper.length})`);
+    const proxy = c.observations.find(o => o.role === 'proxy');
+    if (proxy) parts.push(proxy.status === 'ok' ? `chproxy routes to ${proxy.data.healthy}/${proxy.data.routed}` : `chproxy ${proxy.status}`);
     return h('span', {}, parts.join(', '));
 }
 
@@ -7862,6 +7864,8 @@ function topologyTolerance(w) {
         lines.push(`${w.keepers} Keeper members: the quorum survives ${tolerated} stopped member${tolerated === 1 ? '' : 's'}.`);
     }
     if (w.keepers % 2 === 0) lines.push('An even number of Keeper members tolerates no more failures than one less, and is refused.');
+    if (w.routing === 'chproxy') lines.push('Clients connect to chproxy, which sends queries only to nodes that pass its health check. chproxy itself is one container: when it stops, clients that use it lose access, while direct connections to the nodes keep working.');
+    else lines.push('No load balancer: clients connect to a node directly and must switch to another node themselves when it stops.');
     if (w.provider === 'docker-compose') lines.push('All containers run on one Docker host: they are one failure domain. A host failure stops the whole cluster; this lab does not provide high availability.');
     return lines;
 }
@@ -7871,6 +7875,7 @@ async function createClusterWizard(state) {
     const w = {name: '', environment: 'lab', owner: session.server_user, description: '', volume_gb: 10, growth: 10, concurrency: 10, ingestion: 'batch',
         availability: 'lab', rpo_hours: 24, rto_hours: 4, provider: 'docker-compose', shards: 1, replicas: 2, keepers: 3, cluster_name: 'main',
         image: 'clickhouse/clickhouse-server:26.9.8.3', cpus: 2, memory_mb: 2048, admin_user: 'console_admin', backup_destination_id: '',
+        routing: 'none', proxy_image: 'contentsquareplatform/chproxy:v1.30.0', proxy_user: 'app', proxy_max_concurrent: 20, proxy_max_execution: 300,
         maintenance_window: 'Sunday 02:00-04:00 UTC', notify_ref: ''};
     const field = (label, key, attrs = {}, hint) => {
         const input = h('input', {type: attrs.type || 'text', value: w[key], autocomplete: 'off', spellcheck: false, ...attrs,
@@ -7884,7 +7889,7 @@ async function createClusterWizard(state) {
         const nodes = [];
         for (let s = 1; s <= w.shards; s++) for (let r = 1; r <= w.replicas; r++) nodes.push(`s${s}r${r}`);
         const keepers = Array.from({length: w.keepers}, (_, i) => `keeper${i + 1}`);
-        return {nodes, keepers, project};
+        return {nodes, keepers, project, proxy: w.routing === 'chproxy' ? ['chproxy'] : []};
     };
     wizard('Create cluster', [
         {title: 'Purpose and ownership', render: () => h('div', {},
@@ -7916,13 +7921,25 @@ async function createClusterWizard(state) {
             const tolerance = h('ul', {className: 'steps'});
             const draw = () => tolerance.replaceChildren(...topologyTolerance(w).map(t => h('li', {}, t)));
             const redraw = el => { el.addEventListener('change', draw); el.addEventListener('input', draw); return el; };
+            /// Client routing: none, or chproxy in front of the nodes.
+            const proxy_fields = h('div', {className: 'form-grid'},
+                field('chproxy image', 'proxy_image', {}, 'contentsquareplatform/chproxy, already on the Docker host.'),
+                field('Proxy user', 'proxy_user', {}, 'The user clients authenticate with at chproxy; its password is generated on the agent host.'),
+                field('Concurrent queries per proxy user', 'proxy_max_concurrent', {type: 'number', min: 1, max: 10000}),
+                field('Maximum query time (seconds)', 'proxy_max_execution', {type: 'number', min: 1, max: 86400}));
+            const routing_select = select([['none', 'None: clients connect to the nodes'], ['chproxy', 'chproxy: a proxy that balances queries across healthy nodes']], w.routing,
+                {onchange: e => { w.routing = e.target.value; proxy_fields.hidden = w.routing !== 'chproxy'; draw(); }});
+            proxy_fields.hidden = w.routing !== 'chproxy';
+            const routing_box = h('div', {}, adminField('Client routing', routing_select,
+                'chproxy (ContentSquare) receives HTTP queries, authenticates its users, applies their limits, and forwards each query to a node its heartbeat finds healthy. '
+                + 'The agent adds and removes nodes in it when the topology changes, and takes a node out of it while the node restarts.'), proxy_fields);
             const box = h('div', {},
                 h('div', {className: 'form-grid'},
                     redraw(field('Shards', 'shards', {type: 'number', min: 1, max: 4})), redraw(field('Replicas per shard', 'replicas', {type: 'number', min: 1, max: 3})),
                     redraw(choice('Keeper members', 'keepers', [['1', '1 (no fault tolerance)'], ['3', '3 (survives 1)'], ['5', '5 (survives 2)']])),
                     field('Cluster name in remote_servers', 'cluster_name', {}, 'Used by ON CLUSTER and the cluster() function.')),
-                h('p', {className: 'note'}, 'ClickHouse replica count and Keeper quorum are separate: Keeper is a distinct ensemble, and changing the replicas does not resize it. '
-                    + 'Clients connect to any node; this lab has no load balancer.'),
+                h('p', {className: 'note'}, 'ClickHouse replica count and Keeper quorum are separate: Keeper is a distinct ensemble, and changing the replicas does not resize it.'),
+                routing_box,
                 h('h3', {}, 'What this topology tolerates'), tolerance);
             draw();
             return box;
@@ -7931,6 +7948,11 @@ async function createClusterWizard(state) {
             if (!(w.shards >= 1 && w.shards <= 4) || !(w.replicas >= 1 && w.replicas <= 3)) return 'Choose 1 to 4 shards and 1 to 3 replicas per shard.';
             if (w.keepers % 2 === 0) return 'Choose an odd number of Keeper members.';
             if (!/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(w.cluster_name)) return 'Enter a cluster name of letters, digits, and underscores.';
+            if (w.routing === 'chproxy') {
+                if (!/^contentsquareplatform\/chproxy:[A-Za-z0-9._-]+$/.test(w.proxy_image)) return 'Enter a chproxy image as contentsquareplatform/chproxy:<version>.';
+                if (!/^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(w.proxy_user)) return 'Enter a proxy user of letters, digits, and underscores.';
+                if (!(w.proxy_max_concurrent >= 1 && w.proxy_max_concurrent <= 10000) || !(w.proxy_max_execution >= 1 && w.proxy_max_execution <= 86400)) return 'Enter the proxy limits: 1 to 10000 queries, 1 to 86400 seconds.';
+            }
             return null;
         }},
         {title: 'Storage and resources', render: () => h('div', {},
@@ -7965,15 +7987,17 @@ async function createClusterWizard(state) {
             return h('div', {},
                 kvList([['Cluster', `${w.name} (${w.environment}, owner ${w.owner})`], ['Provider', w.provider],
                     ['Topology', `${w.shards} shards × ${w.replicas} replicas: ${p.nodes.join(', ')}; Keeper: ${p.keepers.join(', ')}`],
-                    ['Containers to create', `${p.nodes.length + p.keepers.length}: ${[...p.nodes, ...p.keepers].map(n => `${p.project}-${n}-1`).join(', ')}`],
+                    ['Containers to create', `${p.nodes.length + p.keepers.length + p.proxy.length}: ${[...p.nodes, ...p.keepers, ...p.proxy].map(n => `${p.project}-${n}-1`).join(', ')}`],
                     ['Volumes to create', [...p.nodes, ...p.keepers].map(n => `${p.project}_${n}-data`).join(', ')],
                     ['Network', `${p.project}_default`],
-                    ['Endpoints', `HTTP and native ports of every node on 127.0.0.1, assigned by the agent from its port range, and recorded in revision 2.`],
+                    ['Endpoints', `HTTP and native ports of every node${w.routing === 'chproxy' ? ', and the HTTP port of chproxy,' : ''} on 127.0.0.1, assigned by the agent from its port range, and recorded in revision 2.`],
+                    ['Client routing', w.routing === 'chproxy' ? `chproxy (${w.proxy_image}): user ${w.proxy_user} → ${w.admin_user} on every node; at most ${w.proxy_max_concurrent} concurrent queries `
+                        + `and ${w.proxy_max_execution} s per query; a heartbeat every 5 s takes unhealthy nodes out of routing. Its configuration takes the passwords from the environment.` : 'None: clients connect to the nodes directly.'],
                     ['Configuration', 'remote_servers, macros, Keeper connection, interserver credentials, and the administrative user, generated per node.'],
                     ['Resources per node', `${w.cpus} CPU, ${w.memory_mb} MiB`], ['Image', w.image],
                     ['Expected disruption', 'None: a new deployment.'],
                     ['Preconditions checked by the agent', 'Docker answers; the image is present and allowed; free ports; the host has the memory; your capability create_cluster.'],
-                    ['Readiness', 'Every node answers and authenticates; Keeper has a leader and a quorum; every node lists the topology; a test database is written, replicated, read, and dropped.'],
+                    ['Readiness', `Every node answers and authenticates; Keeper has a leader and a quorum; every node lists the topology; a test database is written, replicated, read, and dropped${w.routing === 'chproxy' ? '; chproxy finds every node healthy, sends queries to them, and refuses a wrong password' : ''}.`],
                     ['If provisioning fails', 'The resources created so far are recorded with their owner operation and listed under Retirement. Retry reuses them; Delete resources removes them.']]),
                 h('p', {className: 'note'}, 'Submitting records the cluster and its desired configuration (revision 1) and queues the operation. The plan contains no credentials.'));
         }},
@@ -7984,7 +8008,9 @@ async function createClusterWizard(state) {
             keeper: {image: w.image, members: Array.from({length: w.keepers}, (_, i) => ({node_id: crypto.randomUUID(), name: `keeper${i + 1}`, server_id: i + 1}))},
             shards: Array.from({length: w.shards}, (_, i) => ({index: i + 1, replicas: Array.from({length: w.replicas}, (_, r) => ({node_id: crypto.randomUUID(), name: `s${i + 1}r${r + 1}`, state: 'active'}))})),
             resources: {cpus: w.cpus, memory_mb: w.memory_mb}, storage: {kind: 'local-volume'}, settings: {server: {}, profile: {}},
-            security: {admin_user: w.admin_user, tls: false, network: 'loopback'}};
+            security: {admin_user: w.admin_user, tls: false, network: 'loopback'},
+            routing: w.routing === 'chproxy' ? {kind: 'chproxy', image: w.proxy_image, user: w.proxy_user, max_concurrent_queries: w.proxy_max_concurrent,
+                max_execution_time_s: w.proxy_max_execution} : {kind: 'none'}};
         const cluster_row = {cluster_id, name: w.name, environment: w.environment, owner: w.owner, description: w.description, provider: w.provider, connection: '{}',
             requirements: JSON.stringify({volume_gb: w.volume_gb, growth_percent: w.growth, concurrency: w.concurrency, ingestion: w.ingestion, availability: w.availability,
                 rpo_hours: w.rpo_hours, rto_hours: w.rto_hours}),
@@ -8070,6 +8096,7 @@ function renderClusterDetails(root, route, page) {
     });
 }
 
+const clusterRouting = cluster => (cluster.spec && cluster.spec.routing && cluster.spec.routing.kind === 'chproxy' ? cluster.spec.routing : null);
 const managed = cluster => cluster.provider === 'docker-compose' && cluster.mode === 'manage' && cluster.spec && cluster.spec.shards;
 const activeNodes = spec => spec.shards.flatMap(sh => sh.replicas.filter(r => r.state !== 'removed').map(r => ({...r, shard: sh.index})));
 
@@ -8092,7 +8119,8 @@ function clusterOverview(state, cluster) {
             ['Lifecycle', [lifecycleBadge(cluster.lifecycle), ` ${cluster.lifecycle_message || ''}`]],
             ['Desired configuration', cluster.revision ? `revision ${cluster.revision}` : 'none yet'],
             ['Endpoints', cluster.provider === 'external' ? (cluster.connection.endpoints || []).join(', ') : (cluster.spec ? activeNodes(cluster.spec).map(n => n.http_port ? `${n.name} http://127.0.0.1:${n.http_port}` : `${n.name} (port not assigned yet)`).join(', ') : '—')],
-            ['Secrets', cluster.provider === 'docker-compose' ? 'Referenced: secrets.env of the deployment on the agent host' : `Referenced: ${cluster.connection.credential_ref || '—'}_USER / _PASSWORD on the agent host`],
+            ...(clusterRouting(cluster) ? [['Client endpoint (chproxy)', clusterRouting(cluster).port ? `http://127.0.0.1:${clusterRouting(cluster).port}, user ${clusterRouting(cluster).user}` : 'port not assigned yet']] : []),
+            ['Secrets', cluster.provider === 'docker-compose' ? `Referenced: secrets.env of the deployment on the agent host${clusterRouting(cluster) ? ' (CH_PROXY_PASSWORD is the password of the proxy user)' : ''}` : `Referenced: ${cluster.connection.credential_ref || '—'}_USER / _PASSWORD on the agent host`],
         ])),
         h('div', {className: 'box'}, h('h2', {}, 'Health'), kvList([
             ['Last observation', observedAt(cluster)], ['ClickHouse nodes', healthSummary(cluster)],
@@ -8155,6 +8183,16 @@ function clusterNodes(state, cluster) {
                 capabilityButton('Decommission', 'decommission', () => decommissionDialog(cluster, {...r, shard: shard.index}))) : null)},
         ], replicas, null, `Shard ${shard.index}`)));
     }
+    const routing = clusterRouting(cluster);
+    const proxy = cluster.observations.find(o => o.role === 'proxy');
+    out.push(h('div', {className: 'box'}, h('h2', {}, 'Client routing'), routing
+        ? [kvList([['Proxy', `chproxy (${routing.image})`], ['Endpoint', routing.port ? `http://127.0.0.1:${routing.port}` : 'port not assigned yet'],
+            ['Proxy user', `${routing.user} → ${cluster.spec.security.admin_user}; at most ${routing.max_concurrent_queries} concurrent queries and ${routing.max_execution_time_s} s per query`],
+            ['State', proxy ? [badge(...(NODE_BADGES[proxy.status] || [proxy.status, '']), proxy.data.error || null), ` observed ${formatSeconds(proxy.age)} ago`] : badge('Not observed', 'warn')],
+            ['Routed nodes', proxy && proxy.data.nodes ? Object.entries(proxy.data.nodes).map(([name, healthy]) => badge(`${name}: ${healthy ? 'healthy' : 'unhealthy'}`, healthy ? 'ok' : 'bad')) : '—']]),
+            h('p', {className: 'note'}, 'The agent keeps the node list of chproxy in step with the topology, takes a node out of it before stopping or restarting it, and puts it back once the node has caught up. '
+                + 'Clients that connect to a node directly are not routed. The password of the proxy user is CH_PROXY_PASSWORD in the secrets file of the deployment on the agent host.')]
+        : paragraph('None: clients connect to the nodes directly, and must switch to another node themselves when one stops. chproxy can be chosen when a cluster is created.')));
     out.push(h('p', {className: 'note'}, `Placement: every node runs on the agent's Docker host (one failure domain). Infrastructure: containers ${cluster.spec ? `chc-${cluster.cluster_id.replace(/-/g, '').slice(0, 10)}-<node>-1` : ''}.`));
     return out;
 }
@@ -8411,7 +8449,8 @@ function decommissionDialog(cluster, node) {
             'Remove it from the cluster definition of the other nodes.', 'Remove its replica metadata from Keeper (SYSTEM DROP REPLICA, only because the agent stopped and removed it).',
             'Check the remaining cluster.', 'Remove the container; keep or delete the volume as chosen.'].map(t => h('li', {}, t))),
         adminField('Volume', keep), adminField('Keep until (optional)', retention),
-        paragraph('Clients connected to this node directly lose their connection; this lab has no load balancer to update.'),
+        paragraph(clusterRouting(cluster) ? 'chproxy stops routing queries to the node before it stops. Clients connected to the node directly lose their connection.'
+            : 'Clients connected to this node directly lose their connection; this cluster has no chproxy to update.'),
         adminField(`Type ${node.name} to confirm`, confirm),
     ], 'Review', () => {
         if (confirm.value !== node.name) return 'The name does not match.';
