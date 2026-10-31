@@ -477,6 +477,8 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
 #admin-dialog .dialog-body { padding: 18px 20px 20px; gap: 12px; }
 #admin-dialog .dialog-body h2 { font-size: 15px; font-weight: 500; margin-bottom: 4px; }
 #admin-dialog .dialog-actions { margin-top: 4px; gap: 8px; }
+/* The content of a wizard step is one wrapper element: space its fields like the fields of the dialog itself. */
+#admin-dialog .dialog-body > div:not([class]) { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 @media (min-width: 40rem)
 {
     /* Labels beside the fields, as in the settings forms of ClickStack; not inside multi-column grids. */
@@ -7855,7 +7857,10 @@ function topologyTolerance(w) {
     lines.push(w.replicas > 1 ? `Each shard keeps serving reads and writes with up to ${w.replicas - 1} of its ${w.replicas} replicas stopped.`
         : 'Each shard has one replica: stopping its node stops that shard, and losing its volume loses its data unless it was backed up.');
     if (w.keepers === 1) lines.push('One Keeper member: when it stops, replicated tables become read-only and ON CLUSTER queries wait.');
-    else lines.push(`${w.keepers} Keeper members: the quorum survives ${Math.floor((w.keepers - 1) / 2)} stopped members.`);
+    else {
+        const tolerated = Math.floor((w.keepers - 1) / 2);
+        lines.push(`${w.keepers} Keeper members: the quorum survives ${tolerated} stopped member${tolerated === 1 ? '' : 's'}.`);
+    }
     if (w.keepers % 2 === 0) lines.push('An even number of Keeper members tolerates no more failures than one less, and is refused.');
     if (w.provider === 'docker-compose') lines.push('All containers run on one Docker host: they are one failure domain. A host failure stops the whole cluster; this lab does not provide high availability.');
     return lines;
@@ -7872,7 +7877,8 @@ async function createClusterWizard(state) {
             oninput: e => { w[key] = attrs.type === 'number' ? Number(e.target.value) : e.target.value; }});
         return adminField(label, input, hint);
     };
-    const choice = (label, key, options, hint) => adminField(label, select(options, w[key], {onchange: e => { w[key] = /^\d+$/.test(e.target.value) ? Number(e.target.value) : e.target.value; }}), hint);
+    /// Option values are strings: compare as strings, so that a numeric value such as 3 Keeper members is shown selected.
+    const choice = (label, key, options, hint) => adminField(label, select(options, String(w[key]), {onchange: e => { w[key] = /^\d+$/.test(e.target.value) ? Number(e.target.value) : e.target.value; }}), hint);
     const plan = () => {
         const project = 'chc-<cluster id>';
         const nodes = [];
