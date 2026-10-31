@@ -162,6 +162,8 @@ await test('Create a cluster in the wizard: provisioned by the agent and ready o
     await dialog().getByLabel('Shards').fill('1');
     await dialog().getByLabel('Replicas per shard').fill('2');
     await dialog().getByLabel('Keeper members').selectOption('3');
+    await dialog().getByLabel('Client routing').selectOption('chproxy');
+    check((await dialog().innerText()).includes('Clients connect to chproxy'), 'the routing is not explained');
     const tolerance = await dialog().innerText();
     check(tolerance.includes('one failure domain') && tolerance.includes('survives 1'), 'the topology does not explain what it tolerates');
     check(!(await wizardNext()), 'topology step');
@@ -182,9 +184,24 @@ await test('Create a cluster in the wizard: provisioned by the agent and ready o
     check(await finished(op) === 'succeeded', `provisioning: ${await opState(op)} ${await opMessage(op)}`);
     const steps = await sql(`SELECT groupArray(step) FROM (SELECT step FROM ${DB}.cluster_events WHERE op_id = {id:String} AND kind = 'step' AND state = 'done' ORDER BY at)`,
         ADMIN_USER, ADMIN_PASSWORD, {id: op});
-    check(steps.includes('replication') && steps.includes('topology'), `validation steps missing: ${steps}`);
+    check(steps.includes('replication') && steps.includes('topology') && steps.includes('routing'), `validation steps missing: ${steps}`);
+    /// Clients reach the cluster through chproxy with the generated proxy password, on every node.
+    const spec = JSON.parse(await sql(`SELECT spec FROM ${DB}.cluster_revisions WHERE cluster_id = {c:String} ORDER BY revision DESC LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {c: cluster}));
+    const dir = await sql(`SELECT JSONExtractString(data, 'directory') FROM ${DB}.cluster_events WHERE cluster_id = {c:String} AND step = 'render' AND state = 'done' AND data LIKE '%directory%' LIMIT 1`,
+        ADMIN_USER, ADMIN_PASSWORD, {c: cluster});
+    const proxy_password = fs.readFileSync(path.join(dir, 'secrets.env'), 'utf8').match(/CH_PROXY_PASSWORD=(.*)/)[1];
+    check(!fs.readFileSync(path.join(dir, 'chproxy', 'config.yml'), 'utf8').includes(proxy_password), 'the chproxy configuration contains a password');
+    const hosts = new Set();
+    for (let i = 0; i < 12; i++) {
+        hosts.add((await (await fetch(`http://127.0.0.1:${spec.routing.port}/?query=SELECT+hostName()`, {headers: {'X-ClickHouse-User': 'app', 'X-ClickHouse-Key': proxy_password}})).text()).trim());
+    }
+    check(JSON.stringify([...hosts].sort()) === '["s1r1","s1r2"]', `chproxy routed to ${[...hosts].join(', ')}`);
+    check((await fetch(`http://127.0.0.1:${spec.routing.port}/?query=SELECT+1`, {headers: {'X-ClickHouse-User': 'app', 'X-ClickHouse-Key': 'wrong'}})).status !== 200, 'chproxy accepted a wrong password');
+    await tab(cluster, 'nodes');
+    const routing = await page.locator('#admin-view .box', {hasText: 'Client routing'}).innerText();
+    check(routing.includes('s1r1: healthy') || routing.includes('Not observed'), `routing view: ${routing.slice(0, 300)}`);
     check(await lifecycle(cluster) === 'ready', `lifecycle ${await lifecycle(cluster)}`);
-    check(execFileSync('docker', ['ps', '--filter', `label=io.clickhouse.console.cluster=${cluster}`, '--format', '{{.Names}}']).toString().trim().split('\n').length === 5, 'not 5 containers');
+    check(execFileSync('docker', ['ps', '--filter', `label=io.clickhouse.console.cluster=${cluster}`, '--format', '{{.Names}}']).toString().trim().split('\n').length === 6, 'not 6 containers (2 nodes, 3 Keeper members, chproxy)');
     await tab(cluster, 'operations');
     check((await page.locator('#admin-view').innerText()).includes('Succeeded'), 'the operation is not shown as succeeded');
     await shot('c01-provisioned');
@@ -196,7 +213,7 @@ await test('Submit the same creation twice: one deployment is provisioned', asyn
     await sql(`INSERT INTO ${DB}.cluster_events (op_id, cluster_id, kind, state) VALUES ({o:String}, {c:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {o: op_id, c: cluster});
     check(await finished(op_id) === 'rejected', `second provisioning: ${await opState(op_id)}`);
     check((await opMessage(op_id)).includes('already provisioned'), 'no reason');
-    check(execFileSync('docker', ['ps', '-a', '--filter', `label=io.clickhouse.console.cluster=${cluster}`, '--format', '{{.Names}}']).toString().trim().split('\n').length === 5, 'resources were duplicated');
+    check(execFileSync('docker', ['ps', '-a', '--filter', `label=io.clickhouse.console.cluster=${cluster}`, '--format', '{{.Names}}']).toString().trim().split('\n').length === 6, 'resources were duplicated');
 });
 
 await test('Unauthorized user calls a lifecycle operation: it is rejected', async () => {
@@ -291,6 +308,22 @@ await test('Add a replica: synchronization completes before readiness', async ()
     check(sync.includes('"replicated_tables":1'), `sync evidence: ${sync}`);
     const order = await sql(`SELECT groupArray(step) FROM (SELECT step FROM ${DB}.cluster_events WHERE op_id = {id:String} AND kind = 'step' AND state = 'done' ORDER BY at)`, ADMIN_USER, ADMIN_PASSWORD, {id: op});
     check(order.indexOf('sync') < order.indexOf('topology'), `readiness declared before synchronization: ${order}`);
+    check(order.includes('routing'), `the new replica was not added to chproxy: ${order}`);
+    const spec = JSON.parse(await sql(`SELECT spec FROM ${DB}.cluster_revisions WHERE cluster_id = {c:String} ORDER BY revision DESC LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {c: cluster}));
+    const proxyNodes = async () => [...(await (await fetch(`http://127.0.0.1:${spec.routing.port}/metrics`)).text()).matchAll(/^host_health\{[^}]*cluster_node="([^":]+):\d+"[^}]*\} 1/gm)].map(m => m[1]).sort();
+    check(JSON.stringify(await proxyNodes()) === '["s1r1","s1r2","s1r3"]', `chproxy routes to ${await proxyNodes()}`);
+    /// Decommissioning the new replica takes it out of chproxy before it stops.
+    await tab(cluster, 'nodes');
+    await page.locator('#admin-view tr', {hasText: 's1r3'}).locator('button', {hasText: 'Decommission'}).click();
+    check((await dialog().innerText()).includes('chproxy stops routing queries to the node'), 'the decommission dialog does not mention chproxy');
+    await dialog().getByLabel('Type s1r3 to confirm').fill('s1r3');
+    await review();
+    check((await applyPlan()).includes('Applied.'), 'not submitted');
+    const removal = await latestOp(cluster, 'remove_replica');
+    check(await finished(removal) === 'succeeded', `decommission: ${await opMessage(removal)}`);
+    const steps = await sql(`SELECT groupArray(step) FROM (SELECT step FROM ${DB}.cluster_events WHERE op_id = {id:String} AND kind = 'step' AND state = 'done' ORDER BY at)`, ADMIN_USER, ADMIN_PASSWORD, {id: removal});
+    check(steps.indexOf('routing') >= 0 && steps.indexOf('routing') < steps.indexOf('stop'), `the node was stopped before it left the routing: ${steps}`);
+    check(JSON.stringify(await proxyNodes()) === '["s1r1","s1r2"]', `chproxy still routes to ${await proxyNodes()}`);
 });
 
 await test('Remove a required replica or Keeper member: the unsafe plan is rejected', async () => {

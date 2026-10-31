@@ -466,6 +466,7 @@ One provider is implemented: **docker-compose**, a local lab. All its containers
 | Remove a shard | None | Provider | Only an empty shard | Data migration is not automated |
 | Resize CPU and memory | None | Docker limits | Rolling recreation | Storage cannot be resized: Docker volumes have no size |
 | Restart and upgrade | None | Provider | Rolling, with peer checks; upgrade gates and stop on failure | No downgrade; no automatic rollback |
+| Client routing | None (HTTP clients choose a node) | chproxy image on the host | Optional chproxy container; its node list follows the topology and maintenance | One chproxy container: a single point of failure; HTTP only |
 | Keeper membership | Keeper reconfiguration | Provider | Not implemented: observed only | The ensemble is fixed at provisioning |
 | Backup and verification | `BACKUP`, the `Backup` database engine | An S3 destination of Backup & Restore | One verified backup per shard | Disk destinations are unreachable from lab nodes |
 | Restore into a replacement cluster | `RESTORE` | Provider | Not automated: documented procedure | |
@@ -489,7 +490,7 @@ node utils/web-console/cluster_agent.mjs
 | `CLUSTER_AGENT_STATE_DIR` | Directory of the generated deployments and their secrets (required for docker-compose). |
 | `CLUSTER_AGENT_ENVIRONMENTS` | Environments the agent may change (default `lab,development`). Operations on clusters in other environments are rejected. |
 | `CLUSTER_AGENT_PORT_RANGE` | Host ports for lab endpoints, bound to `127.0.0.1` (default `31000-31999`). |
-| `CLUSTER_AGENT_IMAGES` | Image repositories allowed for lab nodes (default `clickhouse/clickhouse-server`). |
+| `CLUSTER_AGENT_IMAGES` | Image repositories allowed for lab containers (default `clickhouse/clickhouse-server,contentsquareplatform/chproxy`). |
 | `CLUSTER_AGENT_HOST_ALIAS` | Name of the Docker host as seen from the containers, used to reach S3 endpoints published on it (default `host.docker.internal`). |
 | `<REF>_USER`, `<REF>_PASSWORD` | Credentials of a registered deployment whose credential reference is `<REF>`. |
 | `<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY` | Credentials of an S3 backup destination, as for the [backup worker](#backup-worker). |
@@ -514,7 +515,7 @@ The wizard has eight steps:
 
 1. **Purpose and ownership**: name, environment, owner, workload, expected data and growth, concurrency, ingestion, availability goal, and RPO and RTO targets. Sizing from these numbers is an estimate.
 2. **Infrastructure provider**: only implemented providers can be chosen, and only when an agent offers them for the environment.
-3. **Topology**: shards, replicas per shard, Keeper members (1, 3, or 5), and the cluster name. The wizard explains what failures the topology tolerates, separately for replicas and for the Keeper quorum, and that a lab on one host is one failure domain.
+3. **Topology**: shards, replicas per shard, Keeper members (1, 3, or 5), the cluster name, and the [client routing](#cluster-client-routing): none, or chproxy. The wizard explains what failures the topology tolerates, separately for replicas, the Keeper quorum, and the routing, and that a lab on one host is one failure domain.
 4. **Storage and resources**: CPU and memory per node, the image, and the storage model (a local volume per node and per Keeper member).
 5. **Security**: the administrative user. The agent generates its password, the cluster secret, and the interserver credentials on its host; they appear in no plan, URL, log, or console table.
 6. **Operational policies**: backup destination, maintenance window, and an optional notification reference.
@@ -562,6 +563,24 @@ For managed clusters, the agent compares the desired values with what the nodes 
 - **Add shard** creates the nodes of a new shard with the schema of shard 1, empty. Existing rows stay where they are; Distributed tables route new rows by their sharding key over all shards from then on, which changes the shard of a key. The dialog requires an acknowledgement of this.
 - **Remove shard** is accepted only for a shard without rows. Moving data between shards (source and target mappings, a sharding expression, backfill and catch-up, duplicate and missing-row checks, cutover) is not automated.
 
+### Client routing with chproxy {#cluster-client-routing}
+
+A cluster can be created with [chproxy](https://github.com/ContentSquare/chproxy), an HTTP proxy for ClickHouse, in front of its nodes. Choose **Client routing: chproxy** on the topology step, with:
+
+- the image (`contentsquareplatform/chproxy:<version>`, already on the Docker host; the agent does not pull images);
+- the proxy user that clients authenticate with, mapped to the administrative user of the nodes;
+- the limits of that user: concurrent queries and the maximum time of a query.
+
+The agent creates a `chproxy` container with an endpoint on `127.0.0.1` and a generated configuration. The configuration takes both passwords from the environment, so the file contains no secret. The password of the proxy user is `CH_PROXY_PASSWORD` in the secrets file of the deployment on the agent host; give it to applications through your secret management. chproxy checks every node every 5 seconds and sends queries only to healthy nodes.
+
+The cluster is ready only after chproxy finds every node healthy, sends queries to them, and refuses a wrong password. The agent keeps chproxy in step with the cluster, reloading its configuration without restarting it:
+
+- it adds new replicas and shards to the routing once they are ready;
+- before stopping a node (decommissioning, restart, resize, upgrade), it takes the node out of the routing, and puts it back when the node has caught up;
+- it removes decommissioned nodes and removed shards.
+
+**Nodes & Topology** shows the endpoint, the proxy user and its limits, and the routed nodes with their health; the cluster is degraded when chproxy does not answer. chproxy routes HTTP only: clients of the native protocol connect to the nodes directly. chproxy itself is one container: when it stops, its clients lose access while direct connections keep working.
+
 ### Keeper {#cluster-keeper}
 
 Keeper is a separate ensemble, created at provisioning with 1, 3, or 5 members. The Keeper view shows each member's role, version, znode count, and latency, and whether a quorum exists. Changing the ClickHouse replicas never resizes Keeper, and membership changes are not implemented. Operations that remove nodes stop when the quorum is uncertain.
@@ -570,7 +589,7 @@ Keeper keeps its log and snapshots in its own volumes. Table backups contain the
 
 ### Maintenance and upgrades {#cluster-upgrades}
 
-**Restart** restarts nodes one at a time. Before each node, the other replicas of its shard must be caught up; after it, the node must answer and catch up. ClickHouse has no drain command: queries running on a stopping node fail and clients reconnect; inserts queued for distribution are sent after the restart.
+**Restart** restarts nodes one at a time. Before each node, the other replicas of its shard must be caught up; after it, the node must answer and catch up. ClickHouse has no drain command. With chproxy, the agent takes the node out of its routing before stopping it and puts it back once the node has caught up, so clients of chproxy are not sent to it; queries already running on the node fail. Without chproxy, clients connected to the node reconnect. Inserts queued for distribution are sent after the restart.
 
 **Upgrade** changes the image of the nodes:
 
@@ -599,7 +618,7 @@ The console never creates a second authoritative deployment on its own: switchin
 
 ### Decommissioning and retirement {#cluster-retirement}
 
-Decommissioning a node: identify its roles; check the remaining replicas and the Keeper quorum; compare row counts when the node answers; check running queries and queued distributed inserts; stop it (the irreversible boundary); remove it from the cluster definition; remove its replica metadata from Keeper with `SYSTEM DROP REPLICA` (justified because the agent stopped and removed the node); check the remaining cluster; remove the container; keep or delete its volume as chosen.
+Decommissioning a node: identify its roles; check the remaining replicas and the Keeper quorum; compare row counts when the node answers; check running queries and queued distributed inserts; take it out of the routing of chproxy, if the cluster has one; stop it (the irreversible boundary); remove it from the cluster definition; remove its replica metadata from Keeper with `SYSTEM DROP REPLICA` (justified because the agent stopped and removed the node); check the remaining cluster; remove the container; keep or delete its volume as chosen.
 
 Retirement is separate from deletion:
 
@@ -669,6 +688,6 @@ ClickStack is a separate application with its own connection settings, entered i
 - The server does not check `remote_url_allow_hosts` for the endpoint of `BACKUP TO S3`; the console restricts endpoints with `backup_s3_endpoints` (see [Backup destinations](#backup-destinations)).
 - Restore tests run on the server the console is connected to, which shares resources with the production workload.
 - Schedules, retention, and deletions need the [backup worker](#backup-worker). Without it, the page shows that no worker is running, and requested deletions stay `queued`.
-- Cluster Management implements one provider, a Docker Compose lab on one host: its nodes are one failure domain, without TLS, load balancing, storage resizing, or Keeper membership changes (see [Supported capabilities](#cluster-capability-matrix)).
+- Cluster Management implements one provider, a Docker Compose lab on one host: its nodes are one failure domain, without TLS, storage resizing, or Keeper membership changes, and its optional chproxy is a single container (see [Supported capabilities](#cluster-capability-matrix)).
 - Lifecycle operations need the [cluster agent](#cluster-setup). Without it, operations stay queued and observations become stale.
 - Restoring a backup into a replacement cluster, moving data between shards, and switching traffic to a recovery site are not automated.
