@@ -623,7 +623,7 @@ Retirement is separate from deletion:
 1. **Dependency review**: applications and connections, ingestion pipelines, scheduled jobs, users and integrations, dashboards, backup schedules, and other dependencies each need a recorded disposition. Unknown is not accepted.
 2. **Protection**: a verified final backup, or a recorded reason why none is needed (refused when the cluster holds data); the retention deadline of the retained resources; legal or operational holds.
 3. **Execution**: the agent checks the dependencies, that no other operation is in progress, and the protection gate; then stops the containers, records every resource with its disposition and deadline, and sets the mode to Retired.
-4. **Deletion**, a separate operation that needs the capability `destroy`: only the resources selected, only when Docker labels them as the cluster's, and not before their retention deadline. The result lists every resource as retained, stopped, or deleted, with its owner and evidence.
+4. **Deletion**, a separate operation that needs the capability `destroy`: only the resources selected (**Select all** selects every remaining resource), only when Docker labels them as the cluster's, and not before their retention deadline. The result lists every resource as retained, stopped, or deleted, with its owner and evidence.
 
 Backups made through Backup & Restore, the configuration history, the operations, and the audit records remain after retirement and deletion. A registered deployment is only retired from the inventory.
 

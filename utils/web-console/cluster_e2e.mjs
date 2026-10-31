@@ -464,11 +464,14 @@ await test('Retire a cluster, then delete only the approved resources: records r
     /// Cleanup: the volumes of the test cluster.
     await tab(cluster, 'retirement');
     await clickButton('Delete resources');
-    for (const label of await dialog().locator('label', {hasText: /^(volume|directory) /}).all()) await label.locator('input').check();
+    await dialog().locator('label', {hasText: /^Select all /}).locator('input').check();
+    const boxes = dialog().locator('label', {hasText: /^(volume|directory) /}).locator('input');
+    check(await boxes.count() > 0 && (await boxes.evaluateAll(inputs => inputs.every(i => i.checked))), 'Select all left resources unselected');
     await dialog().getByLabel(`Type ${NAME} to confirm`).fill(NAME);
     await review();
     await applyPlan();
     check(await finished(await latestOp(cluster, 'destroy')) === 'succeeded', 'cleanup failed');
+    check(volumes().length === 0, `volumes remain after Select all: ${volumes().join(', ')}`);
 });
 
 await test('No script errors in the pages', async () => {

@@ -340,6 +340,7 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 .field textarea { min-height: 4.5rem; resize: vertical; }
 .field input[type="checkbox"], .check input { min-height: 0; width: 1rem; height: 1rem; margin: 0.15rem 0 0; accent-color: var(--accent-border); }
 .check { display: flex; gap: 0.5rem; align-items: flex-start; font-size: 0.92rem; }
+.check.select-all { font-weight: 600; padding-bottom: 0.4rem; margin-bottom: 0.2rem; border-bottom: 1px solid var(--border); }
 .form-grid { display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
 .box
 {
@@ -8722,8 +8723,16 @@ function retireWizard(state, cluster) {
 
 function destroyDialog(cluster, resources) {
     const boxes = resources.map(r => ({r, box: checkbox(`${r.kind} ${r.name} (${r.disposition}${r.retention_until ? `, keep until ${r.retention_until}` : ''})`, false)}));
+    const all = checkbox(`Select all (${resources.length} resources)`, false);
+    all.element.classList.add('select-all');
+    all.input.addEventListener('change', () => { for (const b of boxes) b.box.input.checked = all.input.checked; });
+    for (const b of boxes) b.box.input.addEventListener('change', () => {
+        const checked = boxes.filter(x => x.box.input.checked).length;
+        all.input.checked = checked === boxes.length;
+        all.input.indeterminate = checked > 0 && checked < boxes.length;
+    });
     const confirm = h('input', {type: 'text', autocomplete: 'off'});
-    formDialog(`Delete resources of ${cluster.name}`, [h('fieldset', {className: 'box'}, h('legend', {}, 'Resources'), boxes.map(b => b.box.element)),
+    formDialog(`Delete resources of ${cluster.name}`, [h('fieldset', {className: 'box'}, h('legend', {}, 'Resources'), all.element, boxes.map(b => b.box.element)),
         adminField(`Type ${cluster.name} to confirm`, confirm)], 'Review', () => {
         const chosen = boxes.filter(b => b.box.input.checked).map(b => b.r);
         if (!chosen.length) return 'Choose the resources to delete.';
