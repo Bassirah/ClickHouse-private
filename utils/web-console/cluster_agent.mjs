@@ -20,7 +20,8 @@
 ///   CLUSTER_AGENT_STATE_DIR      directory of the generated deployments (required for docker-compose)
 ///   CLUSTER_AGENT_ENVIRONMENTS   environments this agent may change, comma-separated (default lab,development)
 ///   CLUSTER_AGENT_PORT_RANGE     host ports for lab endpoints, bound to 127.0.0.1 (default 31000-31999)
-///   CLUSTER_AGENT_IMAGES         image repositories allowed for lab nodes (default clickhouse/clickhouse-server)
+///   CLUSTER_AGENT_IMAGES         image repositories allowed for lab containers (default clickhouse/clickhouse-server,
+///                                contentsquareplatform/chproxy)
 ///   CLUSTER_AGENT_HOST_ALIAS     name of the host as seen from lab containers (default host.docker.internal)
 ///   <REF>_USER, <REF>_PASSWORD   credentials of a registered cluster whose credential reference is <REF>
 ///   <REF>_ACCESS_KEY_ID, <REF>_SECRET_ACCESS_KEY   credentials of an S3 backup destination
@@ -43,7 +44,7 @@ const OBSERVE_INTERVAL = Number(process.env.OBSERVE_SECONDS || 30) * 1000;
 const STATE_DIR = process.env.CLUSTER_AGENT_STATE_DIR || '';
 const ENVIRONMENTS = (process.env.CLUSTER_AGENT_ENVIRONMENTS || 'lab,development').split(',').map(s => s.trim()).filter(Boolean);
 const [PORT_MIN, PORT_MAX] = (process.env.CLUSTER_AGENT_PORT_RANGE || '31000-31999').split('-').map(Number);
-const IMAGES = (process.env.CLUSTER_AGENT_IMAGES || 'clickhouse/clickhouse-server').split(',').map(s => s.trim()).filter(Boolean);
+const IMAGES = (process.env.CLUSTER_AGENT_IMAGES || 'clickhouse/clickhouse-server,contentsquareplatform/chproxy').split(',').map(s => s.trim()).filter(Boolean);
 const HOST_ALIAS = process.env.CLUSTER_AGENT_HOST_ALIAS || 'host.docker.internal';
 const ONCE = process.argv.includes('--once');
 const LABEL_CLUSTER = 'io.clickhouse.console.cluster';
@@ -240,10 +241,18 @@ const docker = {
             /// Only provisioning creates them: observing a deployment that was never generated must not create anything.
             if (!create) throw new QueryError(`The deployment of ${cluster.name} has not been generated on this agent host.`, -1);
             fs.mkdirSync(docker.dir(cluster), {recursive: true, mode: 0o700});
-            const gen = () => crypto.randomBytes(18).toString('base64url');
-            fs.writeFileSync(file, `CH_ADMIN_PASSWORD=${gen()}\nCH_CLUSTER_SECRET=${gen()}\nCH_INTERSERVER_PASSWORD=${gen()}\n`, {mode: 0o600});
+            fs.writeFileSync(file, '', {mode: 0o600});
         }
-        return Object.fromEntries(fs.readFileSync(file, 'utf8').trim().split('\n').map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+        const read = () => Object.fromEntries(fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean)
+            .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+        const secrets = read();
+        /// CH_PROXY_PASSWORD is the password of the clients of chproxy; deployments made before it get it when rendered.
+        const missing = ['CH_ADMIN_PASSWORD', 'CH_CLUSTER_SECRET', 'CH_INTERSERVER_PASSWORD', 'CH_PROXY_PASSWORD'].filter(k => !secrets[k]);
+        if (missing.length && create) {
+            fs.appendFileSync(file, missing.map(k => `${k}=${crypto.randomBytes(18).toString('base64url')}\n`).join(''));
+            return read();
+        }
+        return secrets;
     },
 
     nodes: spec => spec.shards.flatMap(shard => shard.replicas.filter(r => r.state !== 'removed').map(r => ({...r, shard: shard.index}))),
@@ -263,7 +272,9 @@ const docker = {
             /// Only deployments of this provider have host ports; registered ones have a discovered description.
             if (other.provider !== 'docker-compose' || !other.spec || !other.spec.shards || other.cluster_id === cluster.cluster_id) continue;
             for (const n of [...docker.nodes(other.spec), ...other.spec.keeper.members]) for (const p of [n.http_port, n.native_port, n.client_port]) if (p) used.add(p);
+            if (docker.chproxy(other.spec) && other.spec.routing.port) used.add(other.spec.routing.port);
         }
+        if (docker.chproxy(spec) && spec.routing.port) used.add(spec.routing.port);
         for (const n of [...docker.nodes(spec), ...spec.keeper.members]) for (const p of [n.http_port, n.native_port, n.client_port]) if (p) used.add(p);
         const free = async port => !used.has(port) && await new Promise(resolve => {
             const server = net.createServer().once('error', () => resolve(false)).once('listening', () => server.close(() => resolve(true)));
@@ -288,12 +299,14 @@ const docker = {
             }
         }
         for (const k of spec.keeper.members) if (!k.client_port) { k.client_port = await take(); changed = true; }
+        if (docker.chproxy(spec) && !spec.routing.port) { spec.routing.port = await take(); changed = true; }
         return changed;
     },
 
     /// Writes the compose file and the configuration of every node. Deterministic: the same specification
     /// gives the same files, so writing them again is harmless. Returns the hashes of the managed files.
-    render(cluster, spec) {
+    /// `exclude`: nodes left out of the routing of chproxy (while they are restarted or removed).
+    render(cluster, spec, {exclude = []} = {}) {
         const dir = docker.dir(cluster);
         fs.mkdirSync(dir, {recursive: true, mode: 0o700});
         docker.secrets(cluster);
@@ -382,6 +395,42 @@ ${keeper.map(m => `            <server><id>${m.server_id}</id><hostname>${m.name
     labels: ${labels}
     restart: unless-stopped${limits}`),
         ];
+        if (docker.chproxy(spec)) {
+            const r = spec.routing;
+            const routed = nodes.filter(n => !exclude.includes(n.name));
+            /// Passwords come from the environment (chproxy expands ${VAR}): the file holds no secret.
+            write('chproxy/config.yml', `# Generated by the cluster agent of the ClickHouse web console. Do not edit.
+server:
+  http:
+    listen_addr: ":9090"
+    allowed_networks: ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+users:
+  - name: "${r.user}"
+    password: "\${CH_PROXY_PASSWORD}"
+    to_cluster: "${spec.cluster_name}"
+    to_user: "${spec.security.admin_user}"
+    max_concurrent_queries: ${Number(r.max_concurrent_queries)}
+    max_execution_time: ${Number(r.max_execution_time_s)}s
+clusters:
+  - name: "${spec.cluster_name}"
+    nodes: [${routed.map(n => `"${n.name}:8123"`).join(', ')}]
+    heartbeat:
+      interval: 5s
+      timeout: 3s
+    users:
+      - name: "${spec.security.admin_user}"
+        password: "\${CH_ADMIN_PASSWORD}"
+`);
+            services.push(`  chproxy:
+    image: ${r.image}
+    hostname: chproxy
+    command: ["-config", "/etc/chproxy/config.yml"]
+    env_file: secrets.env
+    volumes: ["./chproxy/config.yml:/etc/chproxy/config.yml:ro"]
+    ports: ["127.0.0.1:${r.port}:9090"]
+    labels: ${labels}
+    restart: unless-stopped`);
+        }
         const volumes = [...keeper.map(k => k.name), ...nodes.map(n => n.name)].map(name => `  ${name}-data: {labels: ${labels}}`);
         write('compose.yaml', `# Generated by the cluster agent of the ClickHouse web console for cluster ${cluster.cluster_id}. Do not edit:\n# the agent writes it again from the desired configuration and reports changes made here as drift.\nname: ${docker.project(cluster)}\nservices:\n${services.join('\n')}\nvolumes:\n${volumes.join('\n')}\nnetworks:\n  default:\n    labels: ${labels}\n`);
         fs.writeFileSync(path.join(dir, '.console-hashes.json'), JSON.stringify(files, null, 1));
@@ -440,6 +489,39 @@ ${keeper.map(m => `            <server><id>${m.server_id}</id><hostname>${m.name
         if (!owned.some(r => r.kind === 'container' && r.name === container)) return {container, note: 'no such container of this cluster'};
         await run('docker', action === 'remove' ? ['rm', '-f', container] : ['stop', container], {timeout: 300000});
         return {container, [action === 'remove' ? 'removed' : 'stopped']: true};
+    },
+
+    chproxy: spec => !!(spec && spec.routing && spec.routing.kind === 'chproxy'),
+
+    /// Writes the routing of chproxy without the excluded nodes and makes it reload its configuration (SIGHUP).
+    async route(cluster, exclude = []) {
+        if (!docker.chproxy(cluster.spec)) return null;
+        docker.render(cluster, cluster.spec, {exclude});
+        await docker.compose(cluster, ['kill', '-s', 'SIGHUP', 'chproxy'], {timeout: 60000});
+        const routed = docker.nodes(cluster.spec).map(n => n.name).filter(n => !exclude.includes(n));
+        /// The reload is effective when chproxy reports exactly the routed nodes.
+        await waitFor('chproxy to route to the expected nodes', async () => {
+            const health = await docker.routingHealth(cluster);
+            const seen = Object.keys(health.nodes).sort();
+            return JSON.stringify(seen) === JSON.stringify([...routed].sort());
+        }, 60000);
+        return {routed, excluded: exclude};
+    },
+
+    /// The backend nodes of chproxy and whether its heartbeat finds them healthy, from its /metrics.
+    async routingHealth(cluster) {
+        const response = await fetch(`http://127.0.0.1:${cluster.spec.routing.port}/metrics`, {signal: AbortSignal.timeout(5000)})
+            .catch(e => { throw new QueryError(`chproxy is unreachable: ${e.cause ? e.cause.code || e.cause.message : e.message}`, -1); });
+        const text = await response.text();
+        const nodes = {};
+        for (const m of text.matchAll(/^host_health\{[^}]*cluster_node="([^":]+):\d+"[^}]*\} (\d+)/gm)) nodes[m[1]] = Number(m[2]);
+        return {nodes};
+    },
+
+    /// A query through chproxy, as a client of the proxy.
+    async proxyQuery(cluster, sql) {
+        const secrets = docker.secrets(cluster, {create: false});
+        return httpQuery(`http://127.0.0.1:${cluster.spec.routing.port}`, cluster.spec.routing.user, secrets.CH_PROXY_PASSWORD, sql, {timeout: 10000});
     },
 
     async recordOwned(cluster, op, disposition = 'present') {
@@ -549,6 +631,18 @@ async function observe(state, cluster) {
             }
         }
     }
+    if (cluster.provider === 'docker-compose' && docker.chproxy(cluster.spec) && cluster.spec.routing.port) {
+        try {
+            const health = await docker.routingHealth(cluster);
+            rows.push({cluster_id: cluster.cluster_id, node_id: 'chproxy', role: 'proxy', status: 'ok', data: JSON.stringify({name: 'chproxy',
+                endpoint: `http://127.0.0.1:${cluster.spec.routing.port}`, nodes: health.nodes,
+                healthy: Object.values(health.nodes).filter(v => v === 1).length, routed: Object.keys(health.nodes).length})});
+        } catch (e) {
+            const container = containers && !containers.error ? containers.chproxy : null;
+            rows.push({cluster_id: cluster.cluster_id, node_id: 'chproxy', role: 'proxy', status: containers && !containers.error && (!container || container.state !== 'running') ? 'failed' : 'unreachable',
+                data: JSON.stringify({name: 'chproxy', error: e.message, container: container ? `${container.state}: ${container.status}` : 'no container'})});
+        }
+    }
     await query(`INSERT INTO ${q(DB)}.cluster_observations (cluster_id, node_id, role, status, data) FORMAT JSONEachRow\n${rows.map(r => JSON.stringify(r)).join('\n')}`, {raw: true});
 
     /// The health of the deployment from all its members, never from one node.
@@ -557,14 +651,14 @@ async function observe(state, cluster) {
     const readonly = ch.some(r => Number(parseJSON(r.data, {}).readonly_replicas || 0) > 0);
     let health;
     if (ch.length && ch.every(r => r.status !== 'ok')) health = 'unreachable';
-    else if (ch.every(r => r.status === 'ok') && keepers.every(r => r.status === 'ok') && !readonly) health = 'ready';
+    else if (ch.every(r => r.status === 'ok') && keepers.every(r => r.status === 'ok') && rows.filter(r => r.role === 'proxy').every(r => r.status === 'ok') && !readonly) health = 'ready';
     else health = 'degraded';
     /// Maintenance ends by observation once no operation of the cluster is in progress (for example after a failed one).
     const busy = state.ops.some(o => o.cluster_id === cluster.cluster_id && !TERMINAL.includes(o.state));
     const observable = ['ready', 'degraded', 'unreachable'].includes(cluster.lifecycle) || (cluster.lifecycle === 'maintenance' && !busy);
     if (observable && health !== cluster.lifecycle) {
         await recordEvent('', cluster.cluster_id, 'lifecycle', {state: health, message: `observed: ${ch.filter(r => r.status === 'ok').length}/${ch.length} ClickHouse nodes, `
-            + `${keepers.filter(r => r.status === 'ok').length}/${keepers.length} Keeper members answer${readonly ? '; read-only replicas' : ''}`});
+            + `${keepers.filter(r => r.status === 'ok').length}/${keepers.length} Keeper members answer${rows.some(r => r.role === 'proxy' && r.status !== 'ok') ? '; chproxy does not answer' : ''}${readonly ? '; read-only replicas' : ''}`});
         cluster.lifecycle = health;
     }
     if (cluster.provider === 'docker-compose' && cluster.mode === 'manage') await detectDrift(cluster, nodes);
@@ -737,6 +831,23 @@ async function verifyTopology(cluster) {
     return {hosts: expected};
 }
 
+/// chproxy answers as the proxy user, refuses a wrong password, finds every node healthy, and sends queries to them.
+async function verifyRouting(cluster) {
+    const nodes = docker.nodes(cluster.spec).map(n => n.name).sort();
+    const health = await waitFor('chproxy to find every node healthy', async () => {
+        const h = await docker.routingHealth(cluster);
+        return nodes.every(n => h.nodes[n] === 1) ? h : null;
+    }, 90000);
+    const seen = new Set();
+    for (let i = 0; i < nodes.length * 4; i++) seen.add((await docker.proxyQuery(cluster, 'SELECT hostName() AS host'))[0].host);
+    const unknown = [...seen].filter(host => !nodes.includes(host));
+    if (unknown.length) throw new Error(`chproxy sent queries to hosts that are not nodes of the cluster: ${unknown.join(', ')}.`);
+    const refused = await httpQuery(`http://127.0.0.1:${cluster.spec.routing.port}`, cluster.spec.routing.user, 'not-the-password', 'SELECT 1', {timeout: 10000})
+        .then(() => false, e => e.code !== -1);
+    if (!refused) throw new Error('chproxy accepted a wrong password.');
+    return {endpoint: `http://127.0.0.1:${cluster.spec.routing.port}`, healthy: Object.keys(health.nodes).length, answered_by: [...seen].sort()};
+}
+
 async function lifecycle(cluster, value, message) {
     await recordEvent('', cluster.cluster_id, 'lifecycle', {state: value, message});
     cluster.lifecycle = value;
@@ -757,10 +868,13 @@ async function rolling(ctx, nodes, action, label) {
                 const state = await replicationCaughtUp(peer).catch(e => ({ok: false, error: e.message}));
                 if (!state.ok) throw new Blocked(`${p.name}, another replica of shard ${n.shard}, is not caught up (${state.error || `queue ${state.queue}, delay ${state.delay} s`}): continuing would leave the shard without a healthy replica.`);
             }
+            /// With chproxy, clients are routed away from the node before it stops, and back once it has caught up.
+            await docker.route(cluster, [n.name]);
             const result = await action(n);
             await waitNodeReady(cluster, n);
             const node_query = await docker.connect(cluster, n);
             await waitFor(`${n.name} to catch up with replication`, async () => (await replicationCaughtUp(node_query)).ok, 300000);
+            await docker.route(cluster, []);
             done.push(n.name);
             return {node: n.name, ...(result || {}), single_replica: peers.length === 0};
         });
@@ -828,7 +942,7 @@ const HANDLERS = {
         if (previous) throw new Rejected(`The cluster was already provisioned by operation ${previous.op_id}: a second provisioning is not run.`);
         await ctx.step('preflight', 'Check the provider: Docker, the image, ports, and resources', async () => {
             const version = (await run('docker', ['version', '--format', '{{.Server.Version}} {{.Server.Arch}}'], {timeout: 30000})).trim();
-            const images = [cluster.spec.image, cluster.spec.keeper.image || cluster.spec.image];
+            const images = [cluster.spec.image, cluster.spec.keeper.image || cluster.spec.image, ...(docker.chproxy(cluster.spec) ? [cluster.spec.routing.image] : [])];
             for (const image of new Set(images)) {
                 if (!IMAGES.some(prefix => image.startsWith(`${prefix}:`))) throw new Rejected(`The image ${image} is not allowed on this agent (CLUSTER_AGENT_IMAGES: ${IMAGES.join(', ')}).`);
                 await run('docker', ['image', 'inspect', image, '--format', '{{.Id}}'], {timeout: 30000}).catch(() => {
@@ -865,6 +979,7 @@ const HANDLERS = {
         });
         await ctx.step('topology', 'Check authentication, Keeper sessions, and the cluster definition on every node', async () => verifyTopology(cluster));
         await ctx.step('replication', 'Write, replicate, and read test data in an isolated database', async () => replicationTest(cluster, ctx.op.op_id));
+        if (docker.chproxy(cluster.spec)) await ctx.step('routing', 'Check client routing through chproxy', async () => verifyRouting(cluster));
         await lifecycle(cluster, 'ready', `validated by operation ${ctx.op.op_id}`);
     },
 
@@ -994,6 +1109,7 @@ const HANDLERS = {
             return {nodes: result, schema_notes: schema.notes};
         });
         await ctx.step('topology', 'Check the cluster definition on every node', async () => verifyTopology(cluster));
+        if (docker.chproxy(cluster.spec)) await ctx.step('routing', 'Route clients to the new replicas through chproxy', async () => ({...(await docker.route(cluster, [])), ...(await verifyRouting(cluster))}));
         await lifecycle(cluster, 'ready', `replicas ${new_nodes.map(n => n.name).join(', ')} added by ${op.op_id}`);
     },
 
@@ -1026,6 +1142,7 @@ const HANDLERS = {
         });
         await ctx.step('topology', 'Check the cluster definition on every node', async () => verifyTopology(cluster));
         await ctx.step('replication', 'Write, replicate, and read test data on every shard', async () => replicationTest(cluster, op.op_id));
+        if (docker.chproxy(cluster.spec)) await ctx.step('routing', 'Route clients to the new shard through chproxy', async () => ({...(await docker.route(cluster, [])), ...(await verifyRouting(cluster))}));
         await lifecycle(cluster, 'ready', `shard added by ${op.op_id}`);
     },
 
@@ -1071,8 +1188,11 @@ const HANDLERS = {
                 return {note: `${name} does not answer: it runs no queries, and inserts queued on it cannot be checked`};
             }
             if (Number(w.distribution_files) > 0) throw new Blocked(`${name} has ${w.distribution_files} queued distributed inserts that would be lost: flush them (SYSTEM FLUSH DISTRIBUTED) first.`);
-            return {running_queries: Number(w.queries), routing: 'This lab has no load balancer: clients that connect to this node directly must be moved by their owners.'};
+            return {running_queries: Number(w.queries)};
         });
+        await ctx.step('routing', 'Route clients away from the node', async () => (docker.chproxy(cluster.spec)
+            ? {...(await docker.route(cluster, [name])), note: 'chproxy no longer sends queries to the node. Clients that connect to the node directly must be moved by their owners.'}
+            : {note: 'No chproxy: clients that connect to this node directly must be moved by their owners.'}));
         ctx.irreversible();
         await ctx.step('stop', 'Stop the node', async () => docker.container(cluster, name, 'stop'));
         await ctx.step('configure', 'Remove the node from the cluster definition of the other nodes', async () => {
@@ -1081,6 +1201,7 @@ const HANDLERS = {
             await newRevision(ctx, spec, `${name} removed by ${op.op_id}`);
             docker.render(cluster, spec);
             for (const p of docker.nodes(spec)) await (await docker.connect(cluster, p))('SYSTEM RELOAD CONFIG', {raw: true});
+            if (docker.chproxy(spec)) await docker.route(cluster, []);
             return {revision: cluster.revision};
         });
         await ctx.step('metadata', 'Remove the replica metadata of the stopped node from Keeper', async () => {
@@ -1132,12 +1253,14 @@ const HANDLERS = {
         });
         ctx.irreversible();
         await ctx.step('remove', 'Stop the nodes and remove the shard from the cluster definition', async () => {
+            await docker.route(cluster, replicas.map(r => r.name));
             for (const r of replicas) await docker.container(cluster, r.name, 'stop');
             const spec = JSON.parse(JSON.stringify(cluster.spec));
             for (const r of spec.shards.find(sh => sh.index === index).replicas) r.state = 'removed';
             await newRevision(ctx, spec, `shard ${index} removed by ${op.op_id}`);
             docker.render(cluster, spec);
             for (const p of docker.nodes(spec)) await (await docker.connect(cluster, p))('SYSTEM RELOAD CONFIG', {raw: true});
+            if (docker.chproxy(spec)) await docker.route(cluster, []);
             for (const r of replicas) await docker.container(cluster, r.name, 'remove');
             for (const r of replicas) {
                 await recordResource(cluster.cluster_id, {resource_id: `volume:${docker.project(cluster)}_${r.name}-data`, kind: 'volume', name: `${docker.project(cluster)}_${r.name}-data`,

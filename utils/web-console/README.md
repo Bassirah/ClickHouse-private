@@ -178,8 +178,8 @@ node backup_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass \
 ```
 
 Cluster Management has its own checks. They need the cluster agent running against the same server with the
-docker-compose provider for the environment `lab`, the image `clickhouse/clickhouse-server:26.9.8.3` on the Docker
-host, and a credential reference `PLATFORM` (the agent's `PLATFORM_USER` and `PLATFORM_PASSWORD`) for the
+docker-compose provider for the environment `lab`, the images `clickhouse/clickhouse-server:26.9.8.3` and
+`contentsquareplatform/chproxy:v1.30.0` (the clusters of the checks use chproxy) on the Docker host, and a credential reference `PLATFORM` (the agent's `PLATFORM_USER` and `PLATFORM_PASSWORD`) for the
 registration check. They create lab clusters named `e2e-*`, retire them, and delete their resources:
 
 ```bash
