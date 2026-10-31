@@ -13,6 +13,71 @@
 
 </div>
 
+## About this repository
+
+This is a private fork of ClickHouse 26.9 (upstream commit `b7bbb4e80c8`) that adds a **unified web console**, served by the ClickHouse server itself at `/console`. Everything below this section is the upstream README.
+
+The console has no separate backend: every action is a SQL statement run with the credentials of the signed-in user, so ClickHouse authorizes it, and every change is reviewed before it runs and recorded in an audit log. Two optional processes do what a browser cannot: the backup worker and the cluster agent.
+
+### Features
+
+| Feature | What it adds |
+|---|---|
+| Unified web console | One sign-in, a home page, and a sidebar for the built-in web UIs: SQL Console, Dashboard, ClickStack, Web Terminal, the Binary, Merges, Schema, Jemalloc, and Processors profile visualizers, and the reference documentation. Light and dark themes. |
+| Focus mode | An open component gets the whole window; one arrow brings the console navigation back. |
+| Unified design | The Dashboard and the diagnostic pages share the design of the SQL Console; the Administration pages follow the design of ClickStack. |
+| Users and access management | Users, Roles & Permissions (with role templates), Profiles & Quotas, and Audit Activity, on the native ClickHouse access model, including delegation and `ON CLUSTER` changes. |
+| Component Access | A policy of which components, Resources links, and Administration pages each user or role can open, compared with the native privileges that govern them. |
+| Backup & Restore | Approved destinations (disks and S3, including external S3 servers allowed in the console), a backup wizard, durable operations, restores into new databases, restore tests, schedules with retention, and recovery verification. |
+| Cluster Management | The lifecycle of ClickHouse deployments: create (with an optional chproxy load balancer), register, monitor, configure, scale, upgrade, back up, decommission, and retire. One provider is implemented: a Docker Compose lab. |
+
+### Where to find it
+
+Each feature was developed on its own branch, each based on the previous one. The newest branch contains all of them:
+
+| Branch | Adds |
+|---|---|
+| `private/unified-web-console` | The unified web console |
+| `private/console-access-management` | Users and access management |
+| `private/console-focus-mode` | Focus mode |
+| `private/console-ui-unification` | Unified design of the built-in web UIs |
+| `private/console-backup-restore` | Backup & Restore |
+| `private/console-admin-clickstack-ui` | Administration pages in the ClickStack design |
+| `private/console-s3-external-endpoint` | External S3 endpoints for backups |
+| `private/console-cluster-management` | Cluster Management |
+| `private/console-admin-access` | Administration pages in Component Access |
+| `private/console-backup-ddl-check` | Fix of the backup wizard's schema-change check |
+| `private/console-cluster-wizard-layout` | Fix of the cluster wizard's layout |
+| `private/console-cluster-chproxy` | chproxy as an option of cluster creation |
+
+`private/main` is the unchanged upstream base.
+
+### Quick start
+
+Build the server as usual. The console is embedded in the binary, so changes to its pages need a rebuild:
+
+```bash
+mkdir build && cd build && cmake .. && ninja clickhouse
+./programs/clickhouse server
+```
+
+Then open `http://localhost:8123/console` and sign in as a ClickHouse user. The **Set up** buttons of Component Access, Backup & Restore, and Clusters create the console tables in the `console_admin` database.
+
+For schedules, retention, and backup deletions, run the backup worker; for Cluster Management, run the cluster agent on the Docker host. Both need Node.js 18 or later and no packages:
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=<service account> CLICKHOUSE_PASSWORD=<password> \
+    node utils/web-console/backup_worker.mjs
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=<service account> CLICKHOUSE_PASSWORD=<password> \
+    CLUSTER_AGENT_STATE_DIR=/var/lib/clickhouse-console/clusters node utils/web-console/cluster_agent.mjs
+```
+
+### Documentation and tests
+
+* [`docs/concepts/features/interfaces/web-console.mdx`](docs/concepts/features/interfaces/web-console.mdx): the user and administrator documentation: configuration (the `web_console` section), security model, every page, the backup worker, the cluster agent, runbooks, and limitations.
+* [`utils/web-console/README.md`](utils/web-console/README.md): building, running a development instance, testing, and packaging.
+* Tests: functional tests `05293_web_console`, `05294_web_console_access_management`, and `05295_web_console_backup`; the integration test `test_web_console`; and browser acceptance checks in `utils/web-console/` (`console_e2e.mjs`, `access_e2e.mjs`, `backup_e2e.mjs`, `cluster_e2e.mjs`).
+
 ## How To Install (Linux, macOS, FreeBSD)
 
 ```
