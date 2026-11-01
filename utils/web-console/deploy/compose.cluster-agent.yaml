@@ -1,0 +1,34 @@
+# The cluster agent of the web console, added to compose.yaml when this host creates and operates clusters:
+#
+#   docker compose -f compose.yaml -f compose.cluster-agent.yaml up -d
+#
+services:
+  # The cluster agent creates and operates clusters. With the docker-compose provider it starts containers on this
+  # host through the Docker socket, and reaches their endpoints on 127.0.0.1, so it uses the host network; its state
+  # directory is mounted at the same path as on the host, because the Docker daemon resolves the paths of the
+  # deployments it generates. Access to the Docker socket is equivalent to root on the host.
+  cluster-agent:
+    image: clickhouse-console-tools:${CONSOLE_VERSION:?set CONSOLE_VERSION in .env}
+    restart: unless-stopped
+    command: ["cluster-agent"]
+    network_mode: host
+    # The state directory must be writable by this user; the agent keeps its key pair `agent-key.pem` there.
+    user: "${CLUSTER_AGENT_UID:-1000}"
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID in .env: the group ID of /var/run/docker.sock}"
+    environment:
+      CLICKHOUSE_URL: http://127.0.0.1:${CONSOLE_HTTP_PORT:-8123}
+      CLICKHOUSE_USER: cluster_agent
+      CLICKHOUSE_PASSWORD: ${CLUSTER_AGENT_PASSWORD:?set CLUSTER_AGENT_PASSWORD in .env}
+      CLUSTER_AGENT_STATE_DIR: ${CLUSTER_AGENT_STATE_DIR:?set CLUSTER_AGENT_STATE_DIR in .env}
+      CLUSTER_AGENT_ENVIRONMENTS: ${CLUSTER_AGENT_ENVIRONMENTS:-lab,development}
+      CLUSTER_AGENT_KUBECONFIG: ${CLUSTER_AGENT_KUBECONFIG:+/etc/clickhouse-console/kubeconfig}
+      CLUSTER_AGENT_K8S_NAMESPACES: ${CLUSTER_AGENT_K8S_NAMESPACES:-chc-*}
+    env_file:
+      - path: backup-destinations.env
+        required: false
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CLUSTER_AGENT_STATE_DIR}:${CLUSTER_AGENT_STATE_DIR}
+      - ${CLUSTER_AGENT_KUBECONFIG:-/dev/null}:/etc/clickhouse-console/kubeconfig:ro
+
