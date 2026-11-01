@@ -21,13 +21,16 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/access_e2e.mjs` | Browser acceptance checks of the Administration pages (Playwright; not part of the build). |
 | `utils/web-console/backup_worker.mjs` | Backup worker: schedules, reconciliation, retention, deletions (Node.js 18, no packages). |
 | `utils/web-console/backup_e2e.mjs` | Browser acceptance checks of Backup & Restore, including a server restart and an unavailable destination (Playwright; not part of the build). |
-| `utils/web-console/cluster_agent.mjs` | Cluster agent: executes cluster lifecycle operations through the docker-compose provider, and observes clusters (Node.js 18, no packages). |
+| `utils/web-console/cluster_agent.mjs` | Cluster agent: executes cluster lifecycle operations through the docker-compose and kubernetes providers, and observes clusters (Node.js 18, no packages). |
 | `utils/web-console/access_policy_worker.mjs` | Access policy worker: imports user attributes from a feed, and reconciles the native grants, role memberships, and row policies of the policy rules, acting as each rule's author (Node.js 18, no packages). |
 | `utils/web-console/data_access_e2e.mjs` | Browser acceptance checks of Data Access Policies with synthetic users and data, over HTTP and the native protocol, including the access policy worker (Playwright; not part of the build). |
 | `utils/web-console/cluster_k8s_e2e.mjs` | Browser acceptance checks of the Kubernetes provider of Cluster Management: the wizard's choices, provisioning, configuration and drift, storage expansion, replicas, backup, retirement, and deletion (Playwright; not part of the build). |
 | `utils/web-console/k8s_lab.sh` | Creates and deletes the Kubernetes lab: a k3d cluster with cert-manager, the ClickHouse operator, and an expandable storage class. |
 | `utils/web-console/cluster_e2e.mjs` | Browser acceptance checks of Cluster Management against a running agent: provisioning, registration, drift, scaling, failures, and retirement (Playwright; not part of the build). |
-| `utils/web-console/Dockerfile` | Image with a locally built binary on top of the official image. |
+| `utils/web-console/Dockerfile` | Server image: a locally built binary on top of the official image. |
+| `utils/web-console/Dockerfile.tools`, `tools-entrypoint.sh` | Tools image: the backup worker, the cluster agent (with `docker`, Compose, and `kubectl`), and the access policy worker. |
+| `utils/web-console/package_images.sh` | Builds, smoke-tests, and packages both images as archives for distribution. |
+| `utils/web-console/deploy/` | Deployment examples shipped with the archives: Docker Compose, Kubernetes, the service accounts, and their guide. |
 
 All HTML pages are embedded into the binary with `#embed`: **any change to an `.html` file needs a
 rebuild of the `clickhouse` binary**, like a change to the C++ files. A change to the `web_console`
@@ -233,25 +236,37 @@ for f in *.deb; do dpkg-deb -x "$f" root; done
 export LD_LIBRARY_PATH=$HOME/console-e2e/libs/root/usr/lib/x86_64-linux-gnu:$HOME/console-e2e/libs/root/usr/lib/x86_64-linux-gnu/nss
 ```
 
-## Docker image
+## Docker images
 
-The image keeps everything of the official image of the same release and replaces the binary. Use a
-release build; a Debug binary works but is large and slow (strip it with `llvm-strip --strip-debug`).
+The console is distributed as two images, packaged as archives that can be copied to any environment, including
+networks without access to a registry:
+
+| Image | Contents |
+|---|---|
+| `clickhouse-server-console:<version>` | The official `clickhouse/clickhouse-server` image of the same release, with the binary of this build (`Dockerfile`). Everything of the official image applies: its environment variables, `config.d`, `users.d`, and `docker-entrypoint-initdb.d`. |
+| `clickhouse-console-tools:<version>` | Node.js 22 with the three helper processes, `console.html` for the access policy worker, the `docker` CLI with Compose, and `kubectl` (`Dockerfile.tools`). The first argument chooses the process: `backup-worker`, `cluster-agent`, or `access-policy-worker`. |
+
+The version is `<release of the base image>-console.<commit>`, for example `26.9.8.3-console.21b36648cc0`. Build a
+Release binary (a Debug binary is several gigabytes and slow), commit, then package:
 
 ```bash
-mkdir -p ~/src/ClickHouse-private/tmp/console-docker
-cp ~/src/ClickHouse-private/build_release/programs/clickhouse ~/src/ClickHouse-private/tmp/console-docker/
-docker build -f ~/src/ClickHouse-private/utils/web-console/Dockerfile \
-    --build-arg BASE_IMAGE=clickhouse/clickhouse-server:26.9.8.3 \
-    -t clickhouse-server-console:26.9.8.3 ~/src/ClickHouse-private/tmp/console-docker
-docker run -d --name clickhouse-console -p 127.0.0.1:38123:8123 \
-    -e CLICKHOUSE_PASSWORD=change-me -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
-    --ulimit nofile=262144:262144 clickhouse-server-console:26.9.8.3
+cmake -S . -B build_release -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=0
+cd build_release && ninja clickhouse > ninja_release.log 2>&1 && cd ..
+utils/web-console/package_images.sh            # --out <dir>, --base-image <image>, --binary <path>, --allow-dirty
 ```
 
-For a restricted network, build the image where the base image is available, then move it with
-`docker save` and `docker load`. The console needs no Internet access; the Binary visualizer and
-Jemalloc pages load libraries from public CDNs and do not work offline.
+The script refuses a Debug build, a binary whose release differs from the base image, and uncommitted changes (unless
+`--allow-dirty`, which adds `-dirty` to the version). It strips the debug information (the symbols stay, for stack
+traces), builds both images, smoke-tests them (the server starts, reports the release, and serves this build's
+console; each helper starts; the tools are present), and writes to `tmp/dist/<version>/`:
+
+- `clickhouse-server-console-<version>-amd64.tar.gz` and `clickhouse-console-tools-<version>-amd64.tar.gz`, loaded with `docker load -i`;
+- `MANIFEST.txt` (commit, base image digest, image IDs) and `SHA256SUMS`;
+- `deploy/`: `compose.yaml` and `compose.cluster-agent.yaml` for a Docker host, `kubernetes.yaml`, `.env.example`,
+  `config.d/web-console.xml`, `service-accounts.sql`, and `README.md`, the guide for the operators of each environment.
+
+Every environment gets the same images; what differs is in `.env` and `config.d/`. The console needs no Internet
+access; the Binary visualizer and Jemalloc pages load libraries from public CDNs and do not work offline.
 
 ## Rollback
 

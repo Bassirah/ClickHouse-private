@@ -1,0 +1,18 @@
+<!-- Configuration of the web console for this environment. An empty value hides a link; a configuration reload applies
+     changes without a restart. See "Configuration" in the documentation of the console. -->
+<clickhouse>
+    <web_console>
+        <!-- Links of the Resources group. For a network without Internet access, point them to internal mirrors, or empty them. -->
+        <documentation_url>https://clickhouse.com/docs/</documentation_url>
+        <source_code_url>https://github.com/ClickHouse/ClickHouse/</source_code_url>
+        <website_url>https://clickhouse.com/</website_url>
+        <cloud_url>https://clickhouse.cloud/</cloud_url>
+
+        <!-- Database of the console tables. -->
+        <admin_database>console_admin</admin_database>
+
+        <!-- S3 endpoints allowed for backup destinations: exact endpoints or patterns, comma-separated. More can be
+             allowed in the console, except link-local and metadata addresses and patterns for any host. -->
+        <backup_s3_endpoints></backup_s3_endpoints>
+    </web_console>
+</clickhouse>
