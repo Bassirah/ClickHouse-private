@@ -29,7 +29,8 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/cluster_e2e.mjs` | Browser acceptance checks of Cluster Management against a running agent: provisioning, registration, drift, scaling, failures, and retirement (Playwright; not part of the build). |
 | `utils/web-console/Dockerfile` | Server image: a locally built binary on top of the official image. |
 | `utils/web-console/Dockerfile.tools`, `tools-entrypoint.sh` | Tools image: the backup worker, the cluster agent (with `docker`, Compose, and `kubectl`), and the access policy worker. |
-| `utils/web-console/package_images.sh` | Builds, smoke-tests, and packages both images as archives for distribution. |
+| `utils/web-console/build_images.sh` | Builds the images from source, end to end: checks, a Release build of the binary, then `package_images.sh`. |
+| `utils/web-console/package_images.sh` | Builds, smoke-tests, and packages both images as archives for distribution, from an existing binary. |
 | `utils/web-console/deploy/` | Deployment examples shipped with the archives: Docker Compose, Kubernetes, the service accounts, and their guide. |
 
 All HTML pages are embedded into the binary with `#embed`: **any change to an `.html` file needs a
@@ -246,19 +247,46 @@ networks without access to a registry:
 | `clickhouse-server-console:<version>` | The official `clickhouse/clickhouse-server` image of the same release, with the binary of this build (`Dockerfile`). Everything of the official image applies: its environment variables, `config.d`, `users.d`, and `docker-entrypoint-initdb.d`. |
 | `clickhouse-console-tools:<version>` | Node.js 22 with the three helper processes, `console.html` for the access policy worker, the `docker` CLI with Compose, and `kubectl` (`Dockerfile.tools`). The first argument chooses the process: `backup-worker`, `cluster-agent`, or `access-policy-worker`. |
 
-The version is `<release of the base image>-console.<commit>`, for example `26.9.8.3-console.21b36648cc0`. Build a
-Release binary (a Debug binary is several gigabytes and slow), commit, then package:
+The version is `<release of the base image>-console.<commit>`, for example `26.9.8.3-console.a88866202a2`.
+
+### Building the images {#building-the-images}
+
+Commit your changes, then run from the repository root:
 
 ```bash
-cmake -S . -B build_release -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=0
-cd build_release && ninja clickhouse > ninja_release.log 2>&1 && cd ..
-utils/web-console/package_images.sh            # --out <dir>, --base-image <image>, --binary <path>, --allow-dirty
+utils/web-console/build_images.sh
 ```
 
-The script refuses a Debug build, a binary whose release differs from the base image, and uncommitted changes (unless
-`--allow-dirty`, which adds `-dirty` to the version). It strips the debug information (the symbols stay, for stack
-traces), builds both images, smoke-tests them (the server starts, reports the release, and serves this build's
-console; each helper starts; the tools are present), and writes to `tmp/dist/<version>/`:
+It needs Docker, Git, CMake, Ninja, Clang (`clang-22` when installed, or `CC` and `CXX`), and about 60 GB free for the
+build directory. It runs four steps:
+
+1. **Checks**: the tools, Docker, the free space, and uncommitted changes in `programs/`, `src/`, or
+   `utils/web-console/`, which it refuses unless `--allow-dirty` is given (the version then ends with `-dirty`).
+   Everything that would otherwise fail after hours of compiling is checked first.
+2. **Configure** a Release build in `build_release/`, once (`cmake.log` in it). A Debug binary is several gigabytes
+   and slow, so a build directory that is not Release is refused.
+3. **Build** the `clickhouse` binary, with the output in `build_release/ninja_release.log`. The first build takes
+   several hours (about 6 on 22 cores); later builds compile only what changed. An interrupted build resumes where it
+   stopped when the script runs again. To follow it:
+
+   ```bash
+   tail -c 300 build_release/ninja_release.log | tr '\r' '\n' | grep -o '\[[0-9]*/[0-9]*\]' | tail -1
+   ```
+4. **Package** with `package_images.sh` (a few minutes).
+
+| Option | Meaning |
+|---|---|
+| `--build-dir <dir>` | Build directory (default `build_release`). |
+| `--with-rust` | Also build the Rust components: the PRQL dialect, fuzzy history search in `clickhouse-client` (skim), WebAssembly UDFs (wasmtime), and polyglot. Needs `rustup` with the toolchain named in `contrib/corrosion-cmake/CMakeLists.txt`. Default: without them. |
+| `--package-only` | Do not build: package the binary already in the build directory. |
+| `--base-image <image>` | The official server image of the same release (default `clickhouse/clickhouse-server:26.9.8.3`). |
+| `--out <dir>` | Output directory (default `tmp/dist/<version>/`). |
+| `--allow-dirty` | Allow uncommitted changes. |
+
+`package_images.sh` alone packages any Release binary (`--binary <path>`). It refuses a Debug build, a binary whose
+release differs from the base image, and uncommitted changes (unless `--allow-dirty`). It strips the debug information
+(the symbols stay, for stack traces), builds both images, smoke-tests them (the server starts, reports the release,
+and serves this build's console; each helper starts; the tools are present), and writes to `tmp/dist/<version>/`:
 
 - `clickhouse-server-console-<version>-amd64.tar.gz` and `clickhouse-console-tools-<version>-amd64.tar.gz`, loaded with `docker load -i`;
 - `MANIFEST.txt` (commit, base image digest, image IDs) and `SHA256SUMS`;
