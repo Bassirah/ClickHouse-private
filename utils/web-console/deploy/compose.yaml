@@ -1,0 +1,70 @@
+# Deployment example of the web console on one Docker host: the ClickHouse server with the console, and its helper
+# processes. Copy `.env.example` to `.env`, set the passwords, then:
+#
+#   docker compose up -d                                                        # server and the two workers
+#   docker compose -f compose.yaml -f compose.cluster-agent.yaml up -d          # also the cluster agent
+#
+# See README.md in this directory for the service accounts, and for each environment's settings.
+name: clickhouse-console
+
+x-tools: &tools
+  image: clickhouse-console-tools:${CONSOLE_VERSION:?set CONSOLE_VERSION in .env}
+  restart: unless-stopped
+  depends_on:
+    clickhouse:
+      condition: service_healthy
+
+services:
+  clickhouse:
+    image: clickhouse-server-console:${CONSOLE_VERSION:?set CONSOLE_VERSION in .env}
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:?set CLICKHOUSE_ADMIN_PASSWORD in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "${CONSOLE_BIND:-127.0.0.1}:${CONSOLE_HTTP_PORT:-8123}:8123"
+      - "${CONSOLE_BIND:-127.0.0.1}:${CONSOLE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+      - ./config.d/web-console.xml:/etc/clickhouse-server/config.d/web-console.xml:ro
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  backup-worker:
+    <<: *tools
+    command: ["backup-worker"]
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: backup_worker
+      CLICKHOUSE_PASSWORD: ${BACKUP_WORKER_PASSWORD:?set BACKUP_WORKER_PASSWORD in .env}
+    # S3 credentials of the destinations, named after their credential reference: <REF>_ACCESS_KEY_ID, <REF>_SECRET_ACCESS_KEY.
+    env_file:
+      - path: backup-destinations.env
+        required: false
+    # Deleting from a disk destination needs the disk's directory, which belongs to the server's user (101), in the
+    # server's data volume. Without disk destinations, remove `user` and the volume.
+    user: "101:101"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+
+  access-policy-worker:
+    <<: *tools
+    command: ["access-policy-worker"]
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: access_policy_worker
+      CLICKHOUSE_PASSWORD: ${ACCESS_POLICY_WORKER_PASSWORD:?set ACCESS_POLICY_WORKER_PASSWORD in .env}
+      INTERVAL_SECONDS: ${ACCESS_POLICY_INTERVAL_SECONDS:-60}
+      ATTRIBUTE_FEED: ${ATTRIBUTE_FEED:-}
+      ATTRIBUTE_FEED_SOURCE: ${ATTRIBUTE_FEED_SOURCE:-feed}
+      ATTRIBUTE_FEED_TOKEN: ${ATTRIBUTE_FEED_TOKEN:-}
+
+volumes:
+  clickhouse-data:
+  clickhouse-logs:

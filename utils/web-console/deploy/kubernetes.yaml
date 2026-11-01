@@ -1,0 +1,281 @@
+# Deployment example of the web console on Kubernetes: the ClickHouse server with the console (a StatefulSet with one
+# replica and a volume), the backup worker, the access policy worker, and the cluster agent with the kubernetes provider.
+# See README.md in this directory. Before applying:
+#
+#   1. Make the images available to the nodes: push them to your registry and change `image:` below, or import the
+#      archives on every node (k3d: `k3d image import`, containerd: `ctr -n k8s.io images import`).
+#   2. Create the Secret with the passwords:
+#        kubectl create namespace clickhouse-console
+#        kubectl -n clickhouse-console create secret generic clickhouse-console-passwords \
+#          --from-literal=admin=... --from-literal=backup_worker=... --from-literal=access_policy_worker=... \
+#          --from-literal=cluster_agent=...
+#   3. kubectl apply -f kubernetes.yaml
+#
+# The version tags are set by package_images.sh. The cluster agent needs the ClickHouse operator in the cluster, and
+# offers the namespaces matching CLUSTER_AGENT_K8S_NAMESPACES; remove its part if you do not manage clusters.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clickhouse-console
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-console-config
+  namespace: clickhouse-console
+data:
+  web-console.xml: |
+    <clickhouse>
+        <web_console>
+            <documentation_url>https://clickhouse.com/docs/</documentation_url>
+            <source_code_url>https://github.com/ClickHouse/ClickHouse/</source_code_url>
+            <website_url>https://clickhouse.com/</website_url>
+            <cloud_url>https://clickhouse.cloud/</cloud_url>
+            <admin_database>console_admin</admin_database>
+            <backup_s3_endpoints></backup_s3_endpoints>
+        </web_console>
+    </clickhouse>
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: clickhouse-console
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: clickhouse-console-server}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: clickhouse-console-server}
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse-server-console:VERSION
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: {secretKeyRef: {name: clickhouse-console-passwords, key: admin}}
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+          ports:
+            - {name: http, containerPort: 8123}
+            - {name: native, containerPort: 9000}
+          readinessProbe:
+            httpGet: {path: /ping, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            limits: {memory: 4Gi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/clickhouse}
+            - {name: config, mountPath: /etc/clickhouse-server/config.d/web-console.xml, subPath: web-console.xml}
+      volumes:
+        - name: config
+          configMap: {name: web-console-config}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 20Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: clickhouse-console
+spec:
+  selector: {app.kubernetes.io/name: clickhouse-console-server}
+  ports:
+    - {name: http, port: 8123, targetPort: http}
+    - {name: native, port: 9000, targetPort: native}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backup-worker
+  namespace: clickhouse-console
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: clickhouse-console-backup-worker}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: clickhouse-console-backup-worker}
+    spec:
+      containers:
+        - name: backup-worker
+          image: clickhouse-console-tools:VERSION
+          imagePullPolicy: IfNotPresent
+          args: ["backup-worker"]
+          env:
+            - {name: CLICKHOUSE_URL, value: "http://clickhouse:8123"}
+            - {name: CLICKHOUSE_USER, value: backup_worker}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: {secretKeyRef: {name: clickhouse-console-passwords, key: backup_worker}}
+          # S3 credentials of the destinations: <REF>_ACCESS_KEY_ID and <REF>_SECRET_ACCESS_KEY, for example from a Secret:
+          # envFrom:
+          #   - secretRef: {name: clickhouse-console-backup-destinations}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: access-policy-worker
+  namespace: clickhouse-console
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: clickhouse-console-access-policy-worker}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: clickhouse-console-access-policy-worker}
+    spec:
+      containers:
+        - name: access-policy-worker
+          image: clickhouse-console-tools:VERSION
+          imagePullPolicy: IfNotPresent
+          args: ["access-policy-worker"]
+          env:
+            - {name: CLICKHOUSE_URL, value: "http://clickhouse:8123"}
+            - {name: CLICKHOUSE_USER, value: access_policy_worker}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: {secretKeyRef: {name: clickhouse-console-passwords, key: access_policy_worker}}
+            - {name: INTERVAL_SECONDS, value: "60"}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+# The cluster agent, with the kubernetes provider only (the docker-compose provider needs a Docker host). Its key pair
+# for administrator passwords is kept in its volume: losing it makes queued creations undecryptable.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-agent
+  namespace: clickhouse-console
+---
+# What the agent does with kubectl, and nothing more. The namespaces it may use are restricted further by
+# CLUSTER_AGENT_K8S_NAMESPACES; Kubernetes RBAC cannot express a namespace prefix.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clickhouse-console-cluster-agent
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, patch, delete]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods, persistentvolumeclaims]
+    verbs: [get, list, delete]
+  - apiGroups: [""]
+    resources: [pods/portforward]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [services, secrets]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [apps]
+    resources: [statefulsets, deployments]
+    verbs: [get, list]
+  - apiGroups: [clickhouse.com]
+    resources: [clickhouseclusters, keeperclusters]
+    verbs: [get, list, create, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clickhouse-console-cluster-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clickhouse-console-cluster-agent
+subjects:
+  - kind: ServiceAccount
+    name: cluster-agent
+    namespace: clickhouse-console
+---
+# A kubeconfig that uses the service account of the pod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-agent-kubeconfig
+  namespace: clickhouse-console
+data:
+  kubeconfig: |
+    apiVersion: v1
+    kind: Config
+    clusters:
+      - name: in-cluster
+        cluster:
+          server: https://kubernetes.default.svc
+          certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    users:
+      - name: cluster-agent
+        user:
+          tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    contexts:
+      - name: in-cluster
+        context: {cluster: in-cluster, user: cluster-agent}
+    current-context: in-cluster
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cluster-agent-state
+  namespace: clickhouse-console
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 1Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-agent
+  namespace: clickhouse-console
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: clickhouse-console-cluster-agent}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: clickhouse-console-cluster-agent}
+    spec:
+      serviceAccountName: cluster-agent
+      securityContext: {fsGroup: 1000}
+      containers:
+        - name: cluster-agent
+          image: clickhouse-console-tools:VERSION
+          imagePullPolicy: IfNotPresent
+          args: ["cluster-agent"]
+          env:
+            - {name: CLICKHOUSE_URL, value: "http://clickhouse:8123"}
+            - {name: CLICKHOUSE_USER, value: cluster_agent}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: {secretKeyRef: {name: clickhouse-console-passwords, key: cluster_agent}}
+            - {name: CLUSTER_AGENT_STATE_DIR, value: /var/lib/clickhouse-console/clusters}
+            - {name: CLUSTER_AGENT_ENVIRONMENTS, value: "lab,development"}
+            - {name: CLUSTER_AGENT_KUBECONFIG, value: /etc/clickhouse-console/kubeconfig}
+            - {name: CLUSTER_AGENT_K8S_NAMESPACES, value: "chc-*"}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/clickhouse-console}
+            - {name: kubeconfig, mountPath: /etc/clickhouse-console/kubeconfig, subPath: kubeconfig}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: cluster-agent-state}
+        - name: kubeconfig
+          configMap: {name: cluster-agent-kubeconfig}
