@@ -45,7 +45,7 @@ OUT="${OUT:-$ROOT/tmp/dist/$VERSION}"
 SERVER_IMAGE="clickhouse-server-console:$VERSION"
 TOOLS_IMAGE="clickhouse-console-tools:$VERSION"
 
-[ -x "$BINARY" ] || die "no clickhouse binary at $BINARY (build it with: cd build_release && ninja clickhouse)"
+[ -x "$BINARY" ] || die "no clickhouse binary at $BINARY (build it with utils/web-console/build_images.sh)"
 BUILD_TYPE="$(grep -oP '^CMAKE_BUILD_TYPE:STRING=\K.*' "$(dirname "$(dirname "$BINARY")")/CMakeCache.txt" 2>/dev/null || echo unknown)"
 [ "$BUILD_TYPE" = Release ] || [ "$BUILD_TYPE" = RelWithDebInfo ] \
     || die "the binary comes from a $BUILD_TYPE build; distribute a Release or RelWithDebInfo build"

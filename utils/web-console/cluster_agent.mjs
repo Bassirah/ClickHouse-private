@@ -1030,6 +1030,11 @@ async function nodeConnections(cluster) {
         return Promise.all(docker.nodes(cluster.spec).map(async n => ({node_id: n.node_id, name: n.name, shard: n.shard, endpoint: docker.endpoint(n),
             query: await docker.connect(cluster, n)})));
     }
+    /// A deployment of a provider that is not enabled here has no registered endpoints: its nodes are reached only
+    /// through that provider.
+    if (cluster.provider === 'kubernetes') {
+        throw new Error('The kubernetes provider is not enabled on this agent (CLUSTER_AGENT_KUBECONFIG is not set): its nodes cannot be reached.');
+    }
     const ref = cluster.connection.credential_ref;
     const user = process.env[`${ref}_USER`];
     const password = process.env[`${ref}_PASSWORD`];
