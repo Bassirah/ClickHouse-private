@@ -404,7 +404,8 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 #admin-view { padding: 0; }
 #admin-view > .admin-page { max-width: none; padding: 0 16px 24px; gap: 14px; }
 #admin-view .admin-page .admin-page { padding: 0; }
-#admin-view .admin-head
+/* The header bar of the page; section headings inside it reuse `.admin-head` for their layout only. */
+#admin-view > .admin-page > .admin-head:first-child
 {
     position: sticky; top: 0; z-index: 3; margin: 0 -16px; padding: 8px 16px; min-height: 52px; gap: 8px;
     background: var(--bg); border-bottom: 1px solid var(--hairline);
@@ -426,7 +427,7 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 #admin-view .field, #admin-dialog .field { gap: 4px; }
 #admin-view .field label, #admin-dialog .field label { font-size: 13px; font-weight: 500; }
 #admin-view .field .hint, #admin-dialog .field .hint { font-size: 12px; }
-:is(#admin-view, #admin-dialog) :is(input:not([type]), input[type="text"], input[type="search"], input[type="password"], input[type="number"],
+:is(#admin-view, #admin-dialog) :is(input:not([type]), input[type="text"], input[type="search"], input[type="url"], input[type="password"], input[type="number"],
     input[type="date"], input[type="datetime-local"], input[type="time"], select, textarea)
 {
     min-height: 36px; padding: 0 12px; font-size: 13px; color: var(--text);
@@ -2453,6 +2454,8 @@ function adminChecks(db) {
         write_backup_events: db ? grant(`INSERT ON ${table('backup_events')}`) : null,
         write_destinations: db ? grant(`INSERT ON ${table('backup_destinations')}`) : null,
         write_schedules: db ? grant(`INSERT ON ${table('backup_schedules')}`) : null,
+        read_endpoints: db ? read(table('backup_endpoints')) : null,
+        write_endpoints: db ? grant(`INSERT ON ${table('backup_endpoints')}`) : null,
         read_system_backups: read('system.backups'),
         read_backup_log: read('system.backup_log'),
         create_named_collection: grant('CREATE NAMED COLLECTION ON *.*'),
@@ -4304,13 +4307,13 @@ const ROLE_TEMPLATES = [
          ['CREATE DATABASE, DROP DATABASE', 'console_inspect_*.*'],
      ]},
     {id: 'backup-admin', title: 'Backup Administrator', suggested: 'backup_admin',
-     purpose: 'Everything of the backup and restore operators for the chosen databases, plus destinations (with their S3 credentials) and schedules, and cancelling operations. '
+     purpose: 'Everything of the backup and restore operators for the chosen databases, plus destinations (with their S3 credentials), the allowed S3 endpoints, schedules, and cancelling operations. '
         + 'Restoring users and roles additionally needs the access management privileges, which this template does not include.',
      params: [{key: 'databases', title: 'Databases it backs up'}],
      grants: (p, db) => [
          ...backupViewerGrants(db),
          ['INSERT', `${db}.backup_operations`], ['INSERT', `${db}.backup_events`], ['INSERT', `${db}.audit_log`],
-         ['INSERT', `${db}.backup_destinations`], ['INSERT', `${db}.backup_schedules`],
+         ['INSERT', `${db}.backup_destinations`], ['INSERT', `${db}.backup_schedules`], ['INSERT', `${db}.backup_endpoints`],
          ...p.databases.map(d => ['BACKUP, SELECT, SHOW', `${d}.*`]),
          ['READ, WRITE ON DISK', null], ['READ, WRITE ON S3', null],
          ['NAMED COLLECTION, CREATE NAMED COLLECTION, ALTER NAMED COLLECTION, DROP NAMED COLLECTION', 'console_backup_*'],
@@ -4330,7 +4333,7 @@ const ROLE_TEMPLATES = [
 ];
 
 function backupViewerGrants(db) {
-    return [...['backup_destinations', 'backup_schedules', 'backup_operations', 'backup_events', 'audit_log'].map(t => ['SELECT', `${db}.${t}`]),
+    return [...['backup_destinations', 'backup_schedules', 'backup_operations', 'backup_events', 'backup_endpoints', 'audit_log'].map(t => ['SELECT', `${db}.${t}`]),
         ['SELECT', 'system.backups'], ['SELECT', 'system.backup_log'], ['SELECT', 'system.disks'], ['SHOW DATABASES', '*.*']];
 }
 
@@ -5547,6 +5550,16 @@ ENGINE = MergeTree ORDER BY op_id`,
     CONSTRAINT recorded_by_is_writer CHECK recorded_by = currentUser()
 )
 ENGINE = MergeTree ORDER BY (op_id, at)`,
+    /// S3 endpoints allowed in the console, in addition to `web_console.backup_s3_endpoints` of the server configuration.
+    backup_endpoints: () => `(
+    endpoint String,
+    note String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY endpoint`,
 };
 
 const BACKUP_TABS = [['overview', 'Overview'], ['backups', 'Backups'], ['restore', 'Restore'], ['schedules', 'Schedules'],
@@ -5678,6 +5691,8 @@ async function loadBackupState() {
         if (e instanceof AdminSessionChanged) throw e;
         return [];
     });
+    const console_endpoints = session.admin.can.read_endpoints ? await adminRows(`SELECT endpoint, note, updated_by,
+            formatDateTime(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at FROM ${db}.backup_endpoints FINAL WHERE NOT deleted ORDER BY endpoint`) : null;
     const by_op = new Map(operations.map(op => [op.op_id, {...op, scope: parseJSON(op.scope, {}), parameters: parseJSON(op.parameters, {}),
         expected: parseJSON(op.expected, null), target: parseJSON(op.target, {}), events: [], checks: [], state: 'queued'}]));
     for (const event of events) {
@@ -5702,7 +5717,7 @@ async function loadBackupState() {
             op.checks.push({...event, details: parseJSON(event.details, {})});
         }
     }
-    return {destinations, schedules, operations: [...by_op.values()], destinations_by_id: new Map(destinations.map(d => [d.id, d])), worker};
+    return {destinations, schedules, operations: [...by_op.values()], destinations_by_id: new Map(destinations.map(d => [d.id, d])), worker, console_endpoints};
 }
 
 /// The incremental chain of a backup, from the backup itself to its full base: `{chain, missing}`.
@@ -5958,7 +5973,7 @@ ADMIN_PAGES.backups = (root, route, page) => {
 function backupSetupBox() {
     const admin = session.admin;
     const box = h('div', {className: 'box'}, h('h2', {}, 'Set up Backup & Restore'),
-        paragraph(`The module keeps its destinations, schedules, and operation records in four tables of the ${admin.db} database. `
+        paragraph(`The module keeps its destinations, allowed endpoints, schedules, and operation records in five tables of the ${admin.db} database. `
             + 'Setting up creates them; it does not create any destination or backup.'));
     put(box, h('div', {className: 'actions-row'}, button('Set up', () => {
         const quoted = quoteIdentifier(admin.db);
@@ -6154,14 +6169,119 @@ function checksTable(checks) {
 /// --- Backup & Restore: destinations ---
 
 /// The S3 endpoints the server configuration allows (`web_console.backup_s3_endpoints`), as origins.
-function allowedS3Endpoints() {
-    return String(config.backup_s3_endpoints || '').split(',').map(s => s.trim()).filter(Boolean).map(value => {
-        try {
-            return new URL(value).origin;
-        } catch (e) {
-            return null;
+/// The S3 endpoints allowed for backup destinations: `web_console.backup_s3_endpoints` of the server configuration,
+/// and the entries added in the console (the `backup_endpoints` table, `state.console_endpoints`). An entry is an
+/// exact origin (`https://minio.example.com:9000`) or a pattern: `https://*.example.com[:port]` (the subdomains of a
+/// domain), `https://*[:port]` (any host of that scheme), or `*` (any endpoint). Returns `{origins, patterns,
+/// invalid}`; each origin and pattern has `source`: `config` or `console`.
+function s3EndpointAllowlist(state) {
+    const result = {origins: [], patterns: [], invalid: []};
+    const add = (value, source) => {
+        const pattern = parseEndpointPattern(value);
+        if (pattern) {
+            result.patterns.push({...pattern, source});
+            return;
         }
-    }).filter(Boolean);
+        const parsed = parseEndpoint(value);
+        if (parsed.error) result.invalid.push(value);
+        else if (!result.origins.some(o => o.origin === parsed.origin)) result.origins.push({origin: parsed.origin, source});
+    };
+    for (const value of String(config.backup_s3_endpoints || '').split(',').map(v => v.trim()).filter(Boolean)) add(value, 'config');
+    for (const row of (state && state.console_endpoints) || []) add(row.endpoint, 'console');
+    return result;
+}
+
+function parseEndpointPattern(value) {
+    const match = value === '*' ? ['*', null, null, null] : value.match(/^(https?):\/\/\*(\.[a-z0-9.-]+)?(?::(\d{1,5}))?\/?$/i);
+    if (!match) return null;
+    return {text: value, scheme: match[1] ? `${match[1].toLowerCase()}:` : null, suffix: match[2] ? match[2].toLowerCase() : null, port: match[3] || null};
+}
+
+function s3AllowlistText(allowlist) {
+    const entries = [...allowlist.origins.map(o => o.origin), ...allowlist.patterns.map(p => p.text)];
+    return entries.length ? entries.join(', ') : 'none';
+}
+
+/// Parses an endpoint typed by the user: an HTTP or HTTPS origin without credentials, path, query, or fragment.
+function parseEndpoint(text) {
+    let url;
+    try {
+        url = new URL(text.trim());
+    } catch (e) {
+        return {error: 'Enter the endpoint as a URL, for example https://s3.example.com:9000.'};
+    }
+    if (!['http:', 'https:'].includes(url.protocol)) return {error: 'The endpoint must start with https:// or http://.'};
+    if (url.username || url.password) return {error: 'Do not put credentials in the endpoint: enter them in the fields below.'};
+    if (url.pathname !== '/' || url.search || url.hash) return {error: 'Enter only the scheme, the host, and the port: the bucket and the prefix have their own fields.'};
+    return {origin: url.origin, url};
+}
+
+/// Hosts that a pattern never matches: this machine, private networks, link-local addresses (including the cloud
+/// metadata service), and internal host names. The browser cannot resolve names, so a public name that resolves to
+/// such an address is not detected: use patterns only for domains you control or trust.
+function isInternalHost(hostname) {
+    const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (host === 'localhost' || host.endsWith('.localhost') || host === 'metadata' || host.endsWith('.internal') || host.endsWith('.local')) return true;
+    const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (v4) {
+        const [a, b] = [Number(v4[1]), Number(v4[2])];
+        return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254)
+            || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+    }
+    if (host.includes(':')) return host === '::' || host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host) || host.startsWith('::ffff:');
+    return false;
+}
+
+/// Link-local addresses (the cloud metadata service is at 169.254.169.254) and metadata host names: they can be
+/// allowed only in the server configuration, never from the console.
+function isMetadataHost(hostname) {
+    const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (['metadata', 'metadata.google.internal', 'instance-data', 'instance-data.ec2.internal'].includes(host)) return true;
+    if (/^169\.254\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    return host.includes(':') && (/^fe[89ab]/.test(host) || host.startsWith('::ffff:169.254.') || host.startsWith('::ffff:a9fe:'));
+}
+
+/// Checks an endpoint typed by the user against the allowlist. Returns `{origin}`, or `{error, allowable}` where
+/// `allowable` says that the endpoint itself may be added to the allowlist from the console.
+function checkS3Endpoint(text, allowlist) {
+    const parsed = parseEndpoint(text);
+    if (parsed.error) return parsed;
+    const configured = allowlist.origins.find(o => o.origin === parsed.origin);
+    const {protocol, hostname, port} = parsed.url;
+    if (isMetadataHost(hostname) && !(configured && configured.source === 'config')) {
+        return {error: `${parsed.origin} is a link-local or metadata address. It can be allowed only in the server configuration (web_console.backup_s3_endpoints), not from the console.`};
+    }
+    if (configured) return {origin: parsed.origin};
+    const host = hostname.toLowerCase();
+    const matching = allowlist.patterns.find(p => (!p.scheme || p.scheme === protocol) && (!p.port || p.port === port)
+        && (!p.suffix || host.endsWith(p.suffix)));
+    if (matching && isInternalHost(hostname)) {
+        return {allowable: true, error: `${parsed.origin} is an internal address (this machine, a private network, or an internal name): `
+            + 'patterns do not match such addresses. It must be allowed as an exact endpoint.'};
+    }
+    if (matching) return {origin: parsed.origin};
+    return {allowable: true, error: `${parsed.origin} is not an allowed endpoint (allowed: ${s3AllowlistText(allowlist)}).`};
+}
+
+/// Validates an entry added to the allowlist in the console: an exact endpoint, or a domain pattern such as
+/// `https://*.example.com`. Broader patterns (`https://*`, `*`) belong in the server configuration.
+function consoleEndpointEntry(text) {
+    const value = text.trim();
+    const pattern = parseEndpointPattern(value);
+    if (pattern) {
+        if (!pattern.suffix) return {error: 'Patterns for any host (* or https://*) can be set only in the server configuration. Use a domain, such as https://*.example.com.'};
+        if (pattern.suffix.split('.').filter(Boolean).length < 2) return {error: 'The domain of a pattern needs at least two labels, such as https://*.example.com.'};
+        return {entry: value.replace(/\/$/, '').toLowerCase()};
+    }
+    const parsed = parseEndpoint(value);
+    if (parsed.error) return parsed;
+    if (isMetadataHost(parsed.url.hostname)) return {error: `${parsed.origin} is a link-local or metadata address: it can be allowed only in the server configuration.`};
+    return {entry: parsed.origin, internal: isInternalHost(parsed.url.hostname)};
+}
+
+function endpointRowStep(endpoint, note, description, removal = false) {
+    return {description, sql: `INSERT INTO ${quoteIdentifier(session.admin.db)}.backup_endpoints (endpoint, note, deleted) FORMAT JSONEachRow\n`
+        + JSON.stringify({endpoint, note, deleted: removal})};
 }
 
 function destinationsTable(state, compact) {
@@ -6191,34 +6311,119 @@ function destinationsTable(state, compact) {
 
 function renderDestinations(state) {
     const can = session.admin.can;
-    const endpoints = allowedS3Endpoints();
+    const allowlist = s3EndpointAllowlist(state);
     return [h('div', {className: 'admin-head'}, h('span', {className: 'spacer'}),
         button('Add destination', () => destinationDialog(state, null).catch(showFailure('Add destination')), {className: 'primary', disabled: !can.write_destinations,
             title: can.write_destinations ? null : `Needs INSERT on ${session.admin.db}.backup_destinations.`})),
     h('p', {className: 'note'}, 'A destination is a backup disk of the server configuration (allowed with backups.allowed_disk) or an S3-compatible bucket at an endpoint '
-        + `allowed by the server configuration (web_console.backup_s3_endpoints: ${endpoints.length ? endpoints.join(', ') : 'none'}). `
+        + 'listed under Allowed endpoints, in this environment or an external one. '
         + 'S3 credentials are stored in a named collection on the server, never in the console tables or the browser. '
         + 'The connection test runs on the server, which is the node that must reach the destination; deleting artifacts is done by the backup worker, '
         + 'with the credentials of its credential reference.'),
-    destinationsTable(state, false)];
+    destinationsTable(state, false), allowedEndpointsBox(state, allowlist)];
+}
+
+/// The S3 endpoints that destinations may use: from the server configuration (read-only here) and added in the console.
+function allowedEndpointsBox(state, allowlist) {
+    const can = session.admin.can;
+    const admin = session.admin;
+    const console_rows = new Map((state.console_endpoints || []).map(row => [row.endpoint, row]));
+    const rows = [
+        ...allowlist.origins.map(o => ({entry: o.origin, source: o.source})),
+        ...allowlist.patterns.map(p => ({entry: p.text, source: p.source})),
+        ...allowlist.invalid.map(v => ({entry: v, source: 'config', invalid: true})),
+    ];
+    const box = h('div', {className: 'box'}, h('div', {className: 'admin-head'}, h('h2', {}, 'Allowed endpoints'), h('span', {className: 'spacer'}),
+        can.read_endpoints ? button('Allow endpoint', () => allowEndpointDialog(state, allowlist), {className: 'small', disabled: !can.write_endpoints,
+            title: can.write_endpoints ? null : `Needs INSERT on ${admin.db}.backup_endpoints.`}) : null),
+    h('p', {className: 'note'}, 'S3 destinations can use only these endpoints. The server itself does not restrict the endpoints of BACKUP TO S3, so this list is what keeps '
+        + 'the console from sending backups, and credentials, to an unintended server. Patterns (https://*.example.com) never match internal addresses; '
+        + 'link-local and metadata addresses can be allowed only in the server configuration. Destinations that already use an endpoint keep working when it is removed.'));
+    if (!can.read_endpoints) {
+        box.append(h('div', {className: 'message warning'}, `Endpoints cannot be added in the console: the table ${admin.db}.backup_endpoints is not set up, or your user cannot read it.`),
+            can.setup ? h('div', {className: 'actions-row'}, button('Set up', () => reviewPlan({action: 'setup_backup_endpoints', target_type: 'platform', target_name: admin.db,
+                summary: `Set up the allowed endpoints in ${admin.db}`, local_only: true,
+                steps: [{description: `Create the table ${admin.db}.backup_endpoints`, sql: `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(admin.db)}.backup_endpoints
+${BACKUP_TABLES.backup_endpoints()}`}],
+                onclose: reloadAdminContext}), {className: 'small'})) : null);
+    }
+    box.append(dataTable([
+        {title: 'Endpoint', render: r => [h('code', {}, r.entry), r.invalid ? h('div', {className: 'note'}, 'Invalid: ignored') : null]},
+        {title: 'Source', render: r => {
+            if (r.source === 'config') return [badge('Server configuration'), h('div', {className: 'note'}, 'web_console.backup_s3_endpoints')];
+            const row = console_rows.get(r.entry);
+            return [badge('Console', 'ok'), row ? h('div', {className: 'note'}, `${row.updated_by}, ${row.updated_at} UTC${row.note ? ` · ${row.note}` : ''}`) : null];
+        }},
+        {title: 'Used by', render: r => {
+            const used = state.destinations.filter(d => d.type === 's3' && endpointMatches(r.entry, d.endpoint));
+            return used.length ? used.map(d => d.name).join(', ') : h('span', {className: 'note'}, '—');
+        }},
+        {title: '', render: r => (r.source === 'console' && can.write_endpoints ? button('Remove', () => removeEndpointDialog(state, r.entry), {className: 'small danger'}) : null)},
+    ], rows, 'No endpoint is allowed: S3 destinations cannot be added.', 'Allowed endpoints'));
+    return box;
+}
+
+function endpointMatches(entry, origin) {
+    const pattern = parseEndpointPattern(entry);
+    if (!pattern) return entry === origin;
+    const parsed = parseEndpoint(origin);
+    if (parsed.error) return false;
+    const {protocol, hostname, port} = parsed.url;
+    return (!pattern.scheme || pattern.scheme === protocol) && (!pattern.port || pattern.port === port)
+        && (!pattern.suffix || hostname.toLowerCase().endsWith(pattern.suffix)) && !isInternalHost(hostname);
+}
+
+function allowEndpointDialog(state, allowlist) {
+    const endpoint = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'https://s3.example.com:9000 or https://*.example.com'});
+    const note = h('input', {type: 'text', autocomplete: 'off', placeholder: 'What it is, who owns it'});
+    formDialog('Allow endpoint', [
+        adminField('Endpoint', endpoint, 'An S3-compatible server that destinations may use, in this environment or an external one: https://host[:port], or a domain pattern '
+            + 'such as https://*.example.com. The server connects to it directly.'),
+        adminField('Note', note),
+    ], 'Review', () => {
+        const checked = consoleEndpointEntry(endpoint.value);
+        if (checked.error) return checked.error;
+        const listed = [...allowlist.origins.map(o => o.origin), ...allowlist.patterns.map(p => p.text)];
+        if (listed.includes(checked.entry)) return `${checked.entry} is already allowed.`;
+        return {action: 'allow_backup_endpoint', target_type: 'backup_endpoint', target_name: checked.entry, summary: `Allow the S3 endpoint ${checked.entry}`, local_only: true,
+            steps: [endpointRowStep(checked.entry, note.value.trim(), `Allow the S3 endpoint ${checked.entry} for backup destinations`)],
+            warning: [checked.internal ? `${checked.entry} is an internal address (this machine or a private network): only allow a server you intend backups to reach.` : null,
+                checked.entry.startsWith('http:') ? 'It uses unencrypted HTTP: data and credentials of destinations at this endpoint travel in clear text.' : null]
+                .filter(Boolean).join(' ') || null};
+    });
+}
+
+function removeEndpointDialog(state, entry) {
+    const used = state.destinations.filter(d => d.type === 's3' && endpointMatches(entry, d.endpoint));
+    reviewPlan({action: 'remove_backup_endpoint', target_type: 'backup_endpoint', target_name: entry, summary: `Remove the allowed S3 endpoint ${entry}`, local_only: true,
+        danger: true, confirm_text: 'Remove', steps: [endpointRowStep(entry, '', `Remove ${entry} from the allowed endpoints`, true)],
+        warning: used.length ? `Used by ${used.map(d => d.name).join(', ')}: they keep working, but new destinations cannot use ${entry}, unless the server configuration allows it.` : null});
 }
 
 async function destinationDialog(state, existing) {
     const disks = await adminRows('SELECT name, path FROM system.disks ORDER BY name');
-    const endpoints = allowedS3Endpoints();
+    const allowlist = s3EndpointAllowlist(state);
+    const can_allow = session.admin.can.read_endpoints && session.admin.can.write_endpoints;
     const type = select([['disk', 'Server backup disk'], ['s3', 'S3-compatible bucket']], existing ? existing.type : 'disk', {disabled: !!existing});
     const name = h('input', {type: 'text', value: existing ? existing.name : '', autocomplete: 'off'});
     const description = h('input', {type: 'text', value: existing ? existing.description : '', autocomplete: 'off'});
     const disk = select(disks.map(d => [d.name, `${d.name} (${d.path})`]), existing ? existing.disk : (disks.find(d => d.name === 'backups') || disks[0] || {}).name, {disabled: !!existing});
     const prefix = h('input', {type: 'text', value: existing ? existing.prefix : 'console', autocomplete: 'off', spellcheck: false, disabled: !!existing});
-    const endpoint = select(endpoints.length ? endpoints : [['', 'No endpoint is allowed by the server configuration']], existing ? existing.endpoint : endpoints[0], {disabled: !!existing});
+    const endpoint = h('input', {type: 'url', value: existing ? existing.endpoint : '', autocomplete: 'off', spellcheck: false, disabled: !!existing,
+        placeholder: 'https://s3.example.com:9000', list: 'backup-s3-endpoints'});
+    const suggestions = h('datalist', {id: 'backup-s3-endpoints'}, allowlist.origins.map(o => h('option', {value: o.origin})));
     const bucket = h('input', {type: 'text', value: existing ? existing.bucket : '', autocomplete: 'off', spellcheck: false, disabled: !!existing});
     const access_key = h('input', {type: 'text', autocomplete: 'off', spellcheck: false});
     const secret_key = h('input', {type: 'password', autocomplete: 'new-password'});
     const credential_ref = h('input', {type: 'text', value: existing ? existing.credential_ref : '', autocomplete: 'off', spellcheck: false, placeholder: 'BACKUP_S3_MAIN'});
     const allowed = h('input', {type: 'text', value: existing ? existing.allowed_databases.join(', ') : '', autocomplete: 'off', spellcheck: false, placeholder: 'empty: any database'});
     const s3_fields = h('div', {className: 'form-grid'},
-        adminField('Endpoint', endpoint, 'Only endpoints allowed by the server configuration. HTTPS endpoints are verified with the server\'s CA certificates.'),
+        adminField('Endpoint', endpoint, h('span', {},
+            `The S3 server, in this environment or an external one. Allowed endpoints: ${s3AllowlistText(allowlist)}. `,
+            can_allow ? 'Another endpoint is added to the allowed endpoints with this destination. '
+                : 'To use another endpoint, a backup administrator allows it under Allowed endpoints on the Destinations tab. ',
+            allowlist.invalid.length ? `Invalid entries of the server configuration are ignored: ${allowlist.invalid.join(', ')}. ` : '',
+            'The server connects to it directly, and verifies HTTPS certificates with its CA certificates.', suggestions)),
         adminField('Bucket', bucket), adminField('Access key ID', access_key, existing ? 'Leave empty to keep the stored credentials.' : null),
         adminField('Secret access key', secret_key, 'Stored in a named collection on the server; never shown again.'),
         adminField('Worker credential reference', credential_ref, 'The prefix of the environment variables with the credentials the backup worker uses to list and delete artifacts (PREFIX_ACCESS_KEY_ID, PREFIX_SECRET_ACCESS_KEY).'));
@@ -6246,14 +6451,26 @@ async function destinationDialog(state, existing) {
             test_result: existing ? existing.test_result : '', tested_at: existing && existing.tested_at ? existing.tested_at : null};
         const steps = [];
         const secrets = [];
+        let allow_warning = null;
         if (type.value === 'disk') {
             if (!disk.value) return 'Choose a disk.';
             row.disk = disk.value;
         } else {
-            if (!endpoint.value || !endpoints.includes(endpoint.value)) return 'Choose an endpoint allowed by the server configuration.';
+            let checked = existing ? {origin: existing.endpoint} : checkS3Endpoint(endpoint.value, allowlist);
+            if (checked.error && checked.allowable && can_allow) {
+                /// Allowed by the user, in the same change: a separate, audited step of the plan.
+                const origin = parseEndpoint(endpoint.value).origin;
+                steps.push(endpointRowStep(origin, `Allowed with the destination ${name.value.trim()}`, `Allow the S3 endpoint ${origin} for backup destinations`));
+                allow_warning = `${origin} becomes an allowed endpoint: backup administrators can then point destinations at it, and the server will connect to it. `
+                    + 'Remove it under Allowed endpoints when it is no longer needed.';
+                checked = {origin};
+            }
+            if (checked.error) {
+                return `Endpoint: ${checked.error}${checked.allowable ? ` To allow it, you need SELECT and INSERT on ${session.admin.db}.backup_endpoints${session.admin.can.read_endpoints ? '' : ' (set up under Allowed endpoints on the Destinations tab)'}, or a server administrator adds it to web_console.backup_s3_endpoints.` : ''}`;
+            }
             if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket.value.trim())) return 'Enter a valid bucket name (lowercase letters, digits, dots, hyphens).';
             if (credential_ref.value && !/^[A-Z][A-Z0-9_]{0,63}$/.test(credential_ref.value)) return 'The credential reference is an environment variable prefix: uppercase letters, digits, and underscores.';
-            row.endpoint = endpoint.value;
+            row.endpoint = checked.origin;
             row.bucket = bucket.value.trim();
             row.allow_http = row.endpoint.startsWith('http:');
             row.credential_ref = credential_ref.value;
@@ -6270,7 +6487,8 @@ async function destinationDialog(state, existing) {
         steps.push(destinationRowStep(row, existing ? `Update destination ${row.name}` : `Record destination ${row.name} (disabled until tested)`));
         return {action: existing ? 'edit_backup_destination' : 'create_backup_destination', target_type: 'backup_destination', target_name: row.name,
             summary: `${existing ? 'Edit' : 'Add'} backup destination ${row.name}`, steps, local_only: true,
-            warning: row.allow_http ? 'This endpoint uses unencrypted HTTP: data and credentials travel in clear text. Use it only on a trusted network.' : null,
+            warning: [allow_warning, row.allow_http ? 'This endpoint uses unencrypted HTTP: data and credentials travel in clear text. Use it only on a trusted network.' : null]
+                .filter(Boolean).join(' ') || null,
             recovery: 'The named collection exists without a destination record: add the destination again with the same name, or drop the collection.'};
     });
 }
