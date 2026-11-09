@@ -625,6 +625,7 @@ const ICONS = {
     switch: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
     users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6.5 6.5 0 0 1 3.5 6"/>',
     roles: '<path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+    datapolicy: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11M15 9v11"/><path d="M12 13.5l1.2 1.2 2.3-2.4"/>',
     access: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M15 17.5l2 2 4-4"/>',
     limits: '<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6M4 18h16"/>',
     audit: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v2h6V3M9 10h6M9 14h6M9 18h3"/>',
@@ -741,6 +742,9 @@ const COMPONENTS = [
     {id: 'admin-roles', category: 'administration', kind: 'admin', title: 'Roles & Permissions', icon: 'roles', page: 'roles',
      admin_needs: ['read_roles'],
      description: 'Roles, scoped privileges, role assignments, and role templates.'},
+    {id: 'admin-data-access', category: 'administration', kind: 'admin', title: 'Data Access Policies', icon: 'datapolicy', page: 'dataaccess',
+     admin_needs: ['read_grants'],
+     description: 'Column permissions, row policies, effective access, attribute-driven rules, deployments, and access tests.'},
     {id: 'admin-access', category: 'administration', kind: 'admin', title: 'Component Access', icon: 'access', page: 'access',
      admin_needs: ['write_policy', 'setup'],
      description: 'Which console components each role or user can open, and their native privileges.'},
@@ -2427,6 +2431,14 @@ function adminChecks(db) {
         read_clusters: read('system.clusters'),
         read_processes: read('system.processes'),
         read_audit: db ? read(table('audit_log')) : null,
+        read_row_policies: read('system.row_policies'),
+        read_dap: db ? read(...Object.keys(DAP_TABLES).map(table)) : null,
+        write_dap_attributes: db ? grant(`INSERT ON ${table('dap_attributes')}`) : null,
+        write_dap_values: db ? grant(`INSERT ON ${table('dap_user_attributes')}`) : null,
+        write_dap_classifications: db ? grant(`INSERT ON ${table('dap_classifications')}`) : null,
+        write_dap_rules: db ? grant(`INSERT ON ${table('dap_rules')}`) : null,
+        write_dap_deploy: db ? grant(`INSERT ON ${table('dap_owned')}`) : null,
+        write_dap_tests: db ? grant(`INSERT ON ${table('dap_access_tests')}`) : null,
         read_policy: db ? read(table('component_policy')) : null,
         read_protected: db ? read(table('protected_accounts')) : null,
         write_audit: db ? grant(`INSERT ON ${table('audit_log')}`) : null,
@@ -2651,6 +2663,7 @@ for (const c of COMPONENTS.filter(c => c.kind === 'link')) {
 const ADMIN_NATIVE = {
     'admin-users': 'SHOW USERS to read; CREATE USER, ALTER USER, DROP USER (possibly limited to name patterns) to change',
     'admin-roles': 'SHOW ROLES and SELECT on system.grants to read; CREATE ROLE, GRANT with the grant or admin option to change',
+    'admin-data-access': 'SELECT on system.grants, system.role_grants, and system.row_policies to read; GRANT with the grant option, CREATE ROW POLICY, and IMPERSONATE (for verification) to act',
     'admin-limits': 'SHOW SETTINGS PROFILES and SHOW QUOTAS to read; CREATE, ALTER, DROP SETTINGS PROFILE and QUOTA to change',
     'admin-audit': 'SELECT on the console audit log and on system.query_log',
     'admin-backups': 'SELECT on the backup tables to read; BACKUP, READ and WRITE on the destinations, and INSERT on the backup tables to act',
@@ -3099,7 +3112,7 @@ async function loadInto(page, container, load, render) {
     try {
         const data = await load();
         if (!isCurrent(page)) return;
-        container.replaceChildren(...[].concat(render(data)).filter(Boolean));
+        container.replaceChildren(...[render(data)].flat(Infinity).filter(Boolean));
     } catch (e) {
         if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
         container.replaceChildren(errorBox(e));
@@ -5402,11 +5415,11 @@ async function quotaDialog(existing) {
 
 /// --- Administration: Audit Activity ---
 
-const AUDIT_TABS = [['console', 'Console actions'], ['server', 'Access changes seen by the server']];
+const AUDIT_TABS = [['console', 'Console actions'], ['server', 'Access changes seen by the server'], ['decisions', 'Access decisions']];
 
 /// Access-management statements, recognized by their first words (`ALTER USER` is logged with the query
 /// kind `Create`, so the kind alone does not identify them).
-const ACCESS_STATEMENT_REGEXP = '(?i)^[[:space:]]*((CREATE|ALTER|DROP)[[:space:]]+(USER|ROLE|QUOTA|SETTINGS[[:space:]]+PROFILE|PROFILE|ROW[[:space:]]+POLICY|POLICY|MASKING[[:space:]]+POLICY)|GRANT|REVOKE|SET[[:space:]]+DEFAULT[[:space:]]+ROLE)[[:space:]]';
+const ACCESS_STATEMENT_REGEXP = '(?i)^[[:space:]]*(EXECUTE[[:space:]]+AS[[:space:]]+[^[:space:]]+[[:space:]]+)?((CREATE|ALTER|DROP)[[:space:]]+(USER|ROLE|QUOTA|SETTINGS[[:space:]]+PROFILE|PROFILE|ROW[[:space:]]+POLICY|POLICY|MASKING[[:space:]]+POLICY)|GRANT|REVOKE|SET[[:space:]]+DEFAULT[[:space:]]+ROLE)[[:space:]]';
 
 async function loadAudit(filter) {
     return adminRows(`SELECT formatDateTime(event_time, '%Y-%m-%d %H:%i:%S', 'UTC') AS time, actor, server_host, toString(correlation_id) AS correlation_id,
@@ -5430,6 +5443,35 @@ async function loadServerChanges(filter) {
             AND ({q:String} = '' OR positionCaseInsensitive(query, {q:String}) > 0 OR positionCaseInsensitive(user, {q:String}) > 0)
         ORDER BY event_time DESC LIMIT 500`,
     {days: filter.days || 7, q: filter.q || '', pattern: ACCESS_STATEMENT_REGEXP});
+}
+
+/// Query-time authorization decisions, kept apart from administrative changes: reads the server refused
+/// (ACCESS_DENIED in system.query_log, with literals replaced by `normalizeQuery`, so values typed in a query
+/// are not shown), and the runs of approved access tests.
+async function loadDecisions(filter) {
+    const denied = await adminRows(`SELECT formatDateTime(event_time, '%Y-%m-%d %H:%i:%S', 'UTC') AS time, user, normalizeQuery(query) AS query,
+            extract(exception, 'necessary to have the grant ([^.]+)') AS needed, 'server' AS kind
+        FROM system.query_log
+        WHERE event_date >= toDate(now() - toIntervalDay({days:UInt32})) AND event_time >= now() - toIntervalDay({days:UInt32})
+            AND type IN ('ExceptionBeforeStart', 'ExceptionWhileProcessing') AND exception_code = 497
+            AND ({q:String} = '' OR positionCaseInsensitive(user, {q:String}) > 0 OR positionCaseInsensitive(query, {q:String}) > 0)
+        ORDER BY event_time DESC LIMIT 500`, {days: filter.days || 7, q: filter.q || ''});
+    const tests = session.admin.can.read_dap ? await adminRows(`SELECT formatDateTime(ran_at, '%Y-%m-%d %H:%i:%S', 'UTC') AS time, user_name AS user,
+            concat('access test ', test_id, ' run by ', ran_by) AS query, concat(toString(outcome), ': ', observed) AS needed, 'test' AS kind
+        FROM ${quoteIdentifier(session.admin.db)}.dap_test_runs
+        WHERE ran_at >= now64(3) - toIntervalDay({days:UInt32}) AND ({q:String} = '' OR positionCaseInsensitive(user_name, {q:String}) > 0)
+        ORDER BY ran_at DESC LIMIT 500`, {days: filter.days || 7, q: filter.q || ''}) : [];
+    return [...denied, ...tests].sort((a, b) => b.time.localeCompare(a.time));
+}
+
+function decisionsTable(rows) {
+    return dataTable([
+        {title: 'Time (UTC)', render: r => r.time},
+        {title: 'User', render: r => r.user},
+        {title: 'Decision', render: r => r.kind === 'server' ? badge('Denied', 'bad') : badge('Access test', r.needed.startsWith('pass') ? 'ok' : 'bad')},
+        {title: 'Query or test', render: r => h('code', {}, r.query)},
+        {title: 'Missing privilege or result', render: r => r.needed},
+    ], rows, 'No decisions in this period.', 'Access decisions');
 }
 
 const RESULT_BADGES = {success: ['Success', 'ok'], failure: ['Failed', 'bad'], partial: ['Partly applied', 'bad']};
@@ -5485,12 +5527,16 @@ ADMIN_PAGES.audit = (root, route, page) => {
         ? 'Actions taken in this console, written by the console after each change (by every console session that can write the log). Changes made with SQL '
             + 'directly or by other tools are not here: see the other tab. The actor, time, and server are filled in by the server. The records are in an '
             + `ordinary table (${admin.db}.audit_log) on ${session.hostname}: users with ALTER, TRUNCATE, or DROP on it can change or remove them, so it is not tamper-proof.`
+        : tab === 'decisions' ? `Reads refused by the server (ACCESS_DENIED) in system.query_log of ${session.hostname}, with the literals of the queries replaced by ?, `
+            + 'and the runs of access tests. These are query-time decisions; the other tabs record administrative changes. Readable by users with SELECT on '
+            + 'system.query_log (and on the access test runs); kept as long as the query_log retention and 365 days for test runs.'
         : `CREATE, ALTER, DROP of users, roles, profiles, quotas, and policies, GRANT, and REVOKE, from system.query_log of ${session.hostname}, including rejected `
             + 'attempts. Statements made in this console carry its correlation ID. Not covered: other servers of a cluster (each has its own log), users or sessions '
             + 'with log_queries disabled, changes to configuration files, and anything older than the query_log retention. The server masks passwords in the log. '
             + 'The log is flushed every few seconds, so the newest statements can be missing.';
     const load = () => {
         if (tab === 'console') loadInto(page, results, () => loadAudit({q: q.value.trim(), days: Number(days.value), result: result.value}), auditTable);
+        else if (tab === 'decisions') loadInto(page, results, () => loadDecisions({q: q.value.trim(), days: Number(days.value)}), decisionsTable);
         else loadInto(page, results, () => loadServerChanges({q: q.value.trim(), days: Number(days.value)}), serverChangesTable);
     };
     let timer = null;
@@ -5506,6 +5552,1786 @@ ADMIN_PAGES.audit = (root, route, page) => {
             : 'Not available: your user cannot read system.query_log.')));
     if (available) load();
 };
+
+/// --- Administration: Data Access Policies, access model ---
+
+/// The functions of this section are pure: they read rows of the system tables and of the console tables and
+/// return explanations or plans, without queries or DOM. The access policy worker
+/// (`utils/web-console/access_policy_worker.mjs`) loads them, with `quoteIdentifier`, `quoteString`, and
+/// `roleClosure`, from this file by name, so that the console and the worker compute the same desired state.
+/// Keep them free of browser APIs.
+
+/// Names of the entities generated by policy rules start with this prefix, followed by the first 8 characters
+/// of the rule ID: the prefix marks them for people; the ownership table `dap_owned` is what the console trusts.
+const DAP_PREFIX = 'dap_';
+
+/// Attribute values that disable an identity for every rule, whatever its selector.
+const DAP_DISABLED_STATUSES = ['disabled', 'suspended', 'terminated', 'inactive'];
+
+function dapGrantLevel(row) {
+    if (row.database === null) return 'global';
+    if (row.table === null || row.table === '') return 'database';
+    if (row.column === null) return 'table';
+    return 'column';
+}
+
+/// Whether a row of `system.grants` is about `access` (or a group containing it) on `column` of `database.table`.
+function dapGrantCovers(row, names, database, table, column) {
+    return names.includes(row.access_type) && (row.database === null || row.database === database)
+        && (row.table === null || row.table === table) && (row.column === null || row.column === column);
+}
+
+/// The grantees whose privileges a user has: the user itself, then each role granted to it directly or through
+/// other roles. `active` tells whether the grantee's privileges apply at login (the user itself, or a chain that
+/// starts with a default role); the others apply only after `SET ROLE`.
+function dapGrantees(role_grants, subject) {
+    const self = {type: subject.type, name: subject.name, path: [], active: true};
+    return [self, ...roleClosure(role_grants, subject).map(item => ({type: 'role', name: item.role, path: item.path,
+        active: subject.type === 'role' || item.is_default}))];
+}
+
+/// How each column of `database.table` is accessible to a user or role, from `system.grants`. A partial revoke
+/// removes a privilege only from the grants of the same grantee, as in the server: a revoke on the user does not
+/// remove what a role gives. Returns per column the grants that give it, with their level and the role path.
+/// This is the configured entitlement, an estimate from the grant tables; `EXECUTE AS ... CHECK GRANT` and the
+/// access tests verify it.
+function dapColumnAccess(grants, role_grants, tree, subject, access, database, table, columns) {
+    const names = tree.ancestors(access);
+    const grantees = dapGrantees(role_grants, subject);
+    return columns.map(column => {
+        const sources = [];
+        for (const grantee of grantees) {
+            const rows = grants.filter(row => (grantee.type === 'user' ? row.user_name === grantee.name : row.role_name === grantee.name)
+                && dapGrantCovers(row, names, database, table, column));
+            const revoked = rows.some(row => row.is_partial_revoke);
+            for (const row of rows.filter(row => !row.is_partial_revoke)) {
+                sources.push({grantee, row, level: dapGrantLevel(row), revoked});
+            }
+        }
+        const effective = sources.filter(s => !s.revoked);
+        return {column, sources, allowed_at_login: effective.some(s => s.grantee.active), allowed_with_roles: effective.length > 0,
+            broad: effective.filter(s => s.level !== 'column')};
+    });
+}
+
+/// Whether a row policy applies to a user with the given enabled roles (`RolesOrUsersSet::match`).
+function dapPolicyApplies(policy, user, roles) {
+    const names = [user, ...roles];
+    if (policy.apply_to_all) return !names.some(name => policy.apply_to_except.includes(name));
+    return names.some(name => policy.apply_to_list.includes(name));
+}
+
+/// The row filter a user gets on `database.table`, from `system.row_policies`: table policies and database
+/// policies (`ON db.*`) together, permissive ones joined with OR, restrictive ones with AND. `unmatched_reads`
+/// is the server setting `access_control_improvements.users_without_row_policies_can_read_rows`: SQL cannot
+/// read it, so the caller states which value it assumes.
+function dapRowFilter(policies, database, table, user, roles, unmatched_reads = true) {
+    const relevant = policies.filter(p => p.database === database && (p.table === table || p.table === '' || p.table === null));
+    const applying = relevant.filter(p => dapPolicyApplies(p, user, roles));
+    const permissive = applying.filter(p => !p.is_restrictive);
+    const restrictive = applying.filter(p => p.is_restrictive);
+    const wrap = list => list.map(p => `(${p.select_filter})`);
+    let text;
+    let outcome;
+    if (!applying.length) {
+        if (!relevant.length) {
+            outcome = 'no-policies';
+            text = 'No row policy exists on this table: every row is visible.';
+        } else if (unmatched_reads) {
+            outcome = 'unmatched-all';
+            text = 'Policies exist on this table, but none applies to this user: every row is visible '
+                + '(access_control_improvements.users_without_row_policies_can_read_rows, enabled by default).';
+        } else {
+            outcome = 'unmatched-none';
+            text = 'Policies exist on this table, but none applies to this user: no row is visible.';
+        }
+    } else {
+        const parts = [];
+        if (permissive.length) parts.push(permissive.length > 1 ? `(${wrap(permissive).join(' OR ')})` : wrap(permissive)[0]);
+        else if (!unmatched_reads) parts.push('0');
+        parts.push(...wrap(restrictive));
+        outcome = 'filtered';
+        text = parts.join(' AND ');
+    }
+    return {outcome, text, permissive, restrictive, relevant};
+}
+
+/// --- Policy rules ---
+
+/// A rule is stored as a JSON spec in `dap_rules`, one row per revision:
+/// - `kind`: `role_membership` (grant an existing role), `row_filter` (a row policy per attribute value), or
+///   `column_clearance` (a generated role with SELECT on the columns classified with a label).
+/// - `selector`: conditions on user attributes, all of which must hold: `[{attribute, values}]`.
+/// - `on_stale`: `revoke` (a stale or missing attribute removes what the rule gave) or `keep` (what was already
+///   provisioned stays until the attribute is fresh again; nothing new is provisioned from a stale value).
+/// - `exceptions`: users the rule never provisions, for an entitlement revoked on purpose.
+/// - kind fields: `role`; `database`, `table`, `column`, `attribute`; `label`, `attribute`, `values`.
+
+function dapRuleShort(rule_id) {
+    return rule_id.replace(/-/g, '').slice(0, 8);
+}
+
+/// A stable short name for an attribute value, for the name of its row policy.
+function dapValueKey(value) {
+    let hash = 2166136261;
+    for (const ch of new TextEncoder().encode(value)) hash = Math.imul(hash ^ ch, 16777619) >>> 0;
+    return hash.toString(16).padStart(8, '0');
+}
+
+/// The current value of each attribute of each user, with whether it is fresh: `{user: {attribute: {value,
+/// source, observed_at, stale, reason}}}`. `now` is seconds since the epoch.
+function dapAttributeIndex(values, definitions, now) {
+    const defs = new Map(definitions.map(d => [d.attribute, d]));
+    const index = {};
+    for (const row of values) {
+        const def = defs.get(row.attribute);
+        const age = now - row.observed_at;
+        let stale = false;
+        let reason = '';
+        if (!def) {
+            stale = true;
+            reason = 'The attribute is not defined.';
+        } else if (row.source !== def.source) {
+            stale = true;
+            reason = `Reported by ${row.source}, but its source is ${def.source}.`;
+        } else if (def.writer && row.updated_by !== def.writer) {
+            /// `updated_by` is filled in by the server: only the writer of the definition is trusted.
+            stale = true;
+            reason = `Written by ${row.updated_by}, but only ${def.writer} writes ${row.attribute}.`;
+        } else if (def.max_age_seconds && age > def.max_age_seconds) {
+            stale = true;
+            reason = `Last confirmed ${Math.round(age)} s ago; the limit is ${def.max_age_seconds} s.`;
+        }
+        (index[row.user_name] = index[row.user_name] || {})[row.attribute] = {value: row.value, source: row.source, observed_at: row.observed_at, stale, reason};
+    }
+    return index;
+}
+
+/// Why a rule cannot be represented by native controls, or null. Native grants and row policies are evaluated
+/// with the identity and its roles only; attributes of the request (purpose, device, time, network) change per
+/// query, so a rule on them would become a permanent grant, which is refused rather than approximated.
+function dapRuleProblem(spec, definitions) {
+    const defs = new Map(definitions.map(d => [d.attribute, d]));
+    const attributes = [...(spec.selector || []).map(c => c.attribute), spec.attribute].filter(Boolean);
+    for (const attribute of attributes) {
+        const def = defs.get(attribute);
+        if (!def) return `The attribute ${attribute} is not defined.`;
+        if (def.dynamic) return `The attribute ${attribute} is evaluated per request (${def.category}): native grants and row policies cannot follow it. See "Dynamic access and masking".`;
+        if (def.category !== 'user') return `The attribute ${attribute} describes a ${def.category}, not a user: only user attributes select users.`;
+    }
+    if (spec.kind === 'role_membership' && !spec.role) return 'Choose the role to grant.';
+    if (spec.kind === 'row_filter' && !(spec.database && spec.table && spec.column && spec.attribute)) return 'Choose the table, the column, and the attribute that gives its value.';
+    if (spec.kind === 'column_clearance' && !(spec.label && spec.attribute && (spec.values || []).length)) return 'Choose the label, the clearance attribute, and the values that clear it.';
+    if (!['role_membership', 'row_filter', 'column_clearance'].includes(spec.kind)) return `Unknown rule kind ${spec.kind}.`;
+    return null;
+}
+
+/// The users a rule selects: `matched` (with their attribute values), and `excluded` with the reason. A user is
+/// excluded when disabled (the `employment_status` attribute), listed in the exceptions, failing the selector,
+/// or when an attribute the rule needs is missing or stale: then `hold` is true when the rule keeps what was
+/// already provisioned (`on_stale: keep`). `in_scope` users get the policy that shows no row of a row filter
+/// rule: a disabled identity can still sign in with its own credentials, and without any policy it would see
+/// every row it has SELECT on, more than while it was active.
+function dapSelectUsers(spec, users, index) {
+    const matched = [];
+    const excluded = [];
+    const needed = [...(spec.selector || []).map(c => c.attribute), spec.attribute].filter(Boolean);
+    for (const user of users) {
+        const attrs = index[user] || {};
+        const status = attrs.employment_status;
+        if (status && !status.stale && DAP_DISABLED_STATUSES.includes(status.value)) {
+            excluded.push({user, reason: `Disabled identity (employment_status ${status.value}).`, hold: false, in_scope: true});
+            continue;
+        }
+        if ((spec.exceptions || []).includes(user)) {
+            excluded.push({user, reason: 'Listed in the exceptions of the rule.', hold: false});
+            continue;
+        }
+        const missing = needed.filter(a => !attrs[a]);
+        const stale = needed.filter(a => attrs[a] && attrs[a].stale);
+        /// A user without any of the selector's attributes is simply not in scope.
+        const selector_known = (spec.selector || []).every(c => attrs[c.attribute] && !attrs[c.attribute].stale);
+        const selector_holds = selector_known && (spec.selector || []).every(c => c.values.includes(attrs[c.attribute].value));
+        if (selector_known && !selector_holds) continue;
+        if (!selector_known && (spec.selector || []).every(c => !attrs[c.attribute])) continue;
+        if (missing.length || stale.length) {
+            const reason = [missing.length ? `missing ${missing.join(', ')}` : '', ...stale.map(a => `${a} stale: ${attrs[a].reason.replace(/\.$/, '')}`)].filter(Boolean).join('; ');
+            /// What was provisioned from the last known values is held only when every value is still known.
+            const hold = spec.on_stale === 'keep' && !missing.length;
+            excluded.push({user, reason: `In scope, but ${reason}.`, hold, in_scope: true,
+                values: hold ? Object.fromEntries(needed.map(a => [a, attrs[a].value])) : null});
+            continue;
+        }
+        matched.push({user, values: Object.fromEntries(needed.map(a => [a, attrs[a].value]))});
+    }
+    return {matched, excluded};
+}
+
+/// The entities a rule needs: `{key, kind, ...}` keyed for the ownership table. `owned` (keys this rule already
+/// owns) lets `on_stale: keep` hold what was provisioned for users whose attributes are stale.
+function dapRuleEntities(rule, users, index, classifications, owned) {
+    const spec = rule.spec;
+    const short = dapRuleShort(rule.rule_id);
+    const {matched, excluded} = dapSelectUsers(spec, users, index);
+    const held_entries = excluded.filter(e => e.hold);
+    const held = held_entries.map(e => e.user);
+    const entities = [];
+    const notes = [];
+    if (spec.kind === 'role_membership') {
+        const grantees = [...matched.map(m => m.user), ...held.filter(user => owned.has(`role_grant:${spec.role}:${user}`))];
+        for (const user of grantees) entities.push({key: `role_grant:${spec.role}:${user}`, kind: 'role_grant', role: spec.role, user});
+    } else if (spec.kind === 'row_filter') {
+        const by_value = new Map();
+        const add = (value, user) => by_value.set(value, [...(by_value.get(value) || []), user]);
+        for (const m of matched) add(m.values[spec.attribute], m.user);
+        /// A held user keeps the policy of its last known value, if the rule provisioned it.
+        for (const e of held_entries) {
+            const value = e.values[spec.attribute];
+            if (owned.has(`row_policy:${DAP_PREFIX}${short}_${dapValueKey(value)}:${spec.database}.${spec.table}`)) {
+                add(value, e.user);
+                notes.push(`${e.user}: kept in the policy for ${value} (on_stale keep): ${e.reason}`);
+            }
+        }
+        /// Fail closed: a user in scope whose attribute is missing or stale gets a policy that shows no row,
+        /// because without any policy the user would see every row.
+        const closed = excluded.filter(e => e.in_scope && !e.hold).map(e => e.user);
+        const policy = (name, filter, targets, value) => ({key: `row_policy:${name}:${spec.database}.${spec.table}`, kind: 'row_policy', name,
+            database: spec.database, table: spec.table, filter, users: targets.slice().sort(), value});
+        for (const [value, targets] of [...by_value.entries()].sort()) {
+            entities.push(policy(`${DAP_PREFIX}${short}_${dapValueKey(value)}`, `${quoteIdentifier(spec.column)} = ${quoteString(value)}`, targets, value));
+        }
+        const unprovisioned_held = held_entries.filter(e => !by_value.get(e.values[spec.attribute])?.includes(e.user)).map(e => e.user);
+        if (closed.length || unprovisioned_held.length) entities.push(policy(`${DAP_PREFIX}${short}_none`, '0', [...closed, ...unprovisioned_held], null));
+    } else if (spec.kind === 'column_clearance') {
+        const role = `${DAP_PREFIX}${short}_cleared`;
+        entities.push({key: `role:${role}`, kind: 'role', role});
+        for (const c of classifications.filter(c => c.label === spec.label)) {
+            entities.push({key: `grant:${role}:${c.database}.${c.table}(${c.column})`, kind: 'grant', role, access: 'SELECT', database: c.database, table: c.table, column: c.column});
+        }
+        const cleared = matched.filter(m => spec.values.includes(m.values[spec.attribute])).map(m => m.user);
+        const kept = held_entries.filter(e => spec.values.includes(e.values[spec.attribute]) && owned.has(`role_grant:${role}:${e.user}`)).map(e => e.user);
+        for (const user of [...cleared, ...kept]) entities.push({key: `role_grant:${role}:${user}`, kind: 'role_grant', role, user});
+        if (!classifications.some(c => c.label === spec.label)) notes.push(`No column is classified ${spec.label}: the role gets no privilege.`);
+    }
+    return {entities, matched, excluded, notes};
+}
+
+/// The state of the entities on the server, from the system tables, keyed like `dapRuleEntities`.
+function dapObservedKeys(observed) {
+    const keys = new Map();
+    for (const role of observed.roles) keys.set(`role:${role.name}`, {kind: 'role'});
+    for (const row of observed.role_grants.filter(row => row.user_name !== null)) keys.set(`role_grant:${row.granted_role_name}:${row.user_name}`, {kind: 'role_grant'});
+    for (const row of observed.grants.filter(row => row.role_name !== null && !row.is_partial_revoke && row.column !== null)) {
+        keys.set(`grant:${row.role_name}:${row.database}.${row.table}(${row.column})`, {kind: 'grant', access: row.access_type});
+    }
+    for (const p of observed.policies) {
+        keys.set(`row_policy:${p.short_name}:${p.database}.${p.table}`, {kind: 'row_policy', filter: p.select_filter, users: p.apply_to_list.slice().sort(),
+            all: p.apply_to_all, restrictive: p.is_restrictive});
+    }
+    return keys;
+}
+
+function dapCluster(scope) {
+    return scope ? ` ON CLUSTER ${quoteIdentifier(scope)}` : '';
+}
+
+/// The statements that bring the server to the desired state of all enabled rules. Only entities the platform
+/// owns are changed or removed: an entity that exists but is not owned is reported and left alone, and an owned
+/// entity that was removed outside the platform is reported as drift and restored only when `restore` is set,
+/// so that reconciliation does not silently undo a deliberate revocation.
+/// `owned`: `[{rule_id, key}]` of `dap_owned`. Returns `{steps, conflicts, drift, removed_outside}`.
+function dapPlan(desired, observed, owned, scope, restore = false) {
+    const have = dapObservedKeys(observed);
+    const owned_keys = new Set(owned.map(o => o.key));
+    const want = new Map();
+    for (const {rule, entities} of desired) {
+        for (const e of entities) {
+            const existing = want.get(e.key);
+            if (existing && e.kind === 'row_policy') existing.users = [...new Set([...existing.users, ...e.users])].sort();
+            else if (!existing) want.set(e.key, {...e, rule_id: rule.rule_id});
+        }
+    }
+    const steps = [];
+    const conflicts = [];
+    const removed_outside = [];
+    const on = dapCluster(scope);
+    const policy_sql = e => `CREATE ROW POLICY OR REPLACE ${quoteIdentifier(e.name)}${on} ON ${quoteIdentifier(e.database)}.${quoteIdentifier(e.table)} `
+        + `USING ${e.filter} AS permissive TO ${e.users.map(quoteIdentifier).join(', ')}`;
+    const order = {role: 0, grant: 1, role_grant: 2, row_policy: 3};
+    for (const e of [...want.values()].sort((a, b) => order[a.kind] - order[b.kind] || a.key.localeCompare(b.key))) {
+        const current = have.get(e.key);
+        const mine = owned_keys.has(e.key);
+        if (current && !mine) {
+            conflicts.push(e.kind === 'role_grant'
+                ? {key: e.key, rule_id: e.rule_id, kind: 'granted-outside', message: `${e.user} already has the role ${e.role} through a grant made outside the platform: `
+                    + 'it is left alone, and stays when the rule no longer applies.'}
+                : {key: e.key, rule_id: e.rule_id, kind: 'exists-not-owned', message: `${e.key} exists but was not created by the platform: it is not changed. `
+                    + 'Remove or rename it, then deploy again.'});
+            continue;
+        }
+        if (!current && mine && !restore) {
+            removed_outside.push({key: e.key, rule_id: e.rule_id, message: `${e.key} was created by the platform and removed outside of it. It is not restored unless you choose to restore removed entities; to revoke it on purpose, add an exception to the rule.`});
+            continue;
+        }
+        if (e.kind === 'row_policy' && current) {
+            /// The server stores the filter as it formats it, with backquotes only where needed.
+            const plain = filter => String(filter).replace(/`([A-Za-z_][A-Za-z0-9_]*)`/g, '$1').replace(/\s+/g, ' ').trim();
+            const same = plain(current.filter) === plain(e.filter) && !current.all && !current.restrictive && JSON.stringify(current.users) === JSON.stringify(e.users);
+            if (!same) steps.push({op: 'update', key: e.key, rule_id: e.rule_id, description: `Update the row policy ${e.name} on ${e.database}.${e.table}: ${e.filter}, for ${e.users.join(', ')}`, sql: policy_sql(e)});
+            continue;
+        }
+        if (current) continue;
+        const create = {
+            role: () => [`Create the role ${e.role}`, `CREATE ROLE IF NOT EXISTS ${quoteIdentifier(e.role)}${on}`],
+            grant: () => [`Grant ${e.access}(${e.column}) ON ${e.database}.${e.table} to ${e.role}`,
+                `GRANT${on} ${e.access}(${quoteIdentifier(e.column)}) ON ${quoteIdentifier(e.database)}.${quoteIdentifier(e.table)} TO ${quoteIdentifier(e.role)}`],
+            role_grant: () => [`Grant the role ${e.role} to ${e.user}`, `GRANT${on} ${quoteIdentifier(e.role)} TO ${quoteIdentifier(e.user)}`],
+            row_policy: () => [`Create the row policy ${e.name} on ${e.database}.${e.table}: ${e.filter}, for ${e.users.join(', ')}`, policy_sql(e)],
+        }[e.kind]();
+        steps.push({op: 'create', key: e.key, rule_id: e.rule_id, description: create[0], sql: create[1]});
+    }
+    /// Owned entities that no rule wants any more, in reverse order: memberships before privileges before roles.
+    const drop_order = {row_policy: 0, role_grant: 1, grant: 2, role: 3};
+    const obsolete = [...new Map(owned.filter(o => !want.has(o.key)).map(o => [o.key, o])).values()]
+        .sort((a, b) => drop_order[a.key.split(':')[0]] - drop_order[b.key.split(':')[0]] || a.key.localeCompare(b.key));
+    for (const o of obsolete) {
+        if (!have.has(o.key)) {
+            steps.push({op: 'forget', key: o.key, rule_id: o.rule_id, description: `Forget ${o.key}: it no longer exists`, sql: null});
+            continue;
+        }
+        const [kind, ...rest] = o.key.split(':');
+        const drop = {
+            role: () => [`Drop the role ${rest[0]}`, `DROP ROLE IF EXISTS ${quoteIdentifier(rest[0])}${on}`],
+            grant: () => {
+                const match = rest.slice(1).join(':').match(/^(.*)\.(.*)\((.*)\)$/);
+                return [`Revoke SELECT(${match[3]}) ON ${match[1]}.${match[2]} from ${rest[0]}`,
+                    `REVOKE${on} SELECT(${quoteIdentifier(match[3])}) ON ${quoteIdentifier(match[1])}.${quoteIdentifier(match[2])} FROM ${quoteIdentifier(rest[0])}`];
+            },
+            role_grant: () => [`Revoke the role ${rest[0]} from ${rest[1]}`, `REVOKE${on} ${quoteIdentifier(rest[0])} FROM ${quoteIdentifier(rest[1])}`],
+            row_policy: () => {
+                const [database, table] = rest.slice(1).join(':').split('.');
+                return [`Drop the row policy ${rest[0]} on ${database}.${table}`, `DROP ROW POLICY IF EXISTS ${quoteIdentifier(rest[0])}${on} ON ${quoteIdentifier(database)}.${quoteIdentifier(table)}`];
+            },
+        }[kind]();
+        steps.push({op: 'remove', key: o.key, rule_id: o.rule_id, description: drop[0], sql: drop[1]});
+    }
+    return {steps, conflicts, removed_outside};
+}
+
+/// The desired entities of every enabled rule. Rules that native controls cannot represent are returned in
+/// `rejected` and contribute nothing.
+function dapDesired(rules, definitions, values, classifications, users, owned, now) {
+    const index = dapAttributeIndex(values, definitions, now);
+    const desired = [];
+    const rejected = [];
+    for (const rule of rules.filter(r => r.enabled && !r.deleted)) {
+        const problem = dapRuleProblem(rule.spec, definitions);
+        if (problem) {
+            rejected.push({rule, problem});
+            continue;
+        }
+        const owned_keys = new Set(owned.filter(o => o.rule_id === rule.rule_id).map(o => o.key));
+        desired.push({rule, ...dapRuleEntities(rule, users, index, classifications, owned_keys)});
+    }
+    return {desired, rejected, index};
+}
+
+/// --- Administration: Data Access Policies ---
+
+/// Five mechanisms, kept apart in the pages and the documentation:
+/// 1. Column permissions: native grants `SELECT(column)`, enforced by the server for every client.
+/// 2. Row policies: native `CREATE ROW POLICY`, a read filter enforced by the server.
+/// 3. Attribute-driven provisioning: policy rules translated into native grants, role memberships, and row
+///    policies, deployed and reconciled by the console and the access policy worker. Enforcement stays native;
+///    a change of an attribute takes effect when it is reconciled, not per query.
+/// 4. Dynamic, request-time ABAC: not provided. Native controls see only the identity and its roles; rules on
+///    request attributes are refused (see "Dynamic access and masking" in the documentation).
+/// 5. Column masking: native masking policies are refused by this build ("available only in ClickHouse Cloud");
+///    the console does not present views as masking policies.
+const DAP_TABS = [['columns', 'Column Permissions'], ['rows', 'Row Policies'], ['effective', 'Effective Access'], ['tests', 'Access Tests'],
+    ['attributes', 'Attributes & Classifications'], ['rules', 'Policy Rules'], ['deployments', 'Policy Deployments']];
+
+/// The console tables of the attribute-driven provisioning and of the access tests. Who wrote each row is filled
+/// in by the server, so the attribute values carry their real writer: a value is trusted only when it was
+/// written by the writer its definition names.
+const DAP_TABLES = {
+    dap_attributes: () => `(
+    attribute String,
+    category Enum8('user' = 1, 'resource' = 2, 'operation' = 3, 'environment' = 4),
+    dynamic Bool,
+    source String,
+    writer String,
+    owner String,
+    max_age_seconds UInt32,
+    description String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY attribute`,
+    dap_user_attributes: () => `(
+    user_name String,
+    attribute String,
+    value String,
+    source String,
+    observed_at DateTime('UTC'),
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY (user_name, attribute)`,
+    dap_classifications: () => `(
+    database String,
+    table String,
+    column String,
+    label LowCardinality(String),
+    source String,
+    owner String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY (database, table, column)`,
+    dap_rules: () => `(
+    rule_id String,
+    revision UInt32,
+    name String,
+    spec String,
+    enabled Bool,
+    deleted Bool DEFAULT false,
+    note String,
+    created_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    created_by String MATERIALIZED currentUser(),
+    CONSTRAINT created_by_is_writer CHECK created_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (rule_id, revision)`,
+    dap_owned: () => `(
+    key String,
+    rule_id String,
+    revision UInt32,
+    deployment_id String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY key`,
+    dap_deployments: () => `(
+    deployment_id String,
+    kind Enum8('deploy' = 1, 'reconcile' = 2, 'verify' = 3, 'adopt' = 4),
+    scope String,
+    rules String,
+    steps String,
+    result Enum8('success' = 1, 'failure' = 2, 'partial' = 3, 'no_change' = 4),
+    verification String,
+    created_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    created_by String MATERIALIZED currentUser(),
+    CONSTRAINT created_by_is_writer CHECK created_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY created_at`,
+    dap_access_tests: () => `(
+    test_id String,
+    name String,
+    user_name String,
+    database String,
+    table String,
+    columns Array(String),
+    expect Enum8('allowed' = 1, 'denied' = 2),
+    expected_rows Nullable(UInt64),
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY test_id`,
+    dap_test_runs: () => `(
+    run_id String,
+    test_id String,
+    user_name String,
+    outcome Enum8('pass' = 1, 'fail' = 2, 'error' = 3),
+    observed String,
+    path LowCardinality(String),
+    ran_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    ran_by String MATERIALIZED currentUser(),
+    CONSTRAINT ran_by_is_writer CHECK ran_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY ran_at
+TTL toDateTime(ran_at) + INTERVAL 365 DAY`,
+};
+
+function dapTable(name) {
+    return `${quoteIdentifier(session.admin.db)}.${quoteIdentifier(name)}`;
+}
+
+const POLICY_COLUMNS = 'name, short_name, database, table, storage, select_filter, is_restrictive, apply_to_all, apply_to_list, apply_to_except';
+
+/// Users, roles, grants, role grants, and row policies of this server, for the pure functions of the access model.
+async function dapLoadAccess() {
+    const [users, roles, role_grants, grants, policies, tree] = await Promise.all([
+        adminRows('SELECT name, storage FROM system.users ORDER BY name'),
+        adminRows('SELECT name, storage FROM system.roles ORDER BY name'),
+        loadRoleGrants(),
+        adminRows(`SELECT ${GRANT_COLUMNS} FROM system.grants`),
+        session.admin.can.read_row_policies ? adminRows(`SELECT ${POLICY_COLUMNS} FROM system.row_policies ORDER BY database, table, short_name`) : [],
+        loadPrivilegeTree(),
+    ]);
+    return {users, roles, role_grants, grants, policies, tree, observed_at: new Date().toISOString().slice(0, 19).replace('T', ' ')};
+}
+
+/// The roles enabled at login for a user: the closure of its default roles.
+function dapLoginRoles(role_grants, user) {
+    return roleClosure(role_grants, {type: 'user', name: user}).filter(item => item.is_default).map(item => item.role);
+}
+
+function dapAllRoles(role_grants, user) {
+    return roleClosure(role_grants, {type: 'user', name: user}).map(item => item.role);
+}
+
+function dapObjectPicker(databases, state, onchange) {
+    const database = select([['', 'Choose a database'], ...databases.map(d => [d, d])], state.database || '');
+    const table = select([['', 'Choose a table']], '');
+    const fill = async () => {
+        table.replaceChildren(h('option', {value: ''}, 'Choose a table'));
+        if (!database.value) return;
+        const rows = await adminRows('SELECT name FROM system.tables WHERE database = {db:String} AND NOT is_temporary ORDER BY name', {db: database.value});
+        table.replaceChildren(h('option', {value: ''}, 'Choose a table'), ...rows.map(row => h('option', {value: row.name, selected: row.name === state.table}, row.name)));
+    };
+    database.addEventListener('change', async () => {
+        state.database = database.value;
+        state.table = '';
+        await fill();
+        onchange();
+    });
+    table.addEventListener('change', () => {
+        state.table = table.value;
+        onchange();
+    });
+    const ready = fill();
+    return {database, table, ready};
+}
+
+async function dapDatabases() {
+    return (await adminRows(`SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') ORDER BY name`)).map(row => row.name);
+}
+
+/// The object chosen on the tabs of the page, kept while switching tabs.
+const dap_state = {database: '', table: '', user: '', column: ''};
+
+ADMIN_PAGES.dataaccess = (root, route, page) => {
+    const c = page.component;
+    const tab = DAP_TABS.some(([key]) => key === route.tab) ? route.tab : 'columns';
+    const panel = h('div', {className: 'admin-page'});
+    put(root, pageHeader(c, 'Data Access Policies', null, [scopeControl(), button('Refresh', reloadAdmin),
+        session.admin.can.read_audit ? h('a', {className: 'button', href: `${adminPath('admin-audit', null, 'console')}&q=dap_`, dataset: {route: ''}}, 'Audit records') : null]),
+        h('p', {className: 'note'}, 'Which columns and rows of tables each user can read, and why. Column permissions and row policies are enforced by the server for '
+            + 'every client: SQL Console, BI tools, drivers, and HTTP. Policy rules provision those native controls from user attributes; they are not evaluated '
+            + 'per query. Hiding a component in the console is not data authorization: only these server controls are.'),
+        tabList(c, null, DAP_TABS, tab), panel);
+    ({columns: renderColumnPermissions, rows: renderRowPolicies, effective: renderEffectiveAccess, tests: renderAccessTests,
+        attributes: renderAttributes, rules: renderPolicyRules, deployments: renderPolicyDeployments})[tab](panel, page);
+};
+
+/// --- Column Permissions ---
+
+const COLUMN_LEVEL_TEXT = {column: 'Column grant', table: 'Whole table', database: 'Whole database', global: 'Every database'};
+
+function renderColumnPermissions(panel, page) {
+    const results = h('div', {});
+    const load = () => {
+        if (!dap_state.database || !dap_state.table) {
+            results.replaceChildren(paragraph('Choose a table to see who can read each of its columns.'));
+            return;
+        }
+        loadInto(page, results, async () => {
+            const [access, columns, stale] = await Promise.all([dapLoadAccess(),
+                adminRows('SELECT name, type FROM system.columns WHERE database = {db:String} AND table = {t:String} ORDER BY position', {db: dap_state.database, t: dap_state.table}),
+                adminRows(`SELECT ${GRANT_COLUMNS} FROM system.grants WHERE column IS NOT NULL AND database = {db:String} AND table = {t:String}
+                    AND column NOT IN (SELECT name FROM system.columns WHERE database = {db:String} AND table = {t:String})`, {db: dap_state.database, t: dap_state.table})]);
+            return {access, columns, stale};
+        }, data => columnPermissionsView(data));
+    };
+    put(panel, h('div', {className: 'box'}, h('h2', {}, 'Column permissions'),
+        paragraph('Column-scoped SELECT grants, from system.grants, for users and for roles. A column grant is positive: it never narrows a grant on the whole table, '
+            + 'the database, or every database, which still give every column. Prefer granting columns to a role and the role to users; direct grants to users are '
+            + 'listed separately.'),
+        h('details', {}, h('summary', {}, 'How column grants behave (verified on this server version)'), h('ul', {},
+            h('li', {}, 'SELECT of granted columns works; SELECT of any other column fails with ACCESS_DENIED.'),
+            h('li', {}, 'SELECT * fails unless every column of the table is granted: it does not return only the granted columns.'),
+            h('li', {}, 'A filter, ORDER BY, or join on a column that is not granted fails too, so its values cannot be probed through WHERE.'),
+            h('li', {}, 'count() works with a grant on any one column, so the number of rows is visible.'),
+            h('li', {}, 'A column added later is not covered by existing column grants; table, database, and global grants cover it, and tables created later too.'),
+            h('li', {}, 'A renamed column keeps its grants only under the old name: the grant then names a column that no longer exists (listed below).'))),
+        h('div', {className: 'toolbar filter-bar'}), results));
+    dapDatabases().then(databases => {
+        const picker = dapObjectPicker(databases, dap_state, load);
+        panel.querySelector('.filter-bar').append(adminField('Database', picker.database), adminField('Table', picker.table));
+        picker.ready.then(load);
+    }).catch(e => results.replaceChildren(errorBox(e)));
+}
+
+function columnPermissionsView({access, columns, stale}) {
+    const {database, table} = dap_state;
+    const names = columns.map(c => c.name);
+    const subjects = [...access.users.map(u => ({type: 'user', name: u.name, storage: u.storage})), ...access.roles.map(r => ({type: 'role', name: r.name, storage: r.storage}))];
+    const rows = [];
+    for (const subject of subjects) {
+        const matrix = dapColumnAccess(access.grants, access.role_grants, access.tree, subject, 'SELECT', database, table, names);
+        if (!matrix.some(m => m.sources.length)) continue;
+        rows.push({subject, matrix});
+    }
+    const cell = m => {
+        const effective = m.sources.filter(s => !s.revoked);
+        if (!effective.length) return h('span', {className: 'note', title: m.sources.length ? 'Granted, then revoked for this column' : 'No grant'}, '—');
+        const best = effective.find(s => s.grantee.active) || effective[0];
+        const via = best.grantee.path.length ? ` via ${best.grantee.path.join(' → ')}` : '';
+        const label = best.level === 'column' ? '✓' : '●';
+        return badge(best.grantee.active ? label : `(${label})`, best.level === 'column' ? 'ok' : 'warn',
+            `${COLUMN_LEVEL_TEXT[best.level]}${via}${best.grantee.active ? '' : ' (only after SET ROLE)'}`);
+    };
+    const users = rows.filter(r => r.subject.type === 'user');
+    const roles = rows.filter(r => r.subject.type === 'role');
+    const matrix = list => dataTable([
+        {title: 'User or role', render: r => [adminLink(r.subject.name, r.subject.type === 'user' ? 'admin-users' : 'admin-roles', r.subject.name),
+            h('div', {className: 'note'}, entitySource(r.subject.storage).label)]},
+        ...names.map(name => ({title: name, render: r => cell(r.matrix.find(m => m.column === name))})),
+    ], list, 'Nobody.', `Columns of ${database}.${table}`);
+    const broad = [];
+    for (const r of rows) {
+        const narrow = r.matrix.some(m => m.sources.some(s => s.level === 'column' && !s.revoked));
+        const seen = new Set();
+        for (const m of r.matrix) {
+            for (const s of m.broad) {
+                const key = `${s.grantee.name}|${s.level}|${s.row.access_type}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                broad.push({subject: r.subject, source: s, narrow});
+            }
+        }
+    }
+    const direct = [];
+    for (const r of users) {
+        for (const m of r.matrix) {
+            for (const s of m.sources) {
+                if (s.level === 'column' && s.grantee.type === 'user' && !direct.some(d => d.user === r.subject.name && d.row === s.row)) direct.push({user: r.subject.name, row: s.row});
+            }
+        }
+    }
+    const editable = session.admin.can.read_grants;
+    return [
+        h('p', {className: 'note'}, `Observed at ${access.observed_at} UTC on ${session.hostname}. ✓ a column grant, ● a grant on the whole table or wider, `
+            + '(…) only after SET ROLE (the role is not a default role), — no access. Hover a mark for its source.'),
+        h('div', {className: 'actions-row'}, button('Grant columns', () => grantColumnsDialog(access, columns), {className: 'small primary', disabled: !editable})),
+        h('h3', {}, 'Users'), matrix(users),
+        h('h3', {}, 'Roles'), matrix(roles),
+        h('h3', {}, 'Broader grants'),
+        paragraph('These grants give every column of the table, whatever column grants say. A user listed here with column grants too gets the whole table: '
+            + 'revoke the broader grant (or add a partial revoke) to make the column restriction effective.'),
+        dataTable([
+            {title: 'User or role', render: b => `${b.subject.type} ${b.subject.name}`},
+            {title: 'Grant', render: b => h('code', {}, `${b.source.row.access_type} ON ${grantTargetText(b.source.row)}`)},
+            {title: 'Level', render: b => badge(COLUMN_LEVEL_TEXT[b.source.level], 'warn')},
+            {title: 'Through', render: b => b.source.grantee.path.length ? b.source.grantee.path.join(' → ') : 'Direct grant'},
+            {title: 'Covers future objects', render: b => b.source.level === 'table' ? 'New columns' : 'New tables and columns'},
+            {title: 'Overrides column grants', render: b => b.narrow ? badge('Yes', 'bad') : '—'},
+        ], broad, 'None: only column grants give access to this table.', 'Broader grants'),
+        h('h3', {}, 'Direct column grants to users'),
+        dataTable([
+            {title: 'User', render: d => adminLink(d.user, 'admin-users', d.user)},
+            {title: 'Grant', render: d => h('code', {}, `${d.row.access_type}(${d.row.column}) ON ${database}.${table}`)},
+            {title: '', render: d => button('Revoke', () => reviewPlan(revokeColumnPlan({type: 'user', name: d.user}, d.row)), {className: 'small'})},
+        ], direct, 'None.', 'Direct column grants'),
+        h('h3', {}, 'Grants on columns that no longer exist'),
+        paragraph('Left behind by a renamed or dropped column. They give nothing today, but would apply again to a new column of the same name.'),
+        dataTable([
+            {title: 'User or role', render: row => row.user_name !== null ? `user ${row.user_name}` : `role ${row.role_name}`},
+            {title: 'Grant', render: row => h('code', {}, `${row.access_type}(${row.column}) ON ${database}.${table}`)},
+            {title: '', render: row => button('Revoke', () => reviewPlan(revokeColumnPlan(row.user_name !== null ? {type: 'user', name: row.user_name} : {type: 'role', name: row.role_name}, row)), {className: 'small'})},
+        ], stale, 'None.', 'Stale column grants'),
+    ];
+}
+
+function revokeColumnPlan(subject, row) {
+    return {action: 'dap_revoke_columns', target_type: subject.type, target_name: subject.name,
+        summary: `Revoke ${row.access_type}(${row.column}) ON ${row.database}.${row.table} from ${subject.name}`,
+        steps: [{description: `Revoke ${row.access_type}(${row.column}) ON ${row.database}.${row.table}`, sql: revokeGrantSQL(subject, row, false)}],
+        warning: 'Access to the column remains if the user or role has a broader grant, or the column through another role.'};
+}
+
+function grantColumnsDialog(access, columns) {
+    const {database, table} = dap_state;
+    const subject = select([['', 'Choose a role or user'], ...access.roles.map(r => [`role:${r.name}`, `role ${r.name}`]), ...access.users.map(u => [`user:${u.name}`, `user ${u.name} (direct grant)`])], '');
+    const boxes = columns.map(c => ({name: c.name, box: checkbox(`${c.name} (${c.type})`, false)}));
+    formDialog(`Grant columns of ${database}.${table}`, [
+        adminField('To', subject, 'Prefer a role: grant the role to users. A direct grant to a user is listed separately.'),
+        h('fieldset', {className: 'box'}, h('legend', {}, 'Columns'), boxes.map(b => b.box.element)),
+    ], 'Review', () => {
+        if (!subject.value) return 'Choose a role or user.';
+        const chosen = boxes.filter(b => b.box.input.checked).map(b => b.name);
+        if (!chosen.length) return 'Choose at least one column.';
+        const [type, ...rest] = subject.value.split(':');
+        const target = {type, name: rest.join(':')};
+        const matrix = dapColumnAccess(access.grants, access.role_grants, access.tree, target, 'SELECT', database, table, columns.map(c => c.name));
+        const broad = matrix.flatMap(m => m.broad);
+        const all = chosen.length === columns.length;
+        return {action: 'dap_grant_columns', target_type: type, target_name: target.name,
+            summary: `Grant SELECT(${chosen.join(', ')}) ON ${database}.${table} to ${target.name}`,
+            steps: [{description: `Grant SELECT on ${chosen.length} existing columns of ${database}.${table}`,
+                sql: `GRANT${onCluster()} SELECT(${chosen.map(quoteIdentifier).join(', ')}) ON ${quoteIdentifier(database)}.${quoteIdentifier(table)} TO ${subjectSQL(target)}`}],
+            warning: [broad.length ? `${target.name} already reads every column through ${[...new Set(broad.map(s => `${s.row.access_type} ON ${grantTargetText(s.row)}`))].join(', ')}: this grant changes nothing until that is revoked.` : '',
+                'The grant covers these existing columns only, not columns added later.',
+                all ? '' : 'SELECT * will fail for this grantee: it needs every column.'].filter(Boolean).join(' ')};
+    });
+}
+
+/// --- Row Policies ---
+
+function policyTargetsText(p) {
+    if (p.apply_to_all) return p.apply_to_except.length ? `All except ${p.apply_to_except.join(', ')}` : 'All users';
+    return p.apply_to_list.join(', ') || 'Nobody';
+}
+
+/// The users a row policy applies to at login, by name, from the targets and the role grants.
+function policyUsers(policy, access) {
+    return access.users.map(u => u.name).filter(user => dapPolicyApplies(policy, user, dapLoginRoles(access.role_grants, user)));
+}
+
+function renderRowPolicies(panel, page) {
+    const list = h('div', {});
+    const detail = h('div', {});
+    const loadDetail = () => {
+        if (!dap_state.database || !dap_state.table) {
+            detail.replaceChildren(paragraph('Choose a table to see the combined filter of each user and the paths that bypass it.'));
+            return;
+        }
+        loadInto(page, detail, () => loadRowPolicyTable(dap_state.database, dap_state.table), rowPolicyTableView);
+    };
+    put(panel,
+        h('div', {className: 'box'}, h('h2', {}, 'Row policies'),
+            paragraph('A row policy is a read filter that the server adds to every SELECT of the table by the users it applies to, from any client. '
+                + 'Permissive policies are joined with OR, restrictive ones with AND; policies on a whole database (ON db.*) combine with those of the table. '
+                + 'It does not restrict INSERT, ALTER UPDATE or DELETE, or reads through views that run as their definer.'),
+            h('div', {className: 'actions-row'}, button('Create row policy', () => rowPolicyDialog(null), {className: 'small primary'})),
+            list),
+        h('div', {className: 'box'}, h('h2', {}, 'Effect on a table'), h('div', {className: 'toolbar filter-bar'}), detail));
+    loadInto(page, list, () => adminRows(`SELECT ${POLICY_COLUMNS} FROM system.row_policies ORDER BY database, table, short_name`), policies => dataTable([
+        {title: 'Policy', render: p => [h('strong', {}, p.short_name), h('div', {className: 'note'}, entitySource(p.storage).label)]},
+        {title: 'On', render: p => h('code', {}, `${p.database}.${p.table || '*'}`)},
+        {title: 'Kind', render: p => p.is_restrictive ? badge('Restrictive (AND)', 'warn') : badge('Permissive (OR)')},
+        {title: 'Filter', render: p => h('code', {}, p.select_filter === null ? '(none)' : p.select_filter)},
+        {title: 'Applies to', render: p => policyTargetsText(p)},
+        {title: '', render: p => entitySource(p.storage).editable ? h('span', {className: 'actions-row'},
+            button('Edit', () => rowPolicyDialog(p), {className: 'small'}),
+            button('Remove', () => reviewPlan({action: 'dap_drop_row_policy', target_type: 'row_policy', target_name: p.name, summary: `Remove the row policy ${p.name}`, danger: true,
+                steps: [{description: `Drop the row policy ${p.name}`, sql: `DROP ROW POLICY ${quoteIdentifier(p.short_name)}${onCluster()} ON ${quoteIdentifier(p.database)}.${p.table ? quoteIdentifier(p.table) : '*'}`}],
+                warning: 'The users it applied to see the rows it allowed no more, or, when it was their only policy, every row of the table.'}), {className: 'small'})) : null},
+    ], policies, 'No row policy exists on this server.', 'Row policies'));
+    dapDatabases().then(databases => {
+        const picker = dapObjectPicker(databases, dap_state, loadDetail);
+        panel.querySelector('.filter-bar').append(adminField('Database', picker.database), adminField('Table', picker.table));
+        picker.ready.then(loadDetail);
+    }).catch(e => detail.replaceChildren(errorBox(e)));
+}
+
+async function loadRowPolicyTable(database, table) {
+    const access = await dapLoadAccess();
+    /// Found by the name of the table in the definitions: a view that runs as its definer, any materialized view,
+    /// and Distributed, Merge, and Buffer tables. A match by name is a candidate, not a proof.
+    const paths = await adminRows(`SELECT database, name, engine FROM system.tables
+        WHERE NOT (database = {db:String} AND name = {t:String})
+            AND ((engine = 'View' AND match(create_table_query, '(?i)SQL SECURITY (DEFINER|NONE)')) OR engine IN ('MaterializedView', 'Distributed', 'Merge', 'Buffer'))
+            AND (position(create_table_query, concat({db:String}, '.', {t:String})) > 0
+                OR (engine IN ('Distributed', 'Merge', 'Buffer') AND position(create_table_query, {db:String}) > 0 AND position(create_table_query, {t:String}) > 0))
+        ORDER BY database, name`, {db: database, t: table});
+    return {access, paths, database, table};
+}
+
+function rowPolicyTableView({access, paths, database, table}) {
+    const names = access.tree.ancestors('SELECT');
+    const readers = access.users.map(u => u.name).filter(user => {
+        const login = dapLoginRoles(access.role_grants, user);
+        return access.grants.some(row => !row.is_partial_revoke && (row.user_name === user || login.includes(row.role_name))
+            && names.includes(row.access_type) && (row.database === null || row.database === database) && (row.table === null || row.table === table));
+    });
+    const targeted = access.policies.filter(p => p.database === database && (p.table === table || p.table === '')).flatMap(p => policyUsers(p, access));
+    const users = [...new Set([...readers, ...targeted])].sort();
+    const rows = users.map(user => ({user, reads: readers.includes(user), filter: dapRowFilter(access.policies, database, table, user, dapLoginRoles(access.role_grants, user))}));
+    const writers = access.users.map(u => u.name).filter(user => {
+        const login = dapLoginRoles(access.role_grants, user);
+        return access.grants.some(row => !row.is_partial_revoke && (row.user_name === user || login.includes(row.role_name))
+            && ['INSERT', 'ALTER UPDATE', 'ALTER DELETE', 'ALTER TABLE', 'ALTER', 'ALL'].includes(row.access_type)
+            && (row.database === null || row.database === database) && (row.table === null || row.table === table));
+    });
+    const outcome = {'no-policies': ['All rows', 'warn'], 'unmatched-all': ['All rows: no policy applies', 'bad'], 'unmatched-none': ['No rows', 'ok'], filtered: ['Filtered', 'ok']};
+    return [
+        h('p', {className: 'note'}, `Observed at ${access.observed_at} UTC on ${session.hostname}, with the roles each user has at login (default roles). `
+            + 'The combined filter assumes the server default access_control_improvements.users_without_row_policies_can_read_rows = true, which SQL cannot read: '
+            + 'confirm it with an access test.'),
+        dataTable([
+            {title: 'User', render: r => adminLink(r.user, 'admin-users', r.user)},
+            {title: 'Can read the table', render: r => r.reads ? 'Yes' : badge('No SELECT', '', 'The policy applies, but the user has no SELECT on the table.')},
+            {title: 'Rows visible', render: r => badge(...outcome[r.filter.outcome])},
+            {title: 'Combined filter', render: r => r.filter.outcome === 'filtered' ? h('code', {}, r.filter.text) : h('span', {className: 'note'}, r.filter.text)},
+            {title: 'From policies', render: r => [...r.filter.permissive, ...r.filter.restrictive].map(p => p.short_name).join(', ') || '—'},
+        ], rows, 'No user can read this table, and no policy applies to anyone.', `Row filters of ${database}.${table}`),
+        h('h3', {}, 'Paths that can undermine the filter'),
+        dataTable([
+            {title: 'Path', render: p => h('code', {}, `${p.database}.${p.name}`)},
+            {title: 'Engine', render: p => p.engine},
+            {title: 'Why', render: p => ({
+                View: 'Runs as its definer (SQL SECURITY DEFINER or NONE): row policies of the reader on this table do not apply inside it.',
+                MaterializedView: 'Copies rows into its target table as its definer; the copies are not filtered by the policies of this table.',
+                Distributed: 'Reads the table on the shards. Shards apply the policies of the initial user only if a user of that name exists on them; column grants are checked on the Distributed table, not on this table.',
+                Merge: 'Reads this table under the grants of the Merge table.',
+                Buffer: 'Holds rows before they are written to this table.',
+            })[p.engine] || 'Reads this table.'},
+        ], paths, 'None found (by the name of the table in the definitions of views, materialized views, Distributed, Merge, and Buffer tables).', 'Bypass paths'),
+        h('h3', {}, 'Users who can change rows'),
+        paragraph('A row policy filters reads only: these users can insert, update, or delete rows outside their filter.'),
+        h('p', {}, writers.length ? chips(writers, name => adminLink(name, 'admin-users', name)) : 'Nobody.'),
+    ];
+}
+
+/// The structured editor writes conditions from a column, an operator, and values. Values are quoted for the type
+/// of the column; the identity operator compares with `currentUser()`.
+const ROW_CONDITION_OPERATORS = [['eq', '='], ['ne', '≠'], ['in', 'is one of'], ['not_in', 'is none of'], ['user', '= the user name (currentUser())']];
+const ROW_CONDITION_PRESETS = ['branch', 'company', 'tenant', 'tenant_id', 'region', 'country', 'department'];
+
+function rowConditionSQL(condition, columns) {
+    const column = columns.find(c => c.name === condition.column);
+    if (!column) return {error: `The column ${condition.column} does not exist.`};
+    const numeric = /^(Nullable\()?(U?Int|Float|Decimal)/.test(column.type);
+    const values = condition.values.split(',').map(v => v.trim()).filter(v => v !== '');
+    const literal = value => {
+        if (!numeric) return quoteString(value);
+        if (!/^-?\d+(\.\d+)?$/.test(value)) throw new Error(`${value} is not a number, and ${column.name} is ${column.type}.`);
+        return value;
+    };
+    const id = quoteIdentifier(column.name);
+    try {
+        if (condition.op === 'user') return {sql: `${id} = currentUser()`};
+        if (!values.length) return {error: `Enter a value for ${column.name}.`};
+        if (condition.op === 'eq' || condition.op === 'ne') {
+            if (values.length > 1) return {error: `Use "is one of" for several values of ${column.name}.`};
+            return {sql: `${id} ${condition.op === 'eq' ? '=' : '!='} ${literal(values[0])}`};
+        }
+        return {sql: `${id} ${condition.op === 'in' ? 'IN' : 'NOT IN'} (${values.map(literal).join(', ')})`};
+    } catch (e) {
+        return {error: e.message};
+    }
+}
+
+/// Checks an expression typed by an administrator with the server's parser and analyzer: it must be one
+/// expression over the columns of the table, without subqueries or table references.
+async function validateRowFilter(database, table, expression) {
+    const ast = await adminText(`EXPLAIN AST SELECT 1 FROM ${quoteIdentifier(database)}.${quoteIdentifier(table)} WHERE (${expression})`);
+    const tables = (ast.match(/TableIdentifier|TableExpression|Subquery|TableFunction/g) || []).length;
+    if (/Subquery|TableFunction/.test(ast) || tables > 2) return 'The expression must not contain subqueries, table functions, or references to other tables.';
+    if (/SelectWithUnionQuery[\s\S]*SelectWithUnionQuery/.test(ast)) return 'The expression must be a single expression.';
+    await adminText(`EXPLAIN QUERY TREE SELECT 1 FROM ${quoteIdentifier(database)}.${quoteIdentifier(table)} WHERE (${expression})`);
+    return null;
+}
+
+async function rowPolicyDialog(existing) {
+    let access;
+    let databases;
+    let advanced_allowed;
+    try {
+        [access, databases, advanced_allowed] = await Promise.all([dapLoadAccess(), dapDatabases(), checkGrant('CREATE ROW POLICY, ALTER ROW POLICY ON *.*')]);
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('Row policy', [errorBox(e)], [button('Close', closeDialog)]);
+        return;
+    }
+    const name = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, value: existing ? existing.short_name : '', disabled: !!existing});
+    const state = {database: existing ? existing.database : dap_state.database, table: existing ? existing.table : dap_state.table};
+    const picker = dapObjectPicker(databases, state, () => refreshColumns());
+    if (existing) {
+        picker.database.disabled = true;
+        picker.table.disabled = true;
+    }
+    const whole = checkbox('Every table of the database (ON db.*)', existing ? existing.table === '' : false, {disabled: !!existing});
+    const kind = select([['permissive', 'Permissive: joined with OR with other permissive policies'], ['restrictive', 'Restrictive: joined with AND']],
+        existing && existing.is_restrictive ? 'restrictive' : 'permissive');
+    const subjects = [...access.roles.map(r => r.name), ...access.users.map(u => u.name)];
+    const target_mode = select([['list', 'These users and roles'], ['all', 'All users'], ['except', 'All users except']],
+        existing ? (existing.apply_to_all ? (existing.apply_to_except.length ? 'except' : 'all') : 'list') : 'list');
+    const chosen = new Set(existing ? (existing.apply_to_all ? existing.apply_to_except : existing.apply_to_list) : []);
+    const target_boxes = subjects.map(s => ({name: s, box: checkbox(`${access.roles.some(r => r.name === s) ? 'role' : 'user'} ${s}`, chosen.has(s))}));
+    const targets = h('fieldset', {className: 'box'}, h('legend', {}, 'Users and roles'), target_boxes.map(b => b.box.element));
+    target_mode.addEventListener('change', () => { targets.hidden = target_mode.value === 'all'; });
+    targets.hidden = target_mode.value === 'all';
+    let columns = [];
+    const conditions = h('div', {});
+    const addCondition = (preset = {}) => {
+        const column = select([], '');
+        const op = select(ROW_CONDITION_OPERATORS, preset.op || 'eq');
+        const values = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'north, south', value: preset.values || ''});
+        const row = h('div', {className: 'toolbar filter-bar dap-condition'}, adminField('Column', column), adminField('Condition', op), adminField('Values', values),
+            button('Remove', () => row.remove(), {className: 'small'}));
+        row.read = () => ({column: column.value, op: op.value, values: values.value});
+        row.fill = () => column.replaceChildren(...columns.map(c => h('option', {value: c.name, selected: c.name === (preset.column || column.value)}, `${c.name} (${c.type})`)));
+        row.fill();
+        conditions.append(row);
+    };
+    const refreshColumns = async () => {
+        columns = state.database && state.table && !whole.input.checked
+            ? await adminRows('SELECT name, type FROM system.columns WHERE database = {db:String} AND table = {t:String} ORDER BY position', {db: state.database, t: state.table}) : [];
+        for (const row of conditions.children) row.fill();
+        presets.replaceChildren(...columns.filter(c => ROW_CONDITION_PRESETS.includes(c.name.toLowerCase()))
+            .map(c => button(`+ ${c.name}`, () => addCondition({column: c.name}), {className: 'small'})));
+    };
+    const presets = h('span', {className: 'actions-row'});
+    const advanced = h('textarea', {rows: 3, spellcheck: false, className: 'code', value: existing ? existing.select_filter || '' : ''});
+    const mode = select([['structured', 'Conditions (joined with AND)'], ['advanced', 'Expression (advanced)']], existing ? 'advanced' : 'structured');
+    const structured_box = h('div', {}, conditions, h('div', {className: 'actions-row'}, button('Add condition', () => addCondition(), {className: 'small'}), presets));
+    const advanced_box = h('div', {}, adminField('Expression', advanced, advanced_allowed
+        ? 'Checked with the server parser: one expression over the columns of the table, without subqueries.'
+        : 'Only administrators who can create and alter row policies on every table (CREATE ROW POLICY, ALTER ROW POLICY ON *.*) can write expressions.'));
+    const sync = () => {
+        structured_box.hidden = mode.value !== 'structured';
+        advanced_box.hidden = mode.value !== 'advanced';
+        advanced.disabled = !advanced_allowed;
+    };
+    mode.addEventListener('change', sync);
+    whole.input.addEventListener('change', () => {
+        picker.table.disabled = whole.input.checked || !!existing;
+        if (whole.input.checked) mode.value = 'advanced';
+        sync();
+        refreshColumns();
+    });
+    sync();
+    await picker.ready;
+    await refreshColumns();
+    if (!existing) addCondition();
+    formDialog(existing ? `Edit the row policy ${existing.name}` : 'Create a row policy', [
+        adminField('Name', name), adminField('Database', picker.database), adminField('Table', picker.table), whole.element,
+        adminField('Kind', kind), adminField('Applies to', target_mode), targets,
+        adminField('Filter', mode), structured_box, advanced_box,
+    ], 'Review', async () => {
+        if (nameError(name.value, 'policy')) return nameError(name.value, 'policy');
+        if (!state.database) return 'Choose a database.';
+        if (!whole.input.checked && !state.table) return 'Choose a table, or every table of the database.';
+        let filter;
+        if (mode.value === 'structured') {
+            const parts = [];
+            for (const row of conditions.children) {
+                const result = rowConditionSQL(row.read(), columns);
+                if (result.error) return result.error;
+                parts.push(result.sql);
+            }
+            if (!parts.length) return 'Add at least one condition.';
+            filter = parts.join(' AND ');
+        } else {
+            if (!advanced_allowed) return 'Your user cannot write filter expressions: use conditions.';
+            filter = advanced.value.trim();
+            if (!filter) return 'Enter the filter expression.';
+            if (!whole.input.checked) {
+                const problem = await validateRowFilter(state.database, state.table, filter);
+                if (problem) return problem;
+            }
+        }
+        const picked = target_boxes.filter(b => b.box.input.checked).map(b => b.name);
+        if (target_mode.value === 'list' && !picked.length) return 'Choose the users and roles the policy applies to.';
+        const to = {list: picked.map(quoteIdentifier).join(', '), all: 'ALL', except: `ALL EXCEPT ${picked.map(quoteIdentifier).join(', ')}`}[target_mode.value];
+        if (target_mode.value === 'except' && !picked.length) return 'Choose who is excepted, or apply the policy to all users.';
+        const on = `${quoteIdentifier(state.database)}.${whole.input.checked ? '*' : quoteIdentifier(state.table)}`;
+        const restrictive = kind.value === 'restrictive';
+        const proposed = {short_name: name.value, database: state.database, table: whole.input.checked ? '' : state.table, select_filter: filter, is_restrictive: restrictive,
+            apply_to_all: target_mode.value !== 'list', apply_to_list: target_mode.value === 'list' ? picked : [], apply_to_except: target_mode.value === 'except' ? picked : []};
+        const before = access.policies;
+        const after = [...before.filter(p => !(existing && p.name === existing.name)), proposed];
+        const affected = access.users.map(u => u.name).filter(user => dapPolicyApplies(proposed, user, dapLoginRoles(access.role_grants, user))
+            || (existing && dapPolicyApplies(existing, user, dapLoginRoles(access.role_grants, user))));
+        const table_for = state.table || (await adminRows('SELECT name FROM system.tables WHERE database = {db:String} ORDER BY name LIMIT 1', {db: state.database}))[0]?.name || '';
+        const changes = affected.map(user => {
+            const roles = dapLoginRoles(access.role_grants, user);
+            return `${user}: ${dapRowFilter(before, state.database, table_for, user, roles).text} → ${dapRowFilter(after, state.database, table_for, user, roles).text}`;
+        });
+        const statement = existing
+            ? `ALTER ROW POLICY ${quoteIdentifier(existing.short_name)}${onCluster()} ON ${on} USING ${filter} AS ${restrictive ? 'restrictive' : 'permissive'} TO ${to}`
+            : `CREATE ROW POLICY ${quoteIdentifier(name.value)}${onCluster()} ON ${on} USING ${filter} AS ${restrictive ? 'restrictive' : 'permissive'} TO ${to}`;
+        return {action: existing ? 'dap_alter_row_policy' : 'dap_create_row_policy', target_type: 'row_policy', target_name: `${name.value} ON ${state.database}.${proposed.table || '*'}`,
+            summary: `${existing ? 'Change' : 'Create'} the row policy ${name.value} on ${state.database}.${proposed.table || '*'}`,
+            steps: [{description: `${existing ? 'Change' : 'Create'} the ${restrictive ? 'restrictive' : 'permissive'} row policy ${name.value}: ${filter}`, sql: statement}],
+            warning: [`Affected users (combined filter on ${state.database}.${table_for} before → after): ${changes.join('; ') || 'none'}.`,
+                'Users with SELECT on the table to whom no policy applies see every row.',
+                'The policy filters reads only, on this server or on the servers the statement runs on.'].join(' ')};
+    });
+}
+
+/// --- Effective Access ---
+
+function renderEffectiveAccess(panel, page) {
+    const results = h('div', {});
+    const user = select([['', 'Choose a user']], dap_state.user);
+    const operation = select([['SELECT', 'Read (SELECT)'], ['INSERT', 'Write (INSERT)']], 'SELECT');
+    const load = () => {
+        dap_state.user = user.value;
+        if (!dap_state.user || !dap_state.database || !dap_state.table) {
+            results.replaceChildren(paragraph('Choose a user and a table.'));
+            return;
+        }
+        loadInto(page, results, async () => {
+            const [access, columns, user_row, rules] = await Promise.all([dapLoadAccess(),
+                adminRows('SELECT name, type FROM system.columns WHERE database = {db:String} AND table = {t:String} ORDER BY position', {db: dap_state.database, t: dap_state.table}),
+                adminRows(`SELECT ${USER_COLUMNS} FROM system.users WHERE name = {name:String}`, {name: dap_state.user}),
+                session.admin.can.read_dap ? dapLoadRules() : null]);
+            const verified = session.admin.can.read_dap ? await adminRows(`SELECT test_id, toString(outcome) AS outcome, observed, formatDateTime(ran_at, '%Y-%m-%d %H:%i:%S', 'UTC') AS ran_at
+                FROM ${dapTable('dap_test_runs')} WHERE user_name = {u:String} ORDER BY ran_at DESC LIMIT 20`, {u: dap_state.user}) : [];
+            return {access, columns, user_row: user_row[0], rules, verified, operation: operation.value};
+        }, effectiveAccessView);
+    };
+    put(panel, h('div', {className: 'box'}, h('h2', {}, 'Effective access'),
+        paragraph('Explains what a user can do on a table and why: direct grants, roles and their paths, roles active at login and roles the user can activate, '
+            + 'row policies, and policy rules. Inspecting grants is not a proof: verify with the server (EXECUTE AS, which needs IMPERSONATE on the user) or with access tests.'),
+        h('div', {className: 'toolbar filter-bar'}), results));
+    Promise.all([dapDatabases(), adminRows('SELECT name FROM system.users ORDER BY name')]).then(([databases, users]) => {
+        user.append(...users.map(u => h('option', {value: u.name, selected: u.name === dap_state.user}, u.name)));
+        const picker = dapObjectPicker(databases, dap_state, load);
+        user.addEventListener('change', load);
+        operation.addEventListener('change', load);
+        panel.querySelector('.filter-bar').append(adminField('User', user), adminField('Database', picker.database), adminField('Table', picker.table), adminField('Operation', operation));
+        picker.ready.then(load);
+    }).catch(e => results.replaceChildren(errorBox(e)));
+}
+
+function effectiveAccessView({access, columns, user_row, rules, verified, operation}) {
+    const {database, table} = dap_state;
+    const user = user_row.name;
+    const subject = {type: 'user', name: user};
+    const closure = roleClosure(access.role_grants, subject);
+    const login_roles = dapLoginRoles(access.role_grants, user);
+    const all_roles = dapAllRoles(access.role_grants, user);
+    const names = columns.map(c => c.name);
+    const matrix = dapColumnAccess(access.grants, access.role_grants, access.tree, subject, operation, database, table, names);
+    const filter_login = dapRowFilter(access.policies, database, table, user, login_roles);
+    const filter_all = dapRowFilter(access.policies, database, table, user, all_roles);
+    const source_of = name => {
+        const entity = access.roles.find(r => r.name === name) || access.users.find(u => u.name === name);
+        return entity ? entitySource(entity.storage).label : 'unknown';
+    };
+    const verify_box = h('div', {});
+    const status = (m, key) => {
+        const effective = m.sources.filter(s => !s.revoked);
+        if (key === 'login') return effective.some(s => s.grantee.active) ? badge('Yes', 'ok') : badge('No');
+        return effective.length ? badge('Yes', effective.some(s => s.grantee.active) ? 'ok' : 'warn') : badge('No');
+    };
+    const conflicts = [];
+    const broad = matrix.flatMap(m => m.broad);
+    if (broad.length && matrix.some(m => m.sources.some(s => s.level === 'column'))) {
+        conflicts.push(`Column grants restrict nothing: ${[...new Set(broad.map(s => `${s.row.access_type} ON ${grantTargetText(s.row)}${s.grantee.path.length ? ` via ${s.grantee.path.join(' → ')}` : ''}`))].join(', ')} gives every column.`);
+    }
+    if (filter_login.permissive.length > 1) conflicts.push(`Several permissive policies apply (${filter_login.permissive.map(p => p.short_name).join(', ')}): the user sees the rows of any of them.`);
+    if (filter_login.text !== filter_all.text) conflicts.push(`After SET ROLE the row filter changes: ${filter_all.text}.`);
+    if (rules) {
+        for (const rule of rules.filter(r => r.enabled && !r.deleted && r.spec.kind === 'column_clearance')) {
+            const role = `${DAP_PREFIX}${dapRuleShort(rule.rule_id)}_cleared`;
+            if (all_roles.includes(role)) continue;
+            const labeled = rule.classifications.filter(c => c.label === rule.spec.label && c.database === database && c.table === table).map(c => c.column);
+            const open = matrix.filter(m => labeled.includes(m.column) && m.allowed_with_roles).map(m => m.column);
+            if (open.length) conflicts.push(`The rule "${rule.name}" intends ${user} not to read the ${rule.spec.label} columns ${open.join(', ')}, but other grants give them: rules add access and never deny it.`);
+        }
+    }
+    return [
+        h('p', {className: 'note'}, `Observed at ${access.observed_at} UTC on ${session.hostname} only. Other servers keep their own users, grants, and policies `
+            + 'unless the user directory is replicated: a deployment ON CLUSTER reports each server.'),
+        h('h3', {}, 'Identity'),
+        kvList([['User', adminLink(user, 'admin-users', user)], ['Source', entitySource(user_row.storage).label], ['State', badge(userState(user_row).label, userState(user_row).className)],
+            ['Default roles', user_row.default_roles_all ? 'All granted roles' : (user_row.default_roles_list || []).join(', ') || 'None']]),
+        h('h3', {}, 'Roles'),
+        dataTable([
+            {title: 'Role', render: item => adminLink(item.role, 'admin-roles', item.role)},
+            {title: 'Path', render: item => item.path.join(' → ')},
+            {title: 'At login', render: item => item.is_default ? badge('Active', 'ok') : badge('After SET ROLE', 'warn')},
+            {title: 'Source', render: item => source_of(item.role)},
+        ], closure, 'No roles are granted.', 'Roles'),
+        h('h3', {}, `${operation} on ${database}.${table}, per column`),
+        dataTable([
+            {title: 'Column', render: m => m.column},
+            {title: 'At login (configured)', render: m => status(m, 'login')},
+            {title: 'With all granted roles', render: m => status(m, 'all')},
+            {title: 'Given by', render: m => m.sources.filter(s => !s.revoked).map(s => `${s.row.access_type} ON ${grantTargetText(s.row)}`
+                + ` — ${s.grantee.type === 'user' ? 'direct' : s.grantee.path.join(' → ')}`).join('; ') || (m.sources.length ? 'Revoked partially' : '—')},
+        ], matrix, 'The table has no columns.', 'Columns'),
+        h('h3', {}, 'Rows'),
+        kvList([['At login', filter_login.outcome === 'filtered' ? h('code', {}, filter_login.text) : filter_login.text],
+            ['With all granted roles', filter_all.outcome === 'filtered' ? h('code', {}, filter_all.text) : filter_all.text],
+            ['Policies', [...filter_all.permissive, ...filter_all.restrictive].map(p => `${p.short_name} (${entitySource(p.storage).label})`).join(', ') || 'None']]),
+        h('h3', {}, 'Conflicts'),
+        conflicts.length ? h('ul', {}, conflicts.map(text => h('li', {}, text))) : paragraph('None found.'),
+        h('h3', {}, 'Verification'),
+        paragraph('Configured entitlement is what the grants say. "At login" assumes the default roles; a session that runs SET ROLE can differ. '
+            + 'Verifying asks the server: EXECUTE AS the user, CHECK GRANT for each column and a count of the visible rows. It needs IMPERSONATE on this user, '
+            + 'which should be granted only for dedicated test users.'),
+        h('div', {className: 'actions-row'}, button('Verify with the server', () => verifyEffective(verify_box, user, operation, names), {className: 'small'})),
+        verify_box,
+        verified.length ? [h('p', {className: 'note'}, 'Recent access tests of this user:'), dataTable([
+            {title: 'Time', render: r => r.ran_at}, {title: 'Test', render: r => r.test_id.slice(0, 8)},
+            {title: 'Result', render: r => badge(r.outcome, r.outcome === 'pass' ? 'ok' : 'bad')}, {title: 'Observed', render: r => r.observed}], verified, '', 'Test runs')] : null,
+    ];
+}
+
+async function verifyEffective(box, user, operation, columns) {
+    const {database, table} = dap_state;
+    box.replaceChildren(loadingBox('Asking the server…'));
+    const target = `${quoteIdentifier(database)}.${quoteIdentifier(table)}`;
+    const rows = [];
+    for (const column of columns) {
+        try {
+            const text = await adminText(`EXECUTE AS ${quoteIdentifier(user)} CHECK GRANT ${operation}(${quoteIdentifier(column)}) ON ${target}`);
+            rows.push({what: `${operation}(${column})`, result: text.trim() === '1' ? ['Allowed', 'ok'] : ['Denied', ''], detail: 'Verified at runtime'});
+        } catch (e) {
+            if (e instanceof AdminSessionChanged) return;
+            rows.push({what: `${operation}(${column})`, result: ['Unknown', 'warn'], detail: `Not verified: ${e.message}`});
+            break;
+        }
+    }
+    if (operation === 'SELECT' && rows.length && rows[0].result[0] !== 'Unknown') {
+        try {
+            const count = await adminText(`EXECUTE AS ${quoteIdentifier(user)} SELECT count() FROM ${target}`);
+            rows.push({what: 'Visible rows', result: [count.trim(), 'ok'], detail: 'Counted by the server with the user\'s grants and row policies at login'});
+        } catch (e) {
+            if (e instanceof AdminSessionChanged) return;
+            rows.push({what: 'Visible rows', result: ['Denied', ''], detail: e.message});
+        }
+    }
+    box.replaceChildren(dataTable([{title: 'Check', render: r => r.what}, {title: 'Result', render: r => badge(...r.result)}, {title: 'Evidence', render: r => r.detail}],
+        rows, '', 'Runtime verification'));
+}
+
+/// --- Setup of the console tables ---
+
+function dapSetupBox(purpose) {
+    const admin = session.admin;
+    const box = h('div', {className: 'box'}, h('h2', {}, 'Set up Data Access Policies'),
+        paragraph(`${purpose} needs the tables of attribute definitions, attribute values, classifications, policy rules, ownership of generated entities, `
+            + `deployments, and access tests in the ${admin.db} database. Setting up creates them; it changes no grant or policy.`));
+    if (!admin.db) return box;
+    put(box, h('div', {className: 'actions-row'}, button('Set up', () => {
+        const quoted = quoteIdentifier(admin.db);
+        reviewPlan({action: 'dap_setup', target_type: 'platform', target_name: admin.db, summary: `Set up Data Access Policies in ${admin.db}`, local_only: true,
+            steps: [{description: `Create the database ${admin.db}`, sql: `CREATE DATABASE IF NOT EXISTS ${quoted}`},
+                ...Object.entries(DAP_TABLES).map(([table, ddl]) => ({description: `Create the table ${admin.db}.${table}`,
+                    sql: `CREATE TABLE IF NOT EXISTS ${quoted}.${quoteIdentifier(table)}\n${ddl()}`}))],
+            recovery: 'The statements use IF NOT EXISTS: run the setup again after fixing the error.', onclose: reloadAdminContext});
+    }, {className: 'primary', disabled: !admin.can.setup, title: admin.can.setup ? null : `Needs CREATE TABLE on ${admin.db}.*.`})));
+    return box;
+}
+
+/// --- Access Tests ---
+
+async function dapLoadTests() {
+    return adminRows(`SELECT t.test_id AS test_id, t.name AS name, t.user_name AS user_name, t.database AS database, t.table AS table, t.columns AS columns,
+            toString(t.expect) AS expect, t.expected_rows AS expected_rows, t.updated_by AS updated_by,
+            r.outcome AS last_outcome, r.observed AS last_observed, r.ran_text AS last_ran_at
+        FROM (SELECT test_id, name, user_name, database, table, columns, expect, expected_rows, updated_by FROM ${dapTable('dap_access_tests')} FINAL WHERE NOT deleted) AS t
+        LEFT JOIN (SELECT test_id, toString(argMax(outcome, ran_at)) AS outcome, argMax(observed, ran_at) AS observed,
+            formatDateTime(max(ran_at), '%Y-%m-%d %H:%i:%S', 'UTC') AS ran_text FROM ${dapTable('dap_test_runs')} GROUP BY test_id) AS r ON r.test_id = t.test_id
+        ORDER BY t.name`);
+}
+
+function renderAccessTests(panel, page) {
+    if (!session.admin.can.read_dap) {
+        put(panel, dapSetupBox('Access tests'));
+        return;
+    }
+    const list = h('div', {});
+    const run_all = button('Run all', async () => {
+        run_all.disabled = true;
+        try {
+            const tests = await dapLoadTests();
+            for (const test of tests) await runAccessTest(test);
+        } catch (e) {
+            if (!(e instanceof AdminSessionChanged)) list.prepend(errorBox(e));
+        }
+        run_all.disabled = false;
+        reloadAdmin();
+    }, {className: 'small'});
+    put(panel, h('div', {className: 'box'}, h('h2', {}, 'Access tests'),
+        paragraph('Approved positive and negative authorization tests. Each test reads a table as a user, through EXECUTE AS: the server applies that user\'s grants, '
+            + 'default roles, and row policies, as for a direct connection. Running a test needs IMPERSONATE on its user, so grant it only on dedicated synthetic '
+            + 'test users. Results record whether the read was allowed and how many rows it returned, never the data.'),
+        h('div', {className: 'actions-row'}, button('Add test', () => accessTestDialog(), {className: 'small primary', disabled: !session.admin.can.write_dap_tests}), run_all),
+        list));
+    loadInto(page, list, dapLoadTests, tests => dataTable([
+        {title: 'Test', render: t => [h('strong', {}, t.name), h('div', {className: 'note'}, `by ${t.updated_by}`)]},
+        {title: 'As user', render: t => t.user_name},
+        {title: 'Reads', render: t => h('code', {}, `${t.columns.length ? t.columns.join(', ') : 'count()'} FROM ${t.database}.${t.table}`)},
+        {title: 'Expected', render: t => t.expect === 'allowed' ? `Allowed${t.expected_rows !== null ? `, ${t.expected_rows} rows` : ''}` : 'Denied'},
+        {title: 'Last result', render: t => t.last_outcome ? [badge(t.last_outcome === 'pass' ? 'Pass' : t.last_outcome === 'fail' ? 'Fail' : 'Error', t.last_outcome === 'pass' ? 'ok' : 'bad'),
+            h('div', {className: 'note'}, `${t.last_observed} (${t.last_ran_at} UTC)`)] : h('span', {className: 'note'}, 'Not run')},
+        {title: '', render: t => h('span', {className: 'actions-row'}, button('Run', async () => { await runAccessTest(t); reloadAdmin(); }, {className: 'small'}),
+            button('Remove', () => reviewPlan({action: 'dap_remove_test', target_type: 'access_test', target_name: t.name, summary: `Remove the access test ${t.name}`,
+                steps: [{description: `Remove the test ${t.name}`, sql: `INSERT INTO ${dapTable('dap_access_tests')} (test_id, name, user_name, database, table, columns, expect, expected_rows, deleted) FORMAT JSONEachRow\n`
+                    + JSON.stringify({test_id: t.test_id, name: t.name, user_name: t.user_name, database: t.database, table: t.table, columns: t.columns, expect: t.expect, expected_rows: t.expected_rows, deleted: true})}]}),
+            {className: 'small', disabled: !session.admin.can.write_dap_tests}))},
+    ], tests, 'No access tests yet.', 'Access tests'));
+}
+
+/// Runs one test: `EXECUTE AS` the test user, count the rows of the chosen columns. ACCESS_DENIED is the expected
+/// outcome of a negative test; any other error (including a missing IMPERSONATE grant) is an error, not a pass.
+async function runAccessTest(test) {
+    const target = `${quoteIdentifier(test.database)}.${quoteIdentifier(test.table)}`;
+    const inner = test.columns.length ? `SELECT ${test.columns.map(quoteIdentifier).join(', ')} FROM ${target}` : `SELECT 1 FROM ${target}`;
+    const result = await runQuery(session, `EXECUTE AS ${quoteIdentifier(test.user_name)} SELECT count() FROM (${inner})`, session.controller.signal, 60000, {raw: true});
+    let outcome;
+    let observed;
+    const denied = !result.ok && /\bACCESS_DENIED\b|Code: 497\b/.test(`${result.message} ${result.detail || ''}`) && !/IMPERSONATE/.test(`${result.message} ${result.detail || ''}`);
+    if (result.ok) {
+        const rows = Number(String(result.data).trim());
+        observed = `allowed, ${rows} rows`;
+        outcome = test.expect === 'allowed' && (test.expected_rows === null || Number(test.expected_rows) === rows) ? 'pass' : 'fail';
+    } else if (denied) {
+        observed = 'denied (ACCESS_DENIED)';
+        outcome = test.expect === 'denied' ? 'pass' : 'fail';
+    } else {
+        observed = `error: ${`${result.detail || ''} ${result.message}`.trim().slice(0, 300)}`;
+        outcome = 'error';
+    }
+    await adminText(`INSERT INTO ${dapTable('dap_test_runs')} (run_id, test_id, user_name, outcome, observed, path) FORMAT JSONEachRow\n`
+        + JSON.stringify({run_id: crypto.randomUUID(), test_id: test.test_id, user_name: test.user_name, outcome, observed, path: 'execute_as'}));
+    return {outcome, observed};
+}
+
+async function accessTestDialog() {
+    let users;
+    let databases;
+    try {
+        [users, databases] = await Promise.all([adminRows('SELECT name FROM system.users ORDER BY name'), dapDatabases()]);
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('Add test', [errorBox(e)], [button('Close', closeDialog)]);
+        return;
+    }
+    const name = h('input', {type: 'text', autocomplete: 'off'});
+    const user = select([['', 'Choose a user'], ...users.map(u => [u.name, u.name])], '');
+    const state = {database: dap_state.database, table: dap_state.table};
+    const picker = dapObjectPicker(databases, state, () => {});
+    const columns = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'id, branch (empty: count the rows only)'});
+    const expect = select([['allowed', 'Allowed'], ['denied', 'Denied (ACCESS_DENIED)']], 'allowed');
+    const rows = h('input', {type: 'number', min: 0, placeholder: 'any'});
+    await picker.ready;
+    formDialog('Add an access test', [adminField('Name', name), adminField('As user', user, 'Use a dedicated synthetic user: running the test needs IMPERSONATE on it.'),
+        adminField('Database', picker.database), adminField('Table', picker.table), adminField('Columns', columns),
+        adminField('Expected', expect), adminField('Expected rows', rows, 'For an allowed read: the number of rows the user must see. Empty: any.')], 'Review', () => {
+        if (!name.value.trim()) return 'Enter a name.';
+        if (!user.value) return 'Choose the user.';
+        if (!state.database || !state.table) return 'Choose the table.';
+        const list = columns.value.split(',').map(s => s.trim()).filter(Boolean);
+        for (const column of list) if (nameError(column, 'column')) return nameError(column, 'column');
+        const expected_rows = rows.value === '' ? null : Number(rows.value);
+        if (expected_rows !== null && (!Number.isInteger(expected_rows) || expected_rows < 0)) return 'Enter a whole number of rows, or leave it empty.';
+        const row = {test_id: crypto.randomUUID(), name: name.value.trim(), user_name: user.value, database: state.database, table: state.table, columns: list,
+            expect: expect.value, expected_rows: expect.value === 'allowed' ? expected_rows : null};
+        return {action: 'dap_add_test', target_type: 'access_test', target_name: row.name, summary: `Add the access test ${row.name}`,
+            steps: [{description: `Add the test: ${row.user_name} reads ${list.join(', ') || 'count()'} from ${row.database}.${row.table}, expected ${row.expect}`,
+                sql: `INSERT INTO ${dapTable('dap_access_tests')} (test_id, name, user_name, database, table, columns, expect, expected_rows) FORMAT JSONEachRow\n${JSON.stringify(row)}`}],
+            local_only: true};
+    });
+}
+
+/// --- Attributes & Classifications ---
+
+async function dapLoadAttributeState() {
+    const [definitions, values, classifications] = await Promise.all([
+        adminRows(`SELECT attribute, toString(category) AS category, dynamic, source, writer, owner, max_age_seconds, description, updated_by
+            FROM ${dapTable('dap_attributes')} FINAL WHERE NOT deleted ORDER BY attribute`),
+        adminRows(`SELECT user_name, attribute, value, source, toUnixTimestamp(observed_at) AS observed_seconds, updated_by,
+            formatDateTime(observed_at, '%Y-%m-%d %H:%i:%S', 'UTC') AS observed_text FROM ${dapTable('dap_user_attributes')} FINAL WHERE NOT deleted ORDER BY user_name, attribute`),
+        adminRows(`SELECT database, table, column, label, source, owner, updated_by FROM ${dapTable('dap_classifications')} FINAL WHERE NOT deleted ORDER BY database, table, column`),
+    ]);
+    return {definitions, values: values.map(v => ({...v, observed_at: v.observed_seconds})), classifications};
+}
+
+function renderAttributes(panel, page) {
+    if (!session.admin.can.read_dap) {
+        put(panel, dapSetupBox('Attribute-driven provisioning'));
+        return;
+    }
+    const body = h('div', {});
+    put(panel, body);
+    loadInto(page, body, dapLoadAttributeState, ({definitions, values, classifications}) => {
+        const now = Date.now() / 1000;
+        const index = dapAttributeIndex(values, definitions, now);
+        const can = session.admin.can;
+        return [
+            h('div', {className: 'box'}, h('h2', {}, 'Attributes'),
+                paragraph('Trusted attributes of users, resources, operations, and environments. Each attribute names its source of truth, the database user that writes '
+                    + 'its values (for an identity provider or HR system, the account of the import), its owner, and how long a value stays fresh. A value counts only '
+                    + 'when its writer, recorded by the server, is the attribute\'s writer: nothing typed into a browser by another user is taken as evidence. '
+                    + 'ClickHouse does not read identity provider claims itself: values reach it only through this table.'),
+                h('div', {className: 'actions-row'}, button('Define attribute', () => attributeDialog(), {className: 'small primary', disabled: !can.write_dap_attributes})),
+                dataTable([
+                    {title: 'Attribute', render: d => [h('strong', {}, d.attribute), h('div', {className: 'note'}, d.description)]},
+                    {title: 'Category', render: d => [d.category, d.dynamic ? [' ', badge('Per request', 'warn', 'Changes per query: native controls cannot follow it; rules on it are refused.')] : null]},
+                    {title: 'Source', render: d => d.source},
+                    {title: 'Writer', render: d => d.writer || h('span', {className: 'note'}, 'any administrator')},
+                    {title: 'Owner', render: d => d.owner},
+                    {title: 'Fresh for', render: d => d.max_age_seconds ? formatSeconds(d.max_age_seconds) : 'Always'},
+                ], definitions, 'No attributes are defined.', 'Attributes')),
+            h('div', {className: 'box'}, h('h2', {}, 'User attribute values'),
+                h('div', {className: 'actions-row'}, button('Set value', () => attributeValueDialog(definitions), {className: 'small primary', disabled: !can.write_dap_values})),
+                dataTable([
+                    {title: 'User', render: v => adminLink(v.user_name, 'admin-users', v.user_name)},
+                    {title: 'Attribute', render: v => v.attribute},
+                    {title: 'Value', render: v => v.value},
+                    {title: 'Source', render: v => `${v.source}, written by ${v.updated_by}`},
+                    {title: 'Confirmed', render: v => `${v.observed_text} UTC`},
+                    {title: 'Status', render: v => {
+                        const entry = (index[v.user_name] || {})[v.attribute];
+                        return entry && entry.stale ? badge('Not trusted', 'bad', entry.reason) : badge('Fresh', 'ok');
+                    }},
+                    {title: '', render: v => button('Remove', () => reviewPlan({action: 'dap_remove_attribute_value', target_type: 'user', target_name: v.user_name,
+                        summary: `Remove ${v.attribute} of ${v.user_name}`, local_only: true,
+                        steps: [{description: `Remove the value of ${v.attribute}`, sql: `INSERT INTO ${dapTable('dap_user_attributes')} (user_name, attribute, value, source, observed_at, deleted) FORMAT JSONEachRow\n`
+                            + JSON.stringify({user_name: v.user_name, attribute: v.attribute, value: '', source: v.source, observed_at: Math.floor(now), deleted: true})}],
+                        warning: 'Rules that need this attribute treat the user as missing it at the next deployment: according to each rule, the access it gave is revoked or held.'}),
+                    {className: 'small', disabled: !can.write_dap_values})},
+                ], values, 'No values yet.', 'Attribute values')),
+            h('div', {className: 'box'}, h('h2', {}, 'Data classifications'),
+                paragraph('Labels of columns (for example pii, financial, secret), with their source and owner. Classifications are resource attributes: rules give access '
+                    + 'to the columns of a label through a generated role. A label does not hide a column by itself.'),
+                h('div', {className: 'actions-row'}, button('Classify column', () => classifyDialog(), {className: 'small primary', disabled: !can.write_dap_classifications})),
+                dataTable([
+                    {title: 'Column', render: c => h('code', {}, `${c.database}.${c.table}.${c.column}`)},
+                    {title: 'Label', render: c => badge(c.label, 'warn')},
+                    {title: 'Source', render: c => `${c.source}, written by ${c.updated_by}`},
+                    {title: 'Owner', render: c => c.owner},
+                    {title: '', render: c => button('Remove', () => reviewPlan({action: 'dap_unclassify', target_type: 'column', target_name: `${c.database}.${c.table}.${c.column}`,
+                        summary: `Remove the label ${c.label} of ${c.database}.${c.table}.${c.column}`, local_only: true,
+                        steps: [{description: 'Remove the classification', sql: `INSERT INTO ${dapTable('dap_classifications')} (database, table, column, label, source, owner, deleted) FORMAT JSONEachRow\n`
+                            + JSON.stringify({...c, updated_by: undefined, deleted: true})}]}), {className: 'small', disabled: !can.write_dap_classifications})},
+                ], classifications, 'No column is classified.', 'Classifications')),
+        ];
+    });
+}
+
+function attributeDialog() {
+    const attribute = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'department'});
+    const category = select([['user', 'User'], ['resource', 'Resource'], ['operation', 'Operation'], ['environment', 'Environment']], 'user');
+    const dynamic = checkbox('Evaluated per request (purpose, device, time, network): native controls cannot enforce rules on it', false);
+    const source = h('input', {type: 'text', autocomplete: 'off', placeholder: 'keycloak, hr-feed, console'});
+    const writer = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'empty: any administrator who can write values'});
+    const owner = h('input', {type: 'text', autocomplete: 'off', placeholder: 'Identity team'});
+    const max_age = h('input', {type: 'number', min: 0, value: 86400});
+    const description = h('input', {type: 'text', autocomplete: 'off'});
+    formDialog('Define an attribute', [adminField('Attribute', attribute, 'Letters, digits, and underscores.'), adminField('Category', category), dynamic.element,
+        adminField('Source of truth', source), adminField('Writer', writer, 'The database user whose writes are trusted, for example the account of the identity import. The server records the writer of every value.'),
+        adminField('Owner', owner), adminField('Fresh for (seconds)', max_age, 'A value older than this is stale. 0: never stale.'), adminField('Description', description)], 'Review', () => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(attribute.value)) return 'Use letters, digits, and underscores for the attribute.';
+        if (!source.value.trim()) return 'Enter the source of truth.';
+        if (!owner.value.trim()) return 'Enter the owner.';
+        const seconds = Number(max_age.value);
+        if (!Number.isInteger(seconds) || seconds < 0) return 'Enter a whole number of seconds.';
+        if (writer.value && nameError(writer.value, 'user')) return nameError(writer.value, 'user');
+        const row = {attribute: attribute.value, category: category.value, dynamic: dynamic.input.checked, source: source.value.trim(), writer: writer.value.trim(),
+            owner: owner.value.trim(), max_age_seconds: seconds, description: description.value.trim()};
+        return {action: 'dap_define_attribute', target_type: 'attribute', target_name: row.attribute, summary: `Define the attribute ${row.attribute}`, local_only: true,
+            steps: [{description: `Define ${row.attribute} (${row.category}, source ${row.source}${row.writer ? `, written by ${row.writer}` : ''})`,
+                sql: `INSERT INTO ${dapTable('dap_attributes')} (attribute, category, dynamic, source, writer, owner, max_age_seconds, description) FORMAT JSONEachRow\n${JSON.stringify(row)}`}]};
+    });
+}
+
+async function attributeValueDialog(definitions) {
+    let users;
+    try {
+        users = await adminRows('SELECT name FROM system.users ORDER BY name');
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('Set value', [errorBox(e)], [button('Close', closeDialog)]);
+        return;
+    }
+    const usable = definitions.filter(d => d.category === 'user' && (!d.writer || d.writer === session.server_user));
+    const user = select([['', 'Choose a user'], ...users.map(u => [u.name, u.name])], '');
+    const attribute = select([['', 'Choose an attribute'], ...usable.map(d => [d.attribute, `${d.attribute} (${d.source})`])], '');
+    const value = h('input', {type: 'text', autocomplete: 'off'});
+    formDialog('Set a user attribute', [adminField('User', user), adminField('Attribute', attribute,
+        'Only user attributes whose writer is you or any administrator. Attributes written by an import are set by the import.'), adminField('Value', value)], 'Review', () => {
+        if (!user.value || !attribute.value) return 'Choose the user and the attribute.';
+        if (!value.value.trim()) return 'Enter the value.';
+        const def = usable.find(d => d.attribute === attribute.value);
+        const row = {user_name: user.value, attribute: attribute.value, value: value.value.trim(), source: def.source, observed_at: Math.floor(Date.now() / 1000)};
+        return {action: 'dap_set_attribute_value', target_type: 'user', target_name: row.user_name, summary: `Set ${row.attribute} of ${row.user_name}`, local_only: true,
+            steps: [{description: `Set ${row.attribute} of ${row.user_name}`, sql: `INSERT INTO ${dapTable('dap_user_attributes')} (user_name, attribute, value, source, observed_at) FORMAT JSONEachRow\n${JSON.stringify(row)}`}],
+            audit_details: {attribute: row.attribute},
+            warning: 'Rules use the new value at the next deployment or reconciliation, not immediately.'};
+    });
+}
+
+async function classifyDialog() {
+    let databases;
+    try {
+        databases = await dapDatabases();
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('Classify column', [errorBox(e)], [button('Close', closeDialog)]);
+        return;
+    }
+    const state = {database: dap_state.database, table: dap_state.table};
+    const column = select([], '');
+    const fill = async () => {
+        const rows = state.database && state.table ? await adminRows('SELECT name FROM system.columns WHERE database = {db:String} AND table = {t:String} ORDER BY position', {db: state.database, t: state.table}) : [];
+        column.replaceChildren(...rows.map(r => h('option', {value: r.name}, r.name)));
+    };
+    const picker = dapObjectPicker(databases, state, fill);
+    const label = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'pii'});
+    const source = h('input', {type: 'text', autocomplete: 'off', value: 'console'});
+    const owner = h('input', {type: 'text', autocomplete: 'off'});
+    await picker.ready;
+    await fill();
+    formDialog('Classify a column', [adminField('Database', picker.database), adminField('Table', picker.table), adminField('Column', column),
+        adminField('Label', label), adminField('Source', source, 'The catalog or person this classification comes from.'), adminField('Owner', owner)], 'Review', () => {
+        if (!state.database || !state.table || !column.value) return 'Choose the column.';
+        if (!/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(label.value)) return 'Use letters, digits, dashes, and underscores for the label.';
+        if (!owner.value.trim()) return 'Enter the owner.';
+        const row = {database: state.database, table: state.table, column: column.value, label: label.value, source: source.value.trim(), owner: owner.value.trim()};
+        return {action: 'dap_classify', target_type: 'column', target_name: `${row.database}.${row.table}.${row.column}`, summary: `Classify ${row.database}.${row.table}.${row.column} as ${row.label}`,
+            local_only: true, steps: [{description: `Label ${row.column} ${row.label}`, sql: `INSERT INTO ${dapTable('dap_classifications')} (database, table, column, label, source, owner) FORMAT JSONEachRow\n${JSON.stringify(row)}`}],
+            warning: 'Rules on this label change the grants of their roles at the next deployment.'};
+    });
+}
+
+/// --- Policy Rules ---
+
+async function dapLoadRules() {
+    const [rows, classifications] = await Promise.all([
+        /// The aliases differ from the column names: an alias named like a column would replace it inside the other aggregates.
+        adminRows(`SELECT rule_id, max(revision) AS last_revision, argMax(name, revision) AS last_name, argMax(spec, revision) AS last_spec,
+            argMax(enabled, revision) AS last_enabled, argMax(deleted, revision) AS last_deleted, argMax(created_by, revision) AS last_created_by,
+            formatDateTime(max(created_at), '%Y-%m-%d %H:%i:%S', 'UTC') AS last_created_at
+            FROM ${dapTable('dap_rules')} GROUP BY rule_id ORDER BY last_name`),
+        adminRows(`SELECT database, table, column, label FROM ${dapTable('dap_classifications')} FINAL WHERE NOT deleted`),
+    ]);
+    return rows.map(r => ({rule_id: r.rule_id, revision: r.last_revision, name: r.last_name, spec: JSON.parse(r.last_spec), enabled: r.last_enabled, deleted: r.last_deleted,
+        created_by: r.last_created_by, created_at: r.last_created_at, classifications}));
+}
+
+/// Everything a plan needs: rules, attributes, classifications, ownership, and the observed access entities.
+async function dapLoadPlanState() {
+    const [rules, attrs, owned, access, deployments] = await Promise.all([dapLoadRules(), dapLoadAttributeState(),
+        adminRows(`SELECT key, rule_id, revision FROM ${dapTable('dap_owned')} FINAL WHERE NOT deleted`), dapLoadAccess(),
+        adminRows(`SELECT deployment_id, toString(kind) AS kind, scope, rules, steps, toString(result) AS result, verification, created_by,
+            formatDateTime(created_at, '%Y-%m-%d %H:%i:%S', 'UTC') AS created_at FROM ${dapTable('dap_deployments')} ORDER BY created_at DESC LIMIT 50`)]);
+    const users = access.users.map(u => u.name);
+    const {desired, rejected, index} = dapDesired(rules, attrs.definitions, attrs.values, attrs.classifications, users, owned, Date.now() / 1000);
+    return {rules, attrs, owned, access, deployments, desired, rejected, index};
+}
+
+const RULE_KINDS = {role_membership: 'Grant a role', row_filter: 'Filter rows by an attribute', column_clearance: 'Columns of a label need a clearance'};
+
+function ruleSummary(spec) {
+    const selector = (spec.selector || []).map(c => `${c.attribute} ∈ {${c.values.join(', ')}}`).join(' and ') || 'every user with the attributes';
+    if (spec.kind === 'role_membership') return `Users with ${selector} get the role ${spec.role}.`;
+    if (spec.kind === 'row_filter') return `Users with ${selector} read the rows of ${spec.database}.${spec.table} where ${spec.column} equals their ${spec.attribute}.`;
+    if (spec.kind === 'column_clearance') return `Users with ${selector} read the ${spec.label} columns only when ${spec.attribute} ∈ {${(spec.values || []).join(', ')}}.`;
+    return spec.kind;
+}
+
+function renderPolicyRules(panel, page) {
+    if (!session.admin.can.read_dap) {
+        put(panel, dapSetupBox('Policy rules'));
+        return;
+    }
+    const body = h('div', {});
+    put(panel, h('div', {className: 'box'}, h('h2', {}, 'Policy rules'),
+        paragraph('Attribute-driven rules, translated into native roles, grants, and row policies when deployed. Rules only add access: a rule never removes a grant '
+            + 'made outside the platform, so this is not deny-overrides. Rules on attributes evaluated per request are refused, not approximated with permanent grants. '
+            + 'Every change is a new revision with its author.'),
+        h('div', {className: 'actions-row'}, button('New rule', () => ruleDialog(null), {className: 'small primary', disabled: !session.admin.can.write_dap_rules})),
+        body));
+    loadInto(page, body, dapLoadPlanState, state => {
+        const verdict = rule => {
+            const rejected = state.rejected.find(r => r.rule.rule_id === rule.rule_id);
+            if (rejected) return badge('Not representable', 'bad', rejected.problem);
+            if (!rule.enabled) return badge('Disabled');
+            const d = state.desired.find(x => x.rule.rule_id === rule.rule_id);
+            return badge(`${d.matched.length} users`, 'ok', `${d.excluded.length} excluded`);
+        };
+        return [dataTable([
+            {title: 'Rule', render: r => [h('strong', {}, r.name), h('div', {className: 'note'}, `${RULE_KINDS[r.spec.kind] || r.spec.kind}; revision ${r.revision} by ${r.created_by}, ${r.created_at} UTC`)]},
+            {title: 'Business rule', render: r => ruleSummary(r.spec)},
+            {title: 'Status', render: r => r.deleted ? badge('Deleted') : verdict(r)},
+            {title: '', render: r => r.deleted ? null : h('span', {className: 'actions-row'},
+                button('Explain', () => explainRule(state, r), {className: 'small'}),
+                button('Edit', () => ruleDialog(r), {className: 'small', disabled: !session.admin.can.write_dap_rules}),
+                button(r.enabled ? 'Disable' : 'Enable', () => reviewPlan(ruleRevisionPlan(r, {enabled: !r.enabled}, r.enabled ? 'Disable' : 'Enable')), {className: 'small', disabled: !session.admin.can.write_dap_rules}),
+                button('Delete', () => reviewPlan(ruleRevisionPlan(r, {deleted: true, enabled: false}, 'Delete')), {className: 'small', disabled: !session.admin.can.write_dap_rules}))},
+        ], state.rules, 'No rules yet.', 'Rules')];
+    });
+}
+
+function ruleRevisionPlan(rule, changes, verb) {
+    const row = {rule_id: rule.rule_id, revision: rule.revision + 1, name: rule.name, spec: JSON.stringify(rule.spec), enabled: rule.enabled, deleted: false, note: verb, ...changes};
+    return {action: 'dap_rule_revision', target_type: 'policy_rule', target_name: rule.name, summary: `${verb} the rule ${rule.name} (revision ${row.revision})`, local_only: true,
+        steps: [{description: `${verb} the rule: revision ${row.revision}`, sql: `INSERT INTO ${dapTable('dap_rules')} (rule_id, revision, name, spec, enabled, deleted, note) FORMAT JSONEachRow\n${JSON.stringify(row)}`}],
+        warning: 'Nothing changes on the server until the rules are deployed (Policy Deployments) or reconciled by the access policy worker.'};
+}
+
+/// Business rule → resolved attributes → generated controls → target nodes → verification result.
+function explainRule(state, rule) {
+    const d = state.desired.find(x => x.rule.rule_id === rule.rule_id);
+    const rejected = state.rejected.find(r => r.rule.rule_id === rule.rule_id);
+    const owned = new Set(state.owned.map(o => o.key));
+    const have = dapObservedKeys(state.access);
+    const last = state.deployments.find(dep => dep.kind !== 'verify' && JSON.parse(dep.rules || '[]').some(r => r.rule_id === rule.rule_id));
+    openDialog(`Rule: ${rule.name}`, [
+        h('h3', {}, 'Business rule'), paragraph(ruleSummary(rule.spec)),
+        rejected ? h('div', {className: 'message error'}, `Not representable with native controls: ${rejected.problem}`) : [
+            h('h3', {}, 'Resolved attributes'),
+            dataTable([{title: 'User', render: m => m.user}, {title: 'Values', render: m => Object.entries(m.values).map(([k, v]) => `${k} = ${v}`).join(', ')}],
+                d ? d.matched : [], 'No user matches.', 'Matched users'),
+            d && d.excluded.length ? dataTable([{title: 'Excluded user', render: e => e.user}, {title: 'Why', render: e => e.reason},
+                {title: 'Effect', render: e => e.hold ? 'Keeps what was provisioned' : (e.in_scope && rule.spec.kind === 'row_filter' ? 'Sees no row (fail closed)' : 'Gets nothing from this rule')}],
+            d.excluded, '', 'Excluded users') : null,
+            h('h3', {}, 'Generated controls'),
+            dataTable([{title: 'Entity', render: e => h('code', {}, e.key)}, {title: 'Detail', render: e => e.kind === 'row_policy' ? `${e.filter} for ${e.users.join(', ')}` : ''},
+                {title: 'On this server', render: e => have.has(e.key) ? (owned.has(e.key) ? badge('Deployed', 'ok') : badge('Exists, not owned', 'warn')) : badge('Not deployed', 'bad')}],
+            d ? d.entities : [], 'None.', 'Generated controls'),
+            d && d.notes.length ? h('ul', {}, d.notes.map(n => h('li', {}, n))) : null,
+            h('h3', {}, 'Target nodes and verification'),
+            last ? kvList([['Last deployment', `${last.created_at} UTC by ${last.created_by}: ${last.result}`], ['Scope', last.scope || `${session.hostname} only`],
+                ['Verification', last.verification || 'Not verified']]) : paragraph('Never deployed.'),
+        ],
+    ], [button('Close', closeDialog, {className: 'primary'})]);
+}
+
+async function ruleDialog(existing) {
+    let state;
+    try {
+        [state] = await Promise.all([dapLoadPlanState()]);
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('Rule', [errorBox(e)], [button('Close', closeDialog)]);
+        return;
+    }
+    const spec = existing ? existing.spec : {kind: 'role_membership', selector: [], on_stale: 'revoke', exceptions: []};
+    const user_attrs = state.attrs.definitions.filter(d => d.category === 'user');
+    const name = h('input', {type: 'text', autocomplete: 'off', value: existing ? existing.name : ''});
+    const kind = select(Object.entries(RULE_KINDS), spec.kind);
+    const selector = h('textarea', {rows: 2, spellcheck: false, className: 'code',
+        value: (spec.selector || []).map(c => `${c.attribute} = ${c.values.join(', ')}`).join('\n'), placeholder: 'department = Finance\nemployment_status = active'});
+    const role = select([['', 'Choose a role'], ...state.access.roles.map(r => [r.name, r.name])], spec.role || '');
+    const pick = {database: spec.database || '', table: spec.table || ''};
+    const picker = dapObjectPicker(await dapDatabases(), pick, () => fillColumns());
+    const column = select([], spec.column || '');
+    const fillColumns = async () => {
+        const rows = pick.database && pick.table ? await adminRows('SELECT name FROM system.columns WHERE database = {db:String} AND table = {t:String} ORDER BY position', {db: pick.database, t: pick.table}) : [];
+        column.replaceChildren(...rows.map(r => h('option', {value: r.name, selected: r.name === spec.column}, r.name)));
+    };
+    const attribute_options = [['', 'Choose an attribute'], ...user_attrs.map(d => [d.attribute, d.attribute])];
+    const attribute = select(attribute_options, spec.kind === 'row_filter' ? spec.attribute || '' : '');
+    const clearance = select(attribute_options, spec.kind === 'column_clearance' ? spec.attribute || '' : '');
+    const labels = [...new Set(state.attrs.classifications.map(c => c.label))];
+    const label = select([['', 'Choose a label'], ...labels.map(l => [l, l])], spec.label || '');
+    const values = h('input', {type: 'text', autocomplete: 'off', value: (spec.values || []).join(', '), placeholder: 'secret, top_secret'});
+    const on_stale = select([['revoke', 'Revoke what the rule gave (fail closed)'], ['keep', 'Keep what was provisioned until the value is fresh again']], spec.on_stale || 'revoke');
+    const exceptions = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, value: (spec.exceptions || []).join(', '), placeholder: 'users the rule never provisions'});
+    const enabled = checkbox('Enabled', existing ? existing.enabled : true);
+    const groups = {
+        role_membership: [adminField('Role', role, 'An existing role. The rule grants it; it never changes the role\'s privileges.')],
+        row_filter: [adminField('Database', picker.database), adminField('Table', picker.table), adminField('Column', column),
+            adminField('Attribute', attribute, 'Each user reads the rows whose column equals the user\'s value. Users in scope without a fresh value see no row.')],
+        column_clearance: [adminField('Label', label), adminField('Clearance attribute', clearance), adminField('Values that clear', values)],
+    };
+    const group_boxes = Object.fromEntries(Object.entries(groups).map(([k, fields]) => [k, h('div', {}, fields)]));
+    const sync = () => {
+        for (const [k, box] of Object.entries(group_boxes)) box.hidden = k !== kind.value;
+    };
+    kind.addEventListener('change', sync);
+    await picker.ready;
+    await fillColumns();
+    sync();
+    formDialog(existing ? `Edit the rule ${existing.name}` : 'New policy rule', [
+        adminField('Name', name), adminField('Kind', kind),
+        adminField('Users', selector, `One condition per line: attribute = value, value. All must hold. User attributes: ${user_attrs.map(d => d.attribute).join(', ') || 'none defined'}.`),
+        ...Object.values(group_boxes),
+        adminField('Missing or stale attribute', on_stale), adminField('Exceptions', exceptions, 'Comma-separated user names.'), enabled.element,
+    ], 'Review', () => {
+        if (!name.value.trim()) return 'Enter a name.';
+        const conditions = [];
+        for (const line of selector.value.split('\n').map(l => l.trim()).filter(Boolean)) {
+            const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+            if (!match) return `Write each condition as attribute = value, value: ${line}`;
+            conditions.push({attribute: match[1], values: match[2].split(',').map(v => v.trim()).filter(Boolean)});
+        }
+        const next = {kind: kind.value, selector: conditions, on_stale: on_stale.value, exceptions: exceptions.value.split(',').map(s => s.trim()).filter(Boolean)};
+        if (kind.value === 'role_membership') next.role = role.value;
+        if (kind.value === 'row_filter') Object.assign(next, {database: pick.database, table: pick.table, column: column.value, attribute: attribute.value});
+        if (kind.value === 'column_clearance') Object.assign(next, {label: label.value, attribute: clearance.value, values: values.value.split(',').map(v => v.trim()).filter(Boolean)});
+        const problem = dapRuleProblem(next, state.attrs.definitions);
+        if (problem) return `This rule cannot be represented with native controls: ${problem}`;
+        const rule_id = existing ? existing.rule_id : crypto.randomUUID();
+        const row = {rule_id, revision: existing ? existing.revision + 1 : 1, name: name.value.trim(), spec: JSON.stringify(next), enabled: enabled.input.checked, deleted: false,
+            note: existing ? 'edited' : 'created'};
+        const preview = dapRuleEntities({rule_id, spec: next}, state.access.users.map(u => u.name), state.index, state.attrs.classifications,
+            new Set(state.owned.filter(o => o.rule_id === rule_id).map(o => o.key)));
+        return {action: 'dap_rule_revision', target_type: 'policy_rule', target_name: row.name, summary: `${existing ? 'Change' : 'Create'} the rule ${row.name} (revision ${row.revision})`,
+            local_only: true, steps: [{description: `Save revision ${row.revision}: ${ruleSummary(next)}`,
+                sql: `INSERT INTO ${dapTable('dap_rules')} (rule_id, revision, name, spec, enabled, deleted, note) FORMAT JSONEachRow\n${JSON.stringify(row)}`}],
+            warning: `Resolved now: ${preview.matched.length} users matched (${preview.matched.map(m => m.user).join(', ') || 'none'}), ${preview.excluded.length} excluded; `
+                + `${preview.entities.length} generated controls. Nothing changes on the server until the rules are deployed.`};
+    });
+}
+
+/// --- Policy Deployments ---
+
+function renderPolicyDeployments(panel, page) {
+    if (!session.admin.can.read_dap) {
+        put(panel, dapSetupBox('Policy deployments'));
+        return;
+    }
+    const body = h('div', {});
+    put(panel, body);
+    loadInto(page, body, dapLoadPlanState, state => deploymentsView(state, page));
+}
+
+function deploymentsView(state, page) {
+    const restore = checkbox('Restore entities that were removed outside the platform', false);
+    const preview = h('div', {});
+    const draw = () => {
+        const plan = dapPlan(state.desired, state.access, state.owned, session.admin.scope, restore.input.checked);
+        const unscoped = [];
+        for (const d of state.desired.filter(x => x.rule.spec.kind === 'row_filter')) {
+            const {database, table} = d.rule.spec;
+            const scoped = new Set([...d.matched.map(m => m.user), ...d.excluded.filter(e => e.in_scope).map(e => e.user)]);
+            const readers = state.access.users.map(u => u.name).filter(user => !scoped.has(user)
+                && dapColumnAccess(state.access.grants, state.access.role_grants, state.access.tree, {type: 'user', name: user}, 'SELECT', database, table, [d.rule.spec.column])[0].allowed_at_login
+                && dapRowFilter(state.access.policies, database, table, user, dapLoginRoles(state.access.role_grants, user)).outcome !== 'filtered');
+            if (readers.length) unscoped.push(`${database}.${table} (rule "${d.rule.name}"): ${readers.join(', ')}`);
+        }
+        const disabled = Object.entries(state.index).filter(([, attrs]) => attrs.employment_status && DAP_DISABLED_STATUSES.includes(attrs.employment_status.value)).map(([user]) => user);
+        preview.replaceChildren(...[
+            h('h3', {}, 'Planned changes'),
+            plan.steps.length ? h('ol', {className: 'steps'}, plan.steps.map(s => h('li', {}, s.description))) : paragraph('None: the server matches the rules.'),
+            h('div', {className: 'actions-row'}, button('Deploy', () => reviewPlan(deployPlan(state,
+                dapPlan(state.desired, state.access, state.owned, session.admin.scope, restore.input.checked))), {className: 'primary', disabled: !plan.steps.length || !session.admin.can.write_dap_deploy}),
+                button('Verify', () => verifyDeployment(state), {className: 'small', disabled: !session.admin.can.write_dap_deploy})),
+            plan.conflicts.length ? [h('h3', {}, 'Left alone'), dataTable([{title: 'Entity', render: c => h('code', {}, c.key)}, {title: 'Why', render: c => c.message},
+                {title: '', render: c => c.kind === 'exists-not-owned' ? button('Adopt', () => reviewPlan(adoptPlan(c)), {className: 'small', disabled: !session.admin.can.write_dap_deploy}) : null}],
+            plan.conflicts, '', 'Conflicts')] : null,
+            plan.removed_outside.length ? [h('h3', {}, 'Removed outside the platform'), h('ul', {}, plan.removed_outside.map(r => h('li', {}, r.message)))] : null,
+            state.rejected.length ? [h('h3', {}, 'Rules not deployed'), h('ul', {}, state.rejected.map(r => h('li', {}, `${r.rule.name}: ${r.problem}`)))] : null,
+            unscoped.length ? [h('h3', {}, 'Readers outside the rules'), paragraph('Users who can read a table filtered by a rule, are not in the rule\'s scope, '
+                + 'and have no other policy on it: they see every row. Add them to a rule or a policy, or revoke their SELECT.'),
+                h('ul', {}, unscoped.map(t => h('li', {}, t)))] : null,
+            disabled.length ? [h('h3', {}, 'Disabled identities'), paragraph(`${disabled.join(', ')}: rules provision nothing for them, and revoke what they gave. They can still sign in to `
+                + 'ClickHouse with their own credentials and use grants made outside the platform until their account is suspended (Users page) or dropped.')] : null,
+        ].flat(Infinity).filter(Boolean));
+    };
+    restore.input.addEventListener('change', draw);
+    draw();
+    return [
+        h('div', {className: 'box'}, h('h2', {}, 'Deploy the rules'),
+            paragraph('The plan brings this server, or the cluster chosen at the top, to the desired state of every enabled rule: it creates and removes only entities the '
+                + 'platform owns (recorded in dap_owned), and leaves grants made outside of it alone. Statements are idempotent: deploying again repairs a partial '
+                + 'deployment. The access policy worker runs the same plan on a schedule, so attribute changes take effect within its interval.'),
+            kvList([['Observed', `${state.access.observed_at} UTC on ${session.hostname}`], ['Scope', session.admin.scope ? `ON CLUSTER ${session.admin.scope}` : `${session.hostname} only`],
+                ['Rules', `${state.rules.filter(r => r.enabled && !r.deleted).length} enabled, ${state.rejected.length} not representable`]]),
+            restore.element, preview),
+        h('div', {className: 'box'}, h('h2', {}, 'History'),
+            dataTable([
+                {title: 'Time', render: d => `${d.created_at} UTC`},
+                {title: 'Kind', render: d => d.kind},
+                {title: 'By', render: d => d.created_by},
+                {title: 'Scope', render: d => d.scope || 'This server'},
+                {title: 'Result', render: d => badge(d.result, d.result === 'success' || d.result === 'no_change' ? 'ok' : 'bad')},
+                {title: 'Rules', render: d => JSON.parse(d.rules || '[]').map(r => `${r.name || r.rule_id.slice(0, 8)} r${r.revision}`).join(', ')},
+                {title: 'Details', render: d => h('details', {}, h('summary', {}, 'Steps and verification'), h('pre', {className: 'code'},
+                    JSON.stringify({steps: JSON.parse(d.steps || '[]'), verification: d.verification ? JSON.parse(d.verification) : null}, null, 2)))},
+            ], state.deployments, 'Nothing deployed yet.', 'Deployments')),
+    ];
+}
+
+/// A deployment plan: the statements, then the ownership and deployment records, written after the statements
+/// from the outcome of each step, so that only applied changes become owned.
+function deployPlan(state, plan) {
+    const deployment_id = crypto.randomUUID();
+    const scope = session.admin.scope;
+    const rules = state.desired.map(d => ({rule_id: d.rule.rule_id, revision: d.rule.revision, name: d.rule.name}));
+    const steps = plan.steps.filter(s => s.sql).map(s => ({description: s.description, sql: s.sql, plan_step: s}));
+    const forgotten = plan.steps.filter(s => !s.sql);
+    return {action: 'dap_deploy', target_type: 'data_access', target_name: scope || session.hostname, summary: `Deploy ${rules.length} policy rules (${steps.length} changes)`,
+        steps, local_only: !scope, correlation_id: deployment_id, audit_details: {deployment_id, rules},
+        warning: forgotten.length ? `${forgotten.length} owned entities no longer exist and are forgotten.` : null,
+        after: outcome => recordDeployment(deployment_id, 'deploy', scope, rules, steps, forgotten, outcome),
+        result_extra: () => paragraph('Verify the deployment to check the result per user, including alternative grants and running sessions.')};
+}
+
+async function recordDeployment(deployment_id, kind, scope, rules, steps, forgotten, outcome) {
+    const owned_rows = [];
+    outcome.steps.forEach((record, i) => {
+        const step = steps[i].plan_step;
+        const applied = record.status === 'ok' || record.status === 'partial';
+        if (!applied) return;
+        const rule = rules.find(r => r.rule_id === step.rule_id) || {revision: 0};
+        owned_rows.push({key: step.key, rule_id: step.rule_id, revision: rule.revision, deployment_id, deleted: step.op === 'remove'});
+    });
+    for (const step of forgotten) owned_rows.push({key: step.key, rule_id: step.rule_id, revision: 0, deployment_id, deleted: true});
+    const result = outcome.result === 'success' ? 'success' : outcome.result;
+    const statements = [];
+    if (owned_rows.length) statements.push(`INSERT INTO ${dapTable('dap_owned')} (key, rule_id, revision, deployment_id, deleted) FORMAT JSONEachRow\n${owned_rows.map(r => JSON.stringify(r)).join('\n')}`);
+    statements.push(`INSERT INTO ${dapTable('dap_deployments')} (deployment_id, kind, scope, rules, steps, result, verification) FORMAT JSONEachRow\n`
+        + JSON.stringify({deployment_id, kind, scope, rules: JSON.stringify(rules), result,
+            steps: JSON.stringify(outcome.steps.map((r, i) => ({description: r.description, key: steps[i].plan_step.key, status: r.status, error: r.error || '', hosts: r.hosts || null}))),
+            verification: ''}));
+    for (const sql of statements) await adminText(sql);
+}
+
+function adoptPlan(conflict) {
+    const row = {key: conflict.key, rule_id: conflict.rule_id, revision: 0, deployment_id: 'adopted', deleted: false};
+    return {action: 'dap_adopt', target_type: 'data_access', target_name: conflict.key, summary: `Adopt ${conflict.key}`, local_only: true,
+        steps: [{description: `Record ${conflict.key} as owned by the platform`, sql: `INSERT INTO ${dapTable('dap_owned')} (key, rule_id, revision, deployment_id, deleted) FORMAT JSONEachRow\n${JSON.stringify(row)}`}],
+        warning: 'The platform will change or remove this entity as the rules require, although it was created outside of it.'};
+}
+
+/// Checks the deployed state per rule and user: generated entities present, revoked users without the access
+/// through other grants, and queries still running for the affected users. Recorded as a `verify` deployment.
+async function verifyDeployment(state) {
+    openDialog('Verify the deployment', [loadingBox('Checking…')], null);
+    const body = $('admin-dialog').querySelector('.dialog-body');
+    try {
+        const access = await dapLoadAccess();
+        const have = dapObservedKeys(access);
+        const results = [];
+        for (const d of state.desired) {
+            for (const e of d.entities) results.push({rule: d.rule.name, check: e.key, state: have.has(e.key) ? 'present' : 'missing'});
+            /// Users known to the identity sources whom the rule does not provision: revocation is complete only
+            /// when none of them keeps the access through another grant.
+            const provisioned = new Set(d.entities.filter(e => e.kind === 'role_grant').map(e => e.user));
+            const others = Object.keys(state.index).filter(user => !provisioned.has(user) && access.users.some(u => u.name === user));
+            if (d.rule.spec.kind === 'column_clearance') {
+                const labeled = d.rule.classifications.filter(c => c.label === d.rule.spec.label);
+                for (const user of others) {
+                    for (const c of labeled) {
+                        const m = dapColumnAccess(access.grants, access.role_grants, access.tree, {type: 'user', name: user}, 'SELECT', c.database, c.table, [c.column])[0];
+                        if (m.allowed_with_roles) results.push({rule: d.rule.name, check: `${user} still reads ${c.database}.${c.table}.${c.column}`, state: 'alternative access',
+                            detail: m.sources.filter(s => !s.revoked).map(s => `${s.row.access_type} ON ${grantTargetText(s.row)}${s.grantee.path.length ? ` via ${s.grantee.path.join(' → ')}` : ''}`).join('; ')});
+                    }
+                }
+            }
+            if (d.rule.spec.kind === 'role_membership') {
+                for (const user of others) {
+                    if (dapAllRoles(access.role_grants, user).includes(d.rule.spec.role)) results.push({rule: d.rule.name, check: `${user} still has ${d.rule.spec.role}`, state: 'alternative access', detail: 'Granted outside the platform'});
+                }
+            }
+        }
+        const affected = Object.keys(state.index);
+        const running = affected.length && session.admin.can.read_processes
+            ? await adminRows('SELECT user, count() AS queries FROM system.processes WHERE user IN {users:Array(String)} GROUP BY user', {users: arrayParam(affected)}) : [];
+        for (const r of running) results.push({rule: '—', check: `${r.user} has ${r.queries} running queries`, state: 'running', detail: 'Grants are checked when a query starts: running queries finish with the access they started with.'});
+        const ok = results.every(r => r.state === 'present');
+        const verification = {checked_at: access.observed_at, host: session.hostname, scope: session.admin.scope || 'local', results,
+            coverage: session.admin.scope ? `Checked on ${session.hostname} only; other servers of ${session.admin.scope} are covered by the per-server results of the deployment.` : 'This server.'};
+        await adminText(`INSERT INTO ${dapTable('dap_deployments')} (deployment_id, kind, scope, rules, steps, result, verification) FORMAT JSONEachRow\n`
+            + JSON.stringify({deployment_id: crypto.randomUUID(), kind: 'verify', scope: session.admin.scope, rules: JSON.stringify(state.desired.map(d => ({rule_id: d.rule.rule_id, revision: d.rule.revision, name: d.rule.name}))),
+                steps: '[]', result: ok ? 'success' : 'partial', verification: JSON.stringify(verification)}));
+        body.replaceChildren(h('div', {className: `message ${ok ? 'info' : 'warning'}`}, ok ? 'Every generated control is present, and no excluded user keeps the access elsewhere.'
+            : 'Some controls are missing, or excluded users keep the access through other grants: revocation is not complete.'),
+        dataTable([{title: 'Rule', render: r => r.rule}, {title: 'Check', render: r => h('code', {}, r.check)},
+            {title: 'State', render: r => badge(r.state, r.state === 'present' ? 'ok' : 'bad')}, {title: 'Detail', render: r => r.detail || ''}], results, 'Nothing to check.', 'Verification'),
+        h('div', {className: 'dialog-actions'}, button('Close', closeDialog, {className: 'primary'})));
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) body.replaceChildren(errorBox(e), h('div', {className: 'dialog-actions'}, button('Close', closeDialog)));
+    }
+}
 
 /// --- Administration: Backup & Restore ---
 
