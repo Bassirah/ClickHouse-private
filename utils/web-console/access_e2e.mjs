@@ -453,16 +453,68 @@ await sql(`DROP SETTINGS PROFILE IF EXISTS e2e_limits`);
 await sql(`DROP QUOTA IF EXISTS e2e_quota`);
 await sql('DROP DATABASE IF EXISTS e2e_sales');
 await sql('DROP DATABASE IF EXISTS e2e_hr');
+await test('Administration pages are governed too: a page hidden for all users stays open to an authorized role', async () => {
+    for (const statement of ['DROP USER IF EXISTS e2e_auditor, e2e_other', 'DROP ROLE IF EXISTS e2e_auditors', 'CREATE ROLE e2e_auditors',
+        "CREATE USER e2e_auditor IDENTIFIED BY 'E2e-Auditor-Pw-1'", "CREATE USER e2e_other IDENTIFIED BY 'E2e-Other-Pw-1'",
+        `GRANT SELECT ON ${ADMIN_DB}.audit_log TO e2e_auditor, e2e_other`, 'GRANT SELECT ON system.query_log TO e2e_auditor, e2e_other',
+        `GRANT ${ADMIN_DB}_reader TO e2e_auditor, e2e_other`, 'GRANT e2e_auditors TO e2e_auditor']) {
+        const result = await sql(statement);
+        check(!errorCode(result), `${statement}: ${result}`);
+    }
+    const page = admin.page;
+    const saveRules = async subject => {
+        await go(page, `/console/admin-access${subject ? `?tab=${subject}` : ''}`);
+        await page.waitForTimeout(1500);
+        return page;
+    };
+    /// All users: the page is not listed. The administrator keeps Component Access, which the policy does not govern.
+    await saveRules(null);
+    const row = await view(page).locator('tr', {hasText: 'Audit Activity'}).first().innerText();
+    check(row.includes('Administration') && row.includes('administration page'), `the page is not in the matrix: ${row}`);
+    check((await view(page).locator('tr', {hasText: 'Audit Activity'}).first().locator('input[type=checkbox]').count()) === 1, 'more than Open applies to an administration page');
+    check(!(await view(page).locator('tr', {hasText: 'Component Access'}).count()), 'Component Access is governed: a policy mistake could lock administrators out');
+    await view(page).getByLabel('Open Audit Activity').uncheck();
+    await view(page).locator('button', {hasText: 'Save rules'}).click();
+    check((await apply(page)).includes('Applied.'), 'the rules for all users were not saved');
+    await closeDialog(page);
+    await saveRules('role:e2e_auditors');
+    await view(page).getByLabel('Open Audit Activity').check();
+    await view(page).locator('button', {hasText: 'Save rules'}).click();
+    check((await apply(page)).includes('Applied.'), 'the rule for the role was not saved');
+    await closeDialog(page);
+
+    const auditor = await signIn('e2e_auditor', 'E2e-Auditor-Pw-1');
+    check((await auditor.page.locator('#sidebar').innerText()).includes('Audit Activity'), 'the authorized role does not see the page');
+    await go(auditor.page, '/console/admin-audit');
+    check((await view(auditor.page).innerText()).includes('Console actions'), 'the authorized role cannot open the page');
+    await auditor.context.close();
+
+    const other = await signIn('e2e_other', 'E2e-Other-Pw-1');
+    check(!(await other.page.locator('#sidebar').innerText()).includes('Audit Activity'), 'a user without the role sees the page');
+    check(!(await other.page.$('.card[data-component="admin-audit"]')), 'a user without the role has its card');
+    await go(other.page, '/console/admin-audit');
+    check((await view(other.page).innerText()).includes('console access policy does not allow'), 'the address does not explain the policy');
+    await screenshot(other.page, 'a08-admin-page-denied');
+    await other.context.close();
+
+    const fresh = await signIn(ADMIN_USER, ADMIN_PASSWORD);
+    const sidebar = await fresh.page.locator('#sidebar').innerText();
+    check(sidebar.includes('Component Access'), 'the administrator lost Component Access');
+    await fresh.context.close();
+    await sql('DROP USER IF EXISTS e2e_auditor, e2e_other');
+    await sql('DROP ROLE IF EXISTS e2e_auditors');
+});
+
 if (original_policy !== null) {
     /// Remove the rules the checks added, then insert the original ones again. Two inserts: the version of
     /// a row is the time of its insert, and rows of the same key and time have no defined order.
     const removed = [];
-    for (const component of ['merges', 'documentation']) {
-        for (const [type, subject] of [['all', ''], ['user', ADMIN_USER]]) {
+    for (const component of ['merges', 'documentation', 'admin-audit']) {
+        for (const [type, subject] of [['all', ''], ['user', ADMIN_USER], ['role', 'e2e_auditors']]) {
             removed.push(JSON.stringify({subject_type: type, subject, component, open: false, view_data: false, run_queries: false, administer: false, deleted: true}));
         }
     }
-    const restored = original_policy.split('\n').filter(line => line.includes('"merges"') || line.includes('"documentation"'));
+    const restored = original_policy.split('\n').filter(line => line.includes('"merges"') || line.includes('"documentation"') || line.includes('"admin-audit"'));
     const columns = '(subject_type, subject, component, open, view_data, run_queries, administer, deleted)';
     await sql(`INSERT INTO ${ADMIN_DB}.component_policy ${columns} FORMAT JSONEachRow\n${removed.join('\n')}`);
     if (restored.length) {

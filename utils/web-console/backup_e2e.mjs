@@ -238,7 +238,7 @@ await test('Administrator adds and tests a disk destination and an S3 destinatio
     await page.locator('#admin-view button', {hasText: 'Add destination'}).click();
     await dialog().getByLabel('Type').selectOption('s3');
     await dialog().getByLabel('Name').fill(s3_destination);
-    await dialog().getByLabel('Endpoint').selectOption(url.origin);
+    await dialog().getByLabel('Endpoint').fill(url.origin);
     await dialog().getByLabel('Bucket').fill(url.pathname.slice(1));
     await dialog().getByLabel('Access key ID').fill(S3_KEY);
     await dialog().getByLabel('Secret access key').fill(S3_SECRET);
@@ -264,6 +264,80 @@ await test('Administrator adds and tests a disk destination and an S3 destinatio
     check(worker.exit === 0, `worker: ${worker.output}`);
     const result = await sql(`SELECT test_result FROM ${DB}.backup_destinations FINAL WHERE name = {n:String}`, ADMIN_USER, ADMIN_PASSWORD, {n: s3_destination});
     check(/"delete":\{"ok":true\}/.test(result), `delete capability not recorded: ${result}; worker: ${worker.output.slice(-500)}`);
+});
+
+await test('External S3 endpoint: an administrator allows it from the console; metadata addresses are refused', async () => {
+    const allowlist = JSON.parse(await (await fetch(`${BASE}/console/config.json`)).text()).backup_s3_endpoints.split(',').map(v => v.trim());
+    /// TEST-NET-3 (RFC 5737): never reachable. A port of its own per run, so a run that stopped early leaves nothing in the way.
+    const external = `http://203.0.113.10:${10000 + Date.now() % 50000}`;
+    /// Set up the list of allowed endpoints when the console tables predate it.
+    await go('/console/admin-backups?tab=destinations');
+    const box = page.locator('#admin-view .box', {hasText: 'Allowed endpoints'});
+    if (await box.locator('button', {hasText: 'Set up'}).count()) {
+        await box.locator('button', {hasText: 'Set up'}).click();
+        check((await applyPlan()).includes('Applied.'), 'the endpoints table was not set up');
+        await go('/console/admin-backups?tab=destinations');
+    }
+    for (const entry of allowlist) check((await box.innerText()).includes(entry), `${entry} of the configuration is not listed`);
+    /// Fills an S3 destination with `endpoint` and selects Review. Returns the form error, or the text of the review.
+    const tryEndpoint = async (endpoint, name = `e2e external ${RUN}`) => {
+        await go('/console/admin-backups?tab=destinations');
+        await page.locator('#admin-view button', {hasText: 'Add destination'}).click();
+        await dialog().getByLabel('Type').selectOption('s3');
+        await dialog().getByLabel('Name').fill(name);
+        await dialog().getByLabel('Endpoint').fill(endpoint);
+        await dialog().getByLabel('Bucket').fill('e2e-bucket');
+        await dialog().getByLabel('Access key ID').fill('e2e-key');
+        await dialog().getByLabel('Secret access key').fill('e2e-secret');
+        await dialog().locator('button', {hasText: 'Review'}).click();
+        await sleep(300);
+        const error = (await dialog().locator('form .message.error:not([hidden])').allInnerTexts()).filter(Boolean).join(' ');
+        return {error, review: error ? '' : await dialog().innerText()};
+    };
+    for (const endpoint of ['http://169.254.169.254', 'http://metadata.google.internal', 'https://user:password@s3.example.com', 'https://s3.example.com/bucket']) {
+        check((await tryEndpoint(endpoint)).error, `${endpoint} was accepted`);
+    }
+    const any_host = allowlist.find(v => /^https?:\/\/\*:\d+$/.test(v));
+    if (any_host) check(/metadata/.test((await tryEndpoint(any_host.replace('*', '169.254.169.254'))).error), 'a pattern reached the metadata address');
+    const pattern = allowlist.find(v => /^https:\/\/\*\.[a-z0-9.-]+$/.test(v));
+    if (pattern) {
+        const {review} = await tryEndpoint(pattern.replace('*', 'backup-e2e'));
+        check(review.includes('Create the named collection') && !review.includes('Allow the S3 endpoint'), `${pattern} does not accept a matching endpoint`);
+    }
+    /// An endpoint that is not listed: allowed in the same change, as a separate step.
+    const {error, review} = await tryEndpoint(external);
+    check(!error && review.includes(`Allow the S3 endpoint ${external}`) && review.includes('becomes an allowed endpoint'), `no allow step: ${error || review.slice(0, 400)}`);
+    check((await applyPlan()).includes('Applied.'), 'not applied');
+    check(await sql(`SELECT count() FROM ${DB}.backup_endpoints FINAL WHERE endpoint = {e:String} AND NOT deleted`, ADMIN_USER, ADMIN_PASSWORD, {e: external}) === '1', 'the endpoint was not recorded');
+    check(await sql(`SELECT endpoint FROM ${DB}.backup_destinations FINAL WHERE name = {n:String} AND NOT deleted`, ADMIN_USER, ADMIN_PASSWORD, {n: `e2e external ${RUN}`}) === external, 'the destination was not recorded');
+    check(await sql(`SELECT count() FROM ${DB}.audit_log WHERE action = 'create_backup_destination' AND target_name = {n:String}`, ADMIN_USER, ADMIN_PASSWORD, {n: `e2e external ${RUN}`}) === '1', 'no audit record');
+    await go('/console/admin-backups?tab=destinations');
+    const row = box.locator('tr', {hasText: external});
+    check((await row.innerText()).includes('Console') && (await row.innerText()).includes(`e2e external ${RUN}`), `the list does not show it: ${await row.innerText()}`);
+    /// A second destination at the same endpoint needs no allow step.
+    const again = await tryEndpoint(external, `e2e external 2 ${RUN}`);
+    check(!again.error && !again.review.includes('Allow the S3 endpoint'), `the endpoint is not allowed now: ${again.error}`);
+    await page.evaluate(() => document.getElementById('admin-dialog').close());
+    /// The Allow endpoint dialog refuses metadata addresses and patterns for any host.
+    await go('/console/admin-backups?tab=destinations');
+    for (const entry of ['http://169.254.169.254', 'https://*', '*']) {
+        await box.locator('button', {hasText: 'Allow endpoint'}).click();
+        await dialog().getByLabel('Endpoint').fill(entry);
+        await dialog().locator('button', {hasText: 'Review'}).click();
+        await sleep(300);
+        check((await dialog().locator('form .message.error:not([hidden])').allInnerTexts()).join(' '), `${entry} was accepted`);
+        await page.evaluate(() => document.getElementById('admin-dialog').close());
+    }
+    /// Removing the endpoint and the destination.
+    await box.locator('tr', {hasText: external}).locator('button', {hasText: 'Remove'}).click();
+    check((await dialog().innerText()).includes('keep working'), 'no warning about the destination that uses it');
+    check((await applyPlan()).includes('Applied.'), 'not removed');
+    check(await sql(`SELECT count() FROM ${DB}.backup_endpoints FINAL WHERE endpoint = {e:String} AND NOT deleted`, ADMIN_USER, ADMIN_PASSWORD, {e: external}) === '0', 'the endpoint is still allowed');
+    await go('/console/admin-backups?tab=destinations');
+    await page.locator('#admin-view tr', {hasText: `e2e external ${RUN}`}).first().locator('button', {hasText: 'Remove'}).click();
+    check((await applyPlan()).includes('Applied.'), 'the destination was not removed');
+    const collection = await sql(`SELECT named_collection FROM ${DB}.backup_destinations FINAL WHERE name = {n:String}`, ADMIN_USER, ADMIN_PASSWORD, {n: `e2e external ${RUN}`});
+    await sql(`DROP NAMED COLLECTION IF EXISTS ${collection}`);
 });
 
 let full_backup = null;

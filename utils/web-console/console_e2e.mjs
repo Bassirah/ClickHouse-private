@@ -87,8 +87,7 @@ async function newContext({offline = false, viewport = {width: 1400, height: 900
     return {context, page, log};
 }
 
-async function login(page, user, password, url = BASE) {
-    await page.fill('#login-url', url);
+async function login(page, user, password) {
     await page.fill('#login-user', user);
     await page.fill('#login-password', password);
     await page.click('#login-submit');
@@ -130,7 +129,6 @@ await test('Open console without a session: login appears', async () => {
     await page.waitForSelector('#login-view:not([hidden])');
     check(page.url() === `${BASE}/console/login`, `URL is ${page.url()}`);
     check(await page.isHidden('#shell'), 'shell is visible');
-    check(await page.inputValue('#login-url') === ORIGIN, 'URL field does not default to the server origin');
     await screenshot(page, '01-login');
     await context.close();
 });
@@ -146,14 +144,6 @@ await test('Submit invalid credentials: login stays with an actionable error', a
     check(!(await page.isDisabled('#login-submit')), 'submit stays disabled');
     check(page.url().startsWith(`${BASE}/console/login`), `URL is ${page.url()}`);
     await screenshot(page, '02-invalid-credentials');
-
-    await login(page, ADMIN_USER, ADMIN_PASSWORD, 'http://127.0.0.1:1');
-    await waitUntil(page, () => /Cannot connect|blocked/.test(document.querySelector('#login-error').textContent));
-    const unreachable = await page.textContent('#login-error');
-    check(unreachable.includes('127.0.0.1:1'), `unreachable error: ${unreachable}`);
-
-    await login(page, ADMIN_USER, ADMIN_PASSWORD, 'http://user:pw@127.0.0.1:1');
-    await waitUntil(page, () => document.querySelector('#login-error').textContent.includes('Do not include credentials'));
     await context.close();
 });
 
@@ -479,7 +469,6 @@ await test('Logout, then browser Back: authenticated state is not restored', asy
     await page.waitForSelector('.frame-host[data-component="processors-profile"] iframe');
     await clickConsole(page, '#logout-button');
     await page.waitForSelector('#login-view:not([hidden])');
-    check((await page.textContent('#login-notice')).includes('signed out'), 'no sign-out notice');
     await page.goBack();
     await page.waitForSelector('#login-view:not([hidden])');
     check(await page.isHidden('#shell'), 'shell visible after Back');
