@@ -32,7 +32,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import {execFile} from 'node:child_process';
+import {execFile, spawn} from 'node:child_process';
 
 const URL_BASE = (process.env.CLICKHOUSE_URL || 'http://127.0.0.1:8123').replace(/\/+$/, '');
 const USER = process.env.CLICKHOUSE_USER || 'default';
@@ -44,7 +44,7 @@ const OBSERVE_INTERVAL = Number(process.env.OBSERVE_SECONDS || 30) * 1000;
 const STATE_DIR = process.env.CLUSTER_AGENT_STATE_DIR || '';
 const ENVIRONMENTS = (process.env.CLUSTER_AGENT_ENVIRONMENTS || 'lab,development').split(',').map(s => s.trim()).filter(Boolean);
 const [PORT_MIN, PORT_MAX] = (process.env.CLUSTER_AGENT_PORT_RANGE || '31000-31999').split('-').map(Number);
-const IMAGES = (process.env.CLUSTER_AGENT_IMAGES || 'clickhouse/clickhouse-server,contentsquareplatform/chproxy').split(',').map(s => s.trim()).filter(Boolean);
+const IMAGES = (process.env.CLUSTER_AGENT_IMAGES || 'clickhouse/clickhouse-server,clickhouse/clickhouse-keeper,contentsquareplatform/chproxy').split(',').map(s => s.trim()).filter(Boolean);
 const HOST_ALIAS = process.env.CLUSTER_AGENT_HOST_ALIAS || 'host.docker.internal';
 const ONCE = process.argv.includes('--once');
 const LABEL_CLUSTER = 'io.clickhouse.console.cluster';
@@ -156,13 +156,13 @@ const TERMINAL = ['succeeded', 'failed', 'cancelled', 'rejected'];
 /// Capability (a column of `cluster_capabilities`, granted as `INSERT(<column>)`) required by each operation.
 const CAPABILITY = {
     register: 'register', provision: 'create_cluster', adopt: 'adopt', release: 'adopt', configure: 'configure', reconcile: 'configure',
-    resize: 'scale', add_replica: 'scale', add_shard: 'scale', remove_shard: 'scale', remove_replica: 'decommission',
+    resize: 'scale', resize_storage: 'scale', add_replica: 'scale', add_shard: 'scale', remove_shard: 'scale', remove_replica: 'decommission',
     restart_node: 'maintain', backup: 'maintain', upgrade: 'upgrade', keeper_change: 'keeper', retire: 'retire', destroy: 'destroy',
 };
 
 /// Operations that change a deployment, and therefore need the Manage mode, a provider that implements them,
 /// and an environment this agent may change.
-const MUTATING = new Set(['provision', 'configure', 'reconcile', 'resize', 'add_replica', 'add_shard', 'remove_shard', 'remove_replica',
+const MUTATING = new Set(['provision', 'configure', 'reconcile', 'resize', 'resize_storage', 'add_replica', 'add_shard', 'remove_shard', 'remove_replica',
     'restart_node', 'backup', 'upgrade', 'keeper_change', 'retire', 'destroy']);
 
 async function loadState() {
@@ -221,11 +221,12 @@ async function loadState() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Shell commands: only `docker` with argument arrays, never a shell and never text from the browser as a command.
+// Shell commands: only `docker` and `kubectl` with argument arrays, never a shell and never text from the browser as a
+// command. `input` is written to the standard input of the command.
 
-function run(command, args, {timeout = 300000, cwd} = {}) {
+function run(command, args, {timeout = 300000, cwd, input} = {}) {
     return new Promise((resolve, reject) => {
-        execFile(command, args, {timeout, cwd, maxBuffer: 32 * 1024 * 1024}, (error, stdout, stderr) => {
+        const child = execFile(command, args, {timeout, cwd, maxBuffer: 32 * 1024 * 1024}, (error, stdout, stderr) => {
             if (error) {
                 const e = new Error(`${command} ${args.slice(0, 4).join(' ')}: ${(stderr || error.message).trim().split('\n').slice(-3).join(' ')}`);
                 e.timed_out = error.killed && error.signal === 'SIGTERM';
@@ -234,6 +235,7 @@ function run(command, args, {timeout = 300000, cwd} = {}) {
                 resolve(stdout);
             }
         });
+        if (input !== undefined) child.stdin.end(input);
     });
 }
 
@@ -294,6 +296,19 @@ const docker = {
         const secrets = docker.secrets(cluster, {create: false});
         return (sql, options) => httpQuery(docker.endpoint(node), docker.serviceUser(cluster.spec), secrets.CH_ADMIN_PASSWORD, sql, options);
     },
+
+    /// `who`: `service` (the agent's user) or `admin` (the administrator user).
+    async connectAs(cluster, node, who) {
+        if (who !== 'admin') return docker.connect(cluster, node);
+        const secrets = docker.secrets(cluster, {create: false});
+        return (sql, options) => httpQuery(docker.endpoint(node), cluster.spec.security.admin_user, secrets.CH_USER_PASSWORD, sql, options);
+    },
+
+    keeperMntr: (cluster, member) => keeperMntr('127.0.0.1', member.client_port),
+    /// The host of a node in `system.clusters`.
+    hostName: (cluster, node) => node.name,
+    /// How containers reach a service published on the agent host.
+    hostAlias: () => HOST_ALIAS,
 
     /// Host ports bound to 127.0.0.1 for every node that does not have one yet. Taken from the range, skipping
     /// ports in use on this host and ports of other lab deployments.
@@ -575,7 +590,394 @@ clusters:
     },
 };
 
-const PROVIDERS = {'docker-compose': docker};
+// ---------------------------------------------------------------------------------------------
+// Provider: Kubernetes with the ClickHouse operator (ClickHouse Inc., `clickhouse.com/v1alpha1`)
+
+/// The agent talks to one Kubernetes cluster with `kubectl` (argument arrays, never a shell) and to the nodes through
+/// `kubectl port-forward`, so nothing is exposed outside the cluster for it. A cluster of the console is one
+/// `KeeperCluster` and one `ClickHouseCluster` named `chc-<id>` in its namespace, with a Secret of generated and chosen
+/// passwords that the pods read from their environment. The operator creates the StatefulSets, pods, Services, and
+/// volume claims; the agent creates only the namespace (when chosen), the Secret, the two resources, and an optional
+/// client Service, and changes the reclaim policy of the volumes as chosen.
+///
+/// Facts verified with operator v0.0.8, on which this provider is built:
+/// - `replicas` is the number of replicas of every shard: the operator keeps all shards the same size, and adds or
+///   removes the replica or shard with the highest index.
+/// - Deleting the resources deletes the pods and Services, but not the volume claims (their StatefulSets retain them
+///   when deleted or scaled down); the reclaim policy of a volume decides what happens when its claim is deleted.
+/// - A larger `dataVolumeClaimSpec` is applied by the operator to the claims; it fails when the storage class cannot expand.
+/// - The cluster in `remote_servers` is named `default`, with an interserver secret; macros `shard` and `replica` are
+///   the indexes from 0; the `default` database is `Replicated`.
+const K8S = {
+    kubeconfig: process.env.CLUSTER_AGENT_KUBECONFIG || '',
+    context: process.env.CLUSTER_AGENT_KUBE_CONTEXT || '',
+    /// Namespaces this agent may use: names or prefixes followed by `*`.
+    namespaces: (process.env.CLUSTER_AGENT_K8S_NAMESPACES || 'chc-*').split(',').map(s => s.trim()).filter(Boolean),
+    operator_namespace: process.env.CLUSTER_AGENT_OPERATOR_NAMESPACE || 'clickhouse-operator-system',
+    /// Operator versions this provider was verified with.
+    operator_versions: (process.env.CLUSTER_AGENT_OPERATOR_VERSIONS || 'v0.0.8').split(',').map(s => s.trim()).filter(Boolean),
+    field_manager: 'console-cluster-agent',
+};
+
+/// `kubectl` with the agent's kubeconfig and context. `input` is written to its standard input, so that Secrets are
+/// never in the arguments of a process.
+async function kube(args, options = {}) {
+    const base = [...(K8S.kubeconfig ? ['--kubeconfig', K8S.kubeconfig] : []), ...(K8S.context ? ['--context', K8S.context] : [])];
+    const started = Date.now();
+    try {
+        return await run('kubectl', [...base, ...args], {timeout: 120000, ...options});
+    } finally {
+        if (Date.now() - started > 10000) log('slow kubectl call', {args: args.slice(0, 4).join(' '), seconds: Math.round((Date.now() - started) / 1000)});
+    }
+}
+
+async function kubeJSON(args, options) {
+    return JSON.parse(await kube([...args, '-o', 'json'], options));
+}
+
+function namespaceAllowed(name) {
+    return K8S.namespaces.some(p => (p.endsWith('*') ? name.startsWith(p.slice(0, -1)) : name === p));
+}
+
+/// Port-forwards to pods, one per pod and port, reused while their process runs.
+const forwards = new Map();
+
+function portForward(namespace, pod, remote) {
+    const key = `${namespace}/${pod}/${remote}`;
+    const existing = forwards.get(key);
+    if (existing && existing.child.exitCode === null) return existing.ready;
+    const base = [...(K8S.kubeconfig ? ['--kubeconfig', K8S.kubeconfig] : []), ...(K8S.context ? ['--context', K8S.context] : [])];
+    const child = spawn('kubectl', [...base, '-n', namespace, 'port-forward', `pod/${pod}`, `:${remote}`, '--address', '127.0.0.1'], {stdio: ['ignore', 'pipe', 'pipe']});
+    const entry = {child};
+    entry.ready = new Promise((resolve, reject) => {
+        let output = '';
+        const timer = setTimeout(() => { child.kill(); reject(new QueryError(`${pod}: port-forward did not start within 15 s`, -1)); }, 15000);
+        const onData = chunk => {
+            output += chunk;
+            const match = output.match(/Forwarding from 127\.0\.0\.1:(\d+)/);
+            if (match) { clearTimeout(timer); resolve(Number(match[1])); }
+        };
+        child.stdout.on('data', onData);
+        child.stderr.on('data', chunk => { output += chunk; });
+        child.on('exit', () => {
+            clearTimeout(timer);
+            forwards.delete(key);
+            reject(new QueryError(`${pod}: ${output.trim().split('\n').pop() || 'port-forward stopped'}`, -1));
+        });
+    });
+    entry.ready.catch(() => {});
+    forwards.set(key, entry);
+    return entry.ready;
+}
+
+function closeForwards(namespace) {
+    for (const [key, entry] of forwards) if (key.startsWith(`${namespace}/`)) entry.child.kill();
+}
+
+/// Runs `fn(port)` through a port-forward. A pod that was recreated (by a restart or a rollout) leaves its forward
+/// running but broken: on a connection failure the forward is replaced once.
+async function throughForward(namespace, pod, remote, fn) {
+    try {
+        return await fn(await portForward(namespace, pod, remote));
+    } catch (e) {
+        if (e.code !== -1 && !/ECONNRESET|ECONNREFUSED|UND_ERR_SOCKET|closed the connection|no answer/.test(e.message)) throw e;
+        const entry = forwards.get(`${namespace}/${pod}/${remote}`);
+        if (entry) {
+            forwards.delete(`${namespace}/${pod}/${remote}`);
+            entry.child.kill();
+        }
+        return fn(await portForward(namespace, pod, remote));
+    }
+}
+
+const kubernetes = {
+    name: 'kubernetes',
+    operations: ['provision', 'configure', 'reconcile', 'resize', 'resize_storage', 'add_replica', 'add_shard', 'remove_shard', 'remove_replica', 'restart_node',
+        'backup', 'upgrade', 'retire', 'destroy', 'release'],
+
+    resource: cluster => `chc-${cluster.cluster_id.replace(/-/g, '').slice(0, 10)}`,
+    project: cluster => kubernetes.resource(cluster),
+    namespace: cluster => cluster.spec.kubernetes.namespace,
+    secretName: cluster => `${kubernetes.resource(cluster)}-console`,
+    labels: cluster => ({[LABEL_CLUSTER]: cluster.cluster_id, [LABEL_MANAGED]: MANAGED_BY}),
+    selector: cluster => `${LABEL_CLUSTER}=${cluster.cluster_id},${LABEL_MANAGED}=${MANAGED_BY}`,
+
+    nodes: spec => docker.nodes(spec),
+
+    /// Indexes of a node from its name (`s<shard>r<replica>`, from 1), and the names the operator gives it.
+    position(node) {
+        const m = /^s(\d+)r(\d+)$/.exec(node.name);
+        if (!m) throw new Error(`${node.name} is not a node name of this provider.`);
+        return {shard: Number(m[1]) - 1, replica: Number(m[2]) - 1};
+    },
+    pod(cluster, node) {
+        const {shard, replica} = kubernetes.position(node);
+        return `${kubernetes.resource(cluster)}-clickhouse-${shard}-${replica}-0`;
+    },
+    keeperPod: (cluster, member) => `${kubernetes.resource(cluster)}-keeper-${member.server_id - 1}-0`,
+    /// The host of a node in `system.clusters`.
+    hostName(cluster, node) {
+        const {shard, replica} = kubernetes.position(node);
+        return `${kubernetes.resource(cluster)}-clickhouse-internal-${shard}-${replica}.${kubernetes.namespace(cluster)}.svc.cluster.local`;
+    },
+    endpoint: (cluster, node) => `pod/${kubernetes.pod(cluster, node)} (port-forward)`,
+
+    /// The passwords of the Secret: `default_password` (the operator's `default` user; not used by people),
+    /// `service_password` (console_service, used by the agent), `admin_password` (the administrator, chosen at creation).
+    async secrets(cluster) {
+        const secret = await kubeJSON(['-n', kubernetes.namespace(cluster), 'get', 'secret', kubernetes.secretName(cluster)])
+            .catch(e => { throw new QueryError(`The Secret ${kubernetes.secretName(cluster)} cannot be read: ${e.message}`, -1); });
+        return Object.fromEntries(Object.entries(secret.data || {}).map(([k, v]) => [k, Buffer.from(v, 'base64').toString('utf8')]));
+    },
+
+    async connect(cluster, node) {
+        return kubernetes.connectAs(cluster, node, 'service');
+    },
+
+    async connectAs(cluster, node, who) {
+        const secrets = await kubernetes.secrets(cluster);
+        const user = who === 'admin' ? cluster.spec.security.admin_user : cluster.spec.security.service_user;
+        const password = who === 'admin' ? secrets.admin_password : secrets.service_password;
+        return (sql, options) => throughForward(kubernetes.namespace(cluster), kubernetes.pod(cluster, node), 8123,
+            port => httpQuery(`http://127.0.0.1:${port}`, user, password, sql, options));
+    },
+
+    keeperMntr: (cluster, member) => throughForward(kubernetes.namespace(cluster), kubernetes.keeperPod(cluster, member), 2181, port => keeperMntr('127.0.0.1', port)),
+
+    route: async () => null,
+    chproxy: () => false,
+
+    /// The two resources of the operator for a specification. Server settings go to `extraConfig`, settings of the
+    /// default profile and the users to `extraUsersConfig`; passwords are environment variables from the Secret.
+    manifests(cluster, spec) {
+        const k = spec.kubernetes;
+        const name = kubernetes.resource(cluster);
+        const labels = kubernetes.labels(cluster);
+        const image = ref => {
+            const [repository, tag] = ref.split(':');
+            return {repository: repository.includes('/') && repository.split('/')[0].includes('.') ? repository : `docker.io/${repository}`, tag};
+        };
+        const replicas = new Set(spec.shards.map(sh => sh.replicas.filter(r => r.state !== 'removed').length).filter(count => count > 0));
+        if (replicas.size !== 1) throw new Rejected('The operator keeps the same number of replicas in every shard; this revision has shards of different sizes.');
+        const volume = (size, class_name) => ({storageClassName: class_name, accessModes: ['ReadWriteOnce'], resources: {requests: {storage: `${size}Gi`}}});
+        const user = (env) => ({password: {'@from_env': env}, networks: {ip: '::/0'}, profile: 'default', quota: 'default', access_management: 1, named_collection_control: 1});
+        const resources = {requests: {cpu: String(spec.resources.cpus), memory: `${spec.resources.memory_mb}Mi`}, limits: {cpu: String(spec.resources.cpus), memory: `${spec.resources.memory_mb}Mi`}};
+        const metadata = {name, namespace: k.namespace, labels};
+        return [
+            {apiVersion: 'clickhouse.com/v1alpha1', kind: 'KeeperCluster', metadata, spec: {
+                replicas: spec.keeper.members.length, labels,
+                containerTemplate: {image: image(spec.keeper.image)},
+                dataVolumeClaimSpec: volume(k.keeper_size_gi, k.storage_class),
+            }},
+            {apiVersion: 'clickhouse.com/v1alpha1', kind: 'ClickHouseCluster', metadata, spec: {
+                shards: spec.shards.filter(sh => sh.replicas.some(r => r.state !== 'removed')).length, replicas: [...replicas][0], labels,
+                keeperClusterRef: {name},
+                containerTemplate: {image: image(spec.image), resources, env: [
+                    {name: 'CH_USER_PASSWORD', valueFrom: {secretKeyRef: {name: kubernetes.secretName(cluster), key: 'admin_password'}}},
+                    {name: 'CH_ADMIN_PASSWORD', valueFrom: {secretKeyRef: {name: kubernetes.secretName(cluster), key: 'service_password'}}},
+                ]},
+                dataVolumeClaimSpec: volume(k.data_size_gi, k.storage_class),
+                settings: {
+                    defaultUserPassword: {secret: {name: kubernetes.secretName(cluster), key: 'default_password'}},
+                    extraConfig: {...((spec.settings || {}).server || {})},
+                    extraUsersConfig: {
+                        users: {[spec.security.service_user]: user('CH_ADMIN_PASSWORD'), [spec.security.admin_user]: user('CH_USER_PASSWORD')},
+                        profiles: {default: {...((spec.settings || {}).profile || {})}},
+                    },
+                },
+            }},
+        ];
+    },
+
+    /// Writes the resources with server-side apply as the agent's field manager. A field another manager changed
+    /// makes the apply fail with a conflict, which is reported instead of being overwritten.
+    async apply(cluster, objects) {
+        await kube(['apply', '--server-side', `--field-manager=${K8S.field_manager}`, '-f', '-'], {input: JSON.stringify({apiVersion: 'v1', kind: 'List', items: objects}), timeout: 120000});
+        const dir = path.join(STATE_DIR || os.tmpdir(), kubernetes.resource(cluster));
+        if (STATE_DIR) {
+            fs.mkdirSync(dir, {recursive: true, mode: 0o700});
+            fs.writeFileSync(path.join(dir, 'resources.json'), JSON.stringify(objects, null, 2), {mode: 0o600});
+        }
+    },
+
+    /// The state of the operator's resources: conditions by type, and whether the cluster is settled.
+    async status(cluster) {
+        const ns = kubernetes.namespace(cluster);
+        const name = kubernetes.resource(cluster);
+        const [ch, keeper] = await Promise.all([
+            kubeJSON(['-n', ns, 'get', 'clickhousecluster', name]).catch(() => null),
+            kubeJSON(['-n', ns, 'get', 'keepercluster', name]).catch(() => null),
+        ]);
+        const conditions = r => Object.fromEntries(((r && r.status && r.status.conditions) || []).map(c => [c.type, c]));
+        const c = conditions(ch);
+        const kc = conditions(keeper);
+        const is = (set, type) => set[type] && set[type].status === 'True';
+        const settled = !!ch && !!keeper && ch.status.observedGeneration === ch.metadata.generation && keeper.status.observedGeneration === keeper.metadata.generation
+            && is(c, 'Ready') && is(c, 'Healthy') && is(c, 'ConfigurationInSync') && is(c, 'ClusterSizeAligned') && is(c, 'VersionInSync') && is(kc, 'Ready');
+        const problems = [...Object.values(c), ...Object.values(kc)].filter(x => x.status === 'False' && !['VersionUpgraded'].includes(x.type)).map(x => `${x.type}: ${x.message || x.reason}`);
+        return {exists: !!ch && !!keeper, settled, version: ch && ch.status ? ch.status.version : null, ready_replicas: ch && ch.status ? ch.status.readyReplicas : 0,
+            conditions: c, keeper_conditions: kc, problems, resource: ch, keeper};
+    },
+
+    /// Waits until the operator has applied the current generation of both resources and reports the cluster healthy.
+    async settle(cluster, what, timeout = 900000) {
+        let last = null;
+        try {
+            return await waitFor(what, async () => {
+                last = await kubernetes.status(cluster);
+                const failed = last.conditions.ReconcileSucceeded && last.conditions.ReconcileSucceeded.status === 'False';
+                if (failed) throw new Blocked(`The operator failed to reconcile: ${last.conditions.ReconcileSucceeded.message}`);
+                return last.settled ? last : null;
+            }, timeout, 5000);
+        } catch (e) {
+            if (e instanceof Blocked) throw e;
+            throw new Uncertain(`${what}: the operator did not report the cluster settled within ${timeout / 1000} s (${last ? last.problems.join('; ') || 'no failed condition' : 'no status'}). It may still be working; the outcome is checked again.`);
+        }
+    },
+
+    /// Pods and claims are found by the names the operator gives them (`chc-<id>-...`) in the cluster's namespace.
+    async pods(cluster) {
+        const prefix = `${kubernetes.resource(cluster)}-`;
+        const list = await kubeJSON(['-n', kubernetes.namespace(cluster), 'get', 'pods']);
+        const result = {};
+        for (const p of list.items.filter(p => p.metadata.name.startsWith(prefix) && !p.metadata.name.includes('-version-probe-'))) {
+            const status = (p.status.containerStatuses || [])[0] || {};
+            result[p.metadata.name] = {phase: p.status.phase, ready: !!status.ready, restarts: status.restartCount || 0, node: p.spec.nodeName || '',
+                state: status.state ? Object.keys(status.state)[0] : 'unknown'};
+        }
+        return result;
+    },
+
+    /// Volume claims of the cluster and their volumes.
+    async volumes(cluster) {
+        const ns = kubernetes.namespace(cluster);
+        const prefix = `clickhouse-storage-volume-${kubernetes.resource(cluster)}-`;
+        const claims = (await kubeJSON(['-n', ns, 'get', 'pvc'])).items.filter(c => c.metadata.name.startsWith(prefix));
+        const names = new Set(claims.map(c => c.spec.volumeName).filter(Boolean));
+        const volumes = names.size ? (await kubeJSON(['get', 'pv'])).items.filter(v => names.has(v.metadata.name)
+            || (v.spec.claimRef && v.spec.claimRef.namespace === ns && claims.some(c => c.metadata.name === v.spec.claimRef.name))) : [];
+        return {claims, volumes};
+    },
+
+    /// Objects of the cluster that the agent may change or delete: those with its labels in the cluster's namespace,
+    /// the volumes of their claims, and the namespace when the agent created it.
+    async owned(cluster) {
+        if (!cluster.spec || !cluster.spec.kubernetes) return [];
+        const ns = kubernetes.namespace(cluster);
+        const sel = ['-l', kubernetes.selector(cluster)];
+        /// The operator copies the labels to the objects it creates (Secrets, Services); those have an owner reference
+        /// to its resources, are deleted with them, and are not the agent's.
+        const list = async (kind, extra = []) => (await kubeJSON(['-n', ns, 'get', kind, ...extra, ...sel]).catch(() => ({items: []}))).items
+            .filter(item => !(item.metadata.ownerReferences || []).length);
+        const [resources, keepers, secrets, services, namespace] = await Promise.all([list('clickhousecluster'), list('keepercluster'), list('secret'), list('service'),
+            kubeJSON(['get', 'namespace', ns]).catch(() => null)]);
+        const {claims, volumes} = await kubernetes.volumes(cluster).catch(() => ({claims: [], volumes: []}));
+        const items = [
+            ...resources.map(r => ({kind: 'clickhousecluster', name: r.metadata.name})),
+            ...keepers.map(r => ({kind: 'keepercluster', name: r.metadata.name})),
+            ...secrets.map(r => ({kind: 'secret', name: r.metadata.name})),
+            ...services.map(r => ({kind: 'service', name: r.metadata.name})),
+            ...claims.map(c => ({kind: 'pvc', name: c.metadata.name, detail: `${c.status.capacity ? c.status.capacity.storage : c.spec.resources.requests.storage}, ${c.status.phase}`})),
+            ...volumes.map(v => ({kind: 'pv', name: v.metadata.name, detail: `${v.spec.persistentVolumeReclaimPolicy}, ${v.status.phase}, class ${v.spec.storageClassName}`})),
+        ];
+        if (namespace && namespace.metadata.labels && namespace.metadata.labels[LABEL_CLUSTER] === cluster.cluster_id) items.push({kind: 'namespace', name: ns});
+        return items;
+    },
+
+    async recordOwned(cluster, op, disposition = 'present') {
+        const owned = await kubernetes.owned(cluster);
+        for (const r of owned) {
+            await recordResource(cluster.cluster_id, {resource_id: `${r.kind}:${r.name}`, kind: r.kind, name: r.detail ? `${r.name} (${r.detail})` : r.name, owner_op: op ? op.op_id : '',
+                disposition: r.kind === 'pvc' || r.kind === 'pv' ? (disposition === 'present' ? 'present' : 'retained') : disposition,
+                evidence: r.kind === 'pv' ? `bound to a claim of namespace ${kubernetes.namespace(cluster)}` : `kubectl reports it with label ${LABEL_CLUSTER}=${cluster.cluster_id}`});
+        }
+        return owned;
+    },
+
+    /// Sets the reclaim policy of the cluster's volumes as chosen. Retain keeps a volume and its data when its claim
+    /// is deleted; Delete lets the storage class's provisioner delete it.
+    async applyReclaimPolicy(cluster) {
+        const policy = cluster.spec.kubernetes.reclaim_policy;
+        const {volumes} = await kubernetes.volumes(cluster);
+        const changed = [];
+        for (const v of volumes.filter(v => v.spec.persistentVolumeReclaimPolicy !== policy)) {
+            await kube(['patch', 'pv', v.metadata.name, '--type', 'merge', '-p', JSON.stringify({spec: {persistentVolumeReclaimPolicy: policy}})], {timeout: 60000});
+            changed.push(v.metadata.name);
+        }
+        return {policy, volumes: volumes.length, changed};
+    },
+
+    /// The client Service, when one was chosen: it selects the ClickHouse pods of the cluster.
+    clientService(cluster) {
+        const type = cluster.spec.kubernetes.service_type;
+        if (!type || type === 'none') return null;
+        return {apiVersion: 'v1', kind: 'Service', metadata: {name: `${kubernetes.resource(cluster)}-client`, namespace: kubernetes.namespace(cluster), labels: kubernetes.labels(cluster)},
+            spec: {type, selector: {app: `${kubernetes.resource(cluster)}-clickhouse`}, ports: [{name: 'http', port: 8123, targetPort: 8123}, {name: 'native', port: 9000, targetPort: 9000}]}};
+    },
+
+    /// What the agent knows about the Kubernetes cluster, published in its heartbeat for the console's choices.
+    async inventory() {
+        const now = Date.now();
+        if (kubernetes.cache && now - kubernetes.cache.at < 60000) return kubernetes.cache.data;
+        let data;
+        try {
+            const [version, classes, namespaces, operator] = await Promise.all([
+                kubeJSON(['version']).catch(e => ({error: e.message})),
+                kubeJSON(['get', 'storageclass']),
+                kubeJSON(['get', 'namespace']),
+                kubeJSON(['-n', K8S.operator_namespace, 'get', 'deployment']).catch(() => ({items: []})),
+            ]);
+            const deployment = operator.items.find(d => (d.spec.template.spec.containers || []).some(c => /clickhouse-operator/.test(c.image)));
+            const operator_image = deployment ? deployment.spec.template.spec.containers.find(c => /clickhouse-operator/.test(c.image)).image : null;
+            const operator_version = operator_image ? operator_image.split(':').pop() : null;
+            data = {
+                available: true,
+                server_version: version.serverVersion ? version.serverVersion.gitVersion : null,
+                operator: {namespace: K8S.operator_namespace, image: operator_image, version: operator_version,
+                    ready: !!deployment && deployment.status.availableReplicas > 0, verified: K8S.operator_versions.includes(operator_version)},
+                storage_classes: classes.items.map(c => ({name: c.metadata.name, provisioner: c.provisioner, reclaim_policy: c.reclaimPolicy || 'Delete',
+                    expansion: !!c.allowVolumeExpansion, binding: c.volumeBindingMode || 'Immediate',
+                    default: (c.metadata.annotations || {})['storageclass.kubernetes.io/is-default-class'] === 'true'})),
+                namespaces: namespaces.items.map(n => n.metadata.name).filter(namespaceAllowed),
+                namespace_patterns: K8S.namespaces,
+            };
+        } catch (e) {
+            data = {available: false, error: e.message, namespace_patterns: K8S.namespaces};
+        }
+        kubernetes.cache = {at: now, data};
+        return data;
+    },
+
+    /// Differences between the resources the agent applied and what the cluster holds now: changed by someone else.
+    async drift(cluster) {
+        const items = [];
+        const status = await kubernetes.status(cluster);
+        if (!status.exists) return [{setting: 'resources', desired: 'present', observed: 'missing'}];
+        const [keeper, ch] = kubernetes.manifests(cluster, cluster.spec);
+        const compare = (label, desired, observed) => {
+            if (JSON.stringify(desired) !== JSON.stringify(observed)) items.push({setting: label, desired: JSON.stringify(desired), observed: JSON.stringify(observed)});
+        };
+        compare('shards', ch.spec.shards, status.resource.spec.shards);
+        compare('replicas', ch.spec.replicas, status.resource.spec.replicas);
+        compare('image', ch.spec.containerTemplate.image, status.resource.spec.containerTemplate && status.resource.spec.containerTemplate.image);
+        compare('data volume', ch.spec.dataVolumeClaimSpec.resources.requests.storage, status.resource.spec.dataVolumeClaimSpec.resources.requests.storage);
+        compare('keeper members', keeper.spec.replicas, status.keeper.spec.replicas);
+        compare('server settings', ch.spec.settings.extraConfig, (status.resource.spec.settings || {}).extraConfig || {});
+        const {volumes} = await kubernetes.volumes(cluster);
+        for (const v of volumes.filter(v => v.spec.persistentVolumeReclaimPolicy !== cluster.spec.kubernetes.reclaim_policy)) {
+            items.push({setting: `reclaim policy of ${v.metadata.name}`, desired: cluster.spec.kubernetes.reclaim_policy, observed: v.spec.persistentVolumeReclaimPolicy});
+        }
+        return items;
+    },
+};
+
+/// The Kubernetes provider is enabled by a kubeconfig for the agent (CLUSTER_AGENT_KUBECONFIG).
+kubernetes.hostAlias = () => process.env.CLUSTER_AGENT_K8S_HOST_ALIAS || 'host.k3d.internal';
+const PROVIDERS = {'docker-compose': docker, ...(K8S.kubeconfig ? {kubernetes} : {})};
+
+function providerOf(cluster) {
+    return PROVIDERS[cluster.provider] || docker;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Observation
@@ -620,6 +1022,10 @@ function keeperMntr(host, port, timeout = 3000) {
 /// Connection functions for each node of a cluster: from the provider for managed deployments, from the
 /// registered endpoints and the credential reference for others.
 async function nodeConnections(cluster) {
+    if (cluster.provider === 'kubernetes' && cluster.spec && cluster.spec.shards && PROVIDERS.kubernetes) {
+        return Promise.all(docker.nodes(cluster.spec).map(async n => ({node_id: n.node_id, name: n.name, shard: n.shard, endpoint: kubernetes.endpoint(cluster, n),
+            query: await kubernetes.connect(cluster, n)})));
+    }
     if (cluster.provider === 'docker-compose' && cluster.spec && cluster.spec.shards) {
         return Promise.all(docker.nodes(cluster.spec).map(async n => ({node_id: n.node_id, name: n.name, shard: n.shard, endpoint: docker.endpoint(n),
             query: await docker.connect(cluster, n)})));
@@ -634,7 +1040,23 @@ async function nodeConnections(cluster) {
 
 async function observe(state, cluster) {
     const nodes = await nodeConnections(cluster);
-    const containers = cluster.provider === 'docker-compose' ? await docker.containers(cluster).catch(e => ({error: e.message})) : null;
+    /// The provider's evidence of failure, by node name: a container or pod that is not running.
+    let containers = null;
+    if (cluster.provider === 'docker-compose') containers = await docker.containers(cluster).catch(e => ({error: e.message}));
+    if (cluster.provider === 'kubernetes' && PROVIDERS.kubernetes) {
+        const pods = await kubernetes.pods(cluster).catch(e => ({error: e.message}));
+        containers = pods.error ? pods : {};
+        if (!pods.error) {
+            for (const n of docker.nodes(cluster.spec)) {
+                const pod = pods[kubernetes.pod(cluster, n)];
+                containers[n.name] = pod ? {state: pod.phase === 'Running' && pod.state === 'running' ? 'running' : pod.state, status: `pod ${kubernetes.pod(cluster, n)} ${pod.phase}, ready ${pod.ready}, restarts ${pod.restarts}, on ${pod.node}`} : null;
+            }
+            for (const k of cluster.spec.keeper.members) {
+                const pod = pods[kubernetes.keeperPod(cluster, k)];
+                containers[k.name] = pod ? {state: pod.phase === 'Running' && pod.state === 'running' ? 'running' : pod.state, status: `pod ${kubernetes.keeperPod(cluster, k)} ${pod.phase}, ready ${pod.ready}`} : null;
+            }
+        }
+    }
     const rows = [];
     for (const n of nodes) {
         let status;
@@ -655,10 +1077,10 @@ async function observe(state, cluster) {
         }
         rows.push({cluster_id: cluster.cluster_id, node_id: n.node_id, role: 'clickhouse', status, data: JSON.stringify({name: n.name, shard: n.shard, ...data})});
     }
-    if (cluster.provider === 'docker-compose' && cluster.spec) {
+    if (['docker-compose', 'kubernetes'].includes(cluster.provider) && cluster.spec && PROVIDERS[cluster.provider]) {
         for (const k of cluster.spec.keeper.members) {
             try {
-                const m = await keeperMntr('127.0.0.1', k.client_port);
+                const m = await providerOf(cluster).keeperMntr(cluster, k);
                 rows.push({cluster_id: cluster.cluster_id, node_id: k.node_id, role: 'keeper', status: 'ok', data: JSON.stringify({name: k.name, server_state: m.zk_server_state,
                     version: m.zk_version, followers: Number(m.zk_followers || 0), synced_followers: Number(m.zk_synced_followers || 0),
                     znodes: Number(m.zk_znode_count || 0), outstanding_requests: Number(m.zk_outstanding_requests || 0), latency_avg: Number(m.zk_avg_latency || 0)})});
@@ -699,7 +1121,7 @@ async function observe(state, cluster) {
             + `${keepers.filter(r => r.status === 'ok').length}/${keepers.length} Keeper members answer${rows.some(r => r.role === 'proxy' && r.status !== 'ok') ? '; chproxy does not answer' : ''}${readonly ? '; read-only replicas' : ''}`});
         cluster.lifecycle = health;
     }
-    if (cluster.provider === 'docker-compose' && cluster.mode === 'manage') await detectDrift(cluster, nodes);
+    if (['docker-compose', 'kubernetes'].includes(cluster.provider) && PROVIDERS[cluster.provider] && cluster.mode === 'manage') await detectDrift(cluster, nodes);
 }
 
 /// Differences between the desired configuration and what the nodes report, and managed files edited by hand.
@@ -725,7 +1147,11 @@ async function detectDrift(cluster, nodes) {
             /// An unreachable node is reported by the observation, not as drift.
         }
     }
-    const files = docker.changedFiles(cluster);
+    /// Changes made outside the agent: managed files edited on the Docker host, or the operator's resources changed by
+    /// another manager.
+    const files = cluster.provider === 'kubernetes'
+        ? (await kubernetes.drift(cluster).catch(e => [{setting: 'resources', desired: 'readable', observed: e.message}])).map(d => `${d.setting}: desired ${d.desired}, observed ${d.observed}`)
+        : docker.changedFiles(cluster);
     const key = crypto.createHash('sha256').update(JSON.stringify({items, files})).digest('hex').slice(0, 16);
     if (key !== cluster.drift_key) {
         await recordEvent('', cluster.cluster_id, 'drift', {state: items.length || files.length ? 'drift' : 'in_sync', message: key, data: {items, files, revision: cluster.revision}});
@@ -756,7 +1182,7 @@ async function waitFor(what, fn, timeout = 180000, interval = 2000) {
 }
 
 async function waitNodeReady(cluster, node, timeout = 180000) {
-    const query_node = await docker.connect(cluster, node);
+    const query_node = await providerOf(cluster).connect(cluster, node);
     return waitFor(`${node.name} to answer`, async () => (await query_node('SELECT 1 AS ok', {timeout: 3000}))[0].ok === 1, timeout);
 }
 
@@ -765,7 +1191,7 @@ async function keeperQuorum(cluster) {
     const states = [];
     for (const k of members) {
         try {
-            states.push({name: k.name, ...(await keeperMntr('127.0.0.1', k.client_port))});
+            states.push({name: k.name, ...(await providerOf(cluster).keeperMntr(cluster, k))});
         } catch (e) {
             states.push({name: k.name, error: e.message});
         }
@@ -825,7 +1251,8 @@ async function replicationTest(cluster, label) {
     const spec = cluster.spec;
     const db = `_console_validation_${label.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`;
     const nodes = docker.nodes(spec);
-    const first = await docker.connect(cluster, nodes[0]);
+    const provider = providerOf(cluster);
+    const first = await provider.connect(cluster, nodes[0]);
     const settings = {distributed_ddl_task_timeout: '120'};
     await first(`CREATE DATABASE IF NOT EXISTS ${q(db)} ON CLUSTER ${q(spec.cluster_name)}`, {raw: true, settings});
     try {
@@ -835,10 +1262,10 @@ async function replicationTest(cluster, label) {
         for (const shard of spec.shards) {
             const replicas = shard.replicas.filter(r => r.state !== 'removed');
             if (!replicas.length) continue;
-            const writer = await docker.connect(cluster, {...replicas[0], shard: shard.index});
+            const writer = await provider.connect(cluster, {...replicas[0], shard: shard.index});
             await writer(`INSERT INTO ${q(db)}.t SELECT ${shard.index}, number FROM numbers(1000)`, {raw: true});
             for (const r of replicas) {
-                const reader = await docker.connect(cluster, {...r, shard: shard.index});
+                const reader = await provider.connect(cluster, {...r, shard: shard.index});
                 await reader(`SYSTEM SYNC REPLICA ${q(db)}.t`, {raw: true, timeout: 120000});
                 const [c] = await reader(`SELECT count() AS n FROM ${q(db)}.t WHERE shard = ${shard.index}`);
                 result.push({node: r.name, shard: shard.index, rows: Number(c.n)});
@@ -857,17 +1284,19 @@ async function replicationTest(cluster, label) {
 /// Every node lists the cluster as the desired configuration defines it.
 async function verifyTopology(cluster) {
     const spec = cluster.spec;
-    const expected = spec.shards.flatMap((shard, i) => shard.replicas.filter(r => r.state !== 'removed').map(r => r.name)).sort();
+    const provider = providerOf(cluster);
+    const expected = docker.nodes(spec).map(n => provider.hostName(cluster, n)).sort();
     for (const n of docker.nodes(spec)) {
-        const query_node = await docker.connect(cluster, n);
-        const rows = await query_node(`SELECT host_name FROM system.clusters WHERE cluster = {c:String} ORDER BY host_name`, {params: {c: spec.cluster_name}});
+        const query_node = await provider.connect(cluster, n);
+        /// Only the cluster of remote_servers: a Replicated database also appears in system.clusters under its own name,
+        /// with its database replica names (the operator makes `default` a Replicated database).
+        const rows = await query_node(`SELECT host_name FROM system.clusters WHERE cluster = {c:String} AND database_replica_name = '' ORDER BY host_name`, {params: {c: spec.cluster_name}});
         const seen = rows.map(r => r.host_name).sort();
         if (JSON.stringify(seen) !== JSON.stringify(expected)) throw new Error(`${n.name} lists the hosts ${seen.join(', ') || 'none'} for cluster ${spec.cluster_name}, expected ${expected.join(', ')}.`);
         const [z] = await query_node(`SELECT count() AS n FROM system.zookeeper_connection WHERE NOT is_expired`);
         if (Number(z.n) === 0) throw new Error(`${n.name} has no Keeper session.`);
         if (spec.security.service_user) {
-            const secrets = docker.secrets(cluster, {create: false});
-            const [who] = await httpQuery(docker.endpoint(n), spec.security.admin_user, secrets.CH_USER_PASSWORD, 'SELECT currentUser() AS user', {timeout: 10000});
+            const [who] = await (await provider.connectAs(cluster, n, 'admin'))('SELECT currentUser() AS user', {timeout: 10000});
             if (who.user !== spec.security.admin_user) throw new Error(`${n.name}: the administrator user ${spec.security.admin_user} cannot sign in.`);
         }
     }
@@ -905,24 +1334,103 @@ async function rolling(ctx, nodes, action, label) {
         const step = `${label}:${n.name}`;
         if (ctx.op.steps.get(step) === 'done') continue;
         await ctx.step(step, `${label} ${n.name}`, async () => {
+            const provider = providerOf(cluster);
             const peers = docker.nodes(cluster.spec).filter(x => x.shard === n.shard && x.name !== n.name);
             for (const p of peers) {
-                const peer = await docker.connect(cluster, p);
+                const peer = await provider.connect(cluster, p);
                 const state = await replicationCaughtUp(peer).catch(e => ({ok: false, error: e.message}));
                 if (!state.ok) throw new Blocked(`${p.name}, another replica of shard ${n.shard}, is not caught up (${state.error || `queue ${state.queue}, delay ${state.delay} s`}): continuing would leave the shard without a healthy replica.`);
             }
             /// With chproxy, clients are routed away from the node before it stops, and back once it has caught up.
-            await docker.route(cluster, [n.name]);
+            await provider.route(cluster, [n.name]);
             const result = await action(n);
-            await waitNodeReady(cluster, n);
-            const node_query = await docker.connect(cluster, n);
+            await waitNodeReady(cluster, n, 600000);
+            const node_query = await provider.connect(cluster, n);
             await waitFor(`${n.name} to catch up with replication`, async () => (await replicationCaughtUp(node_query)).ok, 300000);
-            await docker.route(cluster, []);
+            await provider.route(cluster, []);
             done.push(n.name);
             return {node: n.name, ...(result || {}), single_replica: peers.length === 0};
         });
     }
     return done;
+}
+
+/// The schema of a peer replica on new replicas, then replication caught up and row counts compared with the peer.
+async function addedReplicasSync(ctx, provider, new_nodes) {
+    const {cluster} = ctx;
+    const peerOf = n => docker.nodes(cluster.spec).find(p => p.shard === n.shard && !new_nodes.some(x => x.name === p.name));
+    const schema = await ctx.step('schema', 'Create the databases and tables of a peer replica on the new replicas', async () => {
+        const result = [];
+        for (const n of new_nodes) {
+            const peer = peerOf(n);
+            if (!peer) throw new Rejected(`Shard ${n.shard} has no existing replica to copy from.`);
+            const copied = await copySchema(await provider.connect(cluster, peer), await provider.connect(cluster, n));
+            result.push({node: n.name, peer: peer.name, ...copied});
+        }
+        return {nodes: result, notes: result.flatMap(r => r.notes)};
+    });
+    await ctx.step('sync', 'Wait until the new replicas have caught up, and compare row counts', async () => {
+        const result = [];
+        for (const n of new_nodes) {
+            const node_query = await provider.connect(cluster, n);
+            const tables = await node_query('SELECT database, table FROM system.replicas');
+            for (const t of tables) await node_query(`SYSTEM SYNC REPLICA ${q(t.database)}.${q(t.table)}`, {raw: true, timeout: 600000});
+            const peer = peerOf(n);
+            const counts = await compareCounts(await provider.connect(cluster, peer), node_query);
+            if (counts.differences.length) throw new Error(`${n.name} differs from ${peer.name}: ${counts.differences.join('; ')}`);
+            result.push({node: n.name, replicated_tables: counts.tables});
+        }
+        return {nodes: result, schema_notes: schema.notes};
+    });
+}
+
+/// The version path of an upgrade from the running images to `target`, and the backup that recovery would use.
+function upgradePath(ctx, current, target) {
+    const {cluster, op} = ctx;
+    const version = image => (image.split(':').pop().match(/^(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?/) || []).slice(1).map(Number);
+    const compare = (a, b) => { for (let i = 0; i < 4; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) - (b[i] || 0); return 0; };
+    const from = current.map(version).sort(compare)[0];
+    const to = version(target);
+    if (!to.length) throw new Rejected(`The tag of ${target} is not a ClickHouse version.`);
+    if (compare(to, from) < 0) throw new Rejected(`${target} is older than the running version ${from.join('.')}: a downgrade with persisted data is not supported. Restore a backup into a new cluster of the older version instead.`);
+    /// ClickHouse versions are year.month: more than 12 months apart is more than a year of releases.
+    if ((to[0] * 12 + to[1]) - (from[0] * 12 + from[1]) > 12) throw new Rejected(`From ${from.join('.')} to ${to.join('.')} skips more than a year of releases: upgrade through intermediate versions and check each changelog.`);
+    const backups = ctx.state.ops.filter(o => o.cluster_id === cluster.cluster_id && o.kind === 'backup' && o.state === 'succeeded' && Date.now() - o.last_ms < 24 * 3600 * 1000);
+    if (!backups.length && !op.parameters.waive_backup) throw new Rejected('No verified backup of this cluster from the last 24 hours: back up first, or waive the requirement with a reason.');
+    return {from: from.join('.'), to: to.join('.'), backup: backups.length ? backups[backups.length - 1].op_id : `waived: ${op.parameters.waive_backup}`,
+        rollback: 'Not by changing the image back: a newer version may change persisted data. Recovery is a restore of the backup into a new cluster.'};
+}
+
+/// The gates of a retirement: every dependency has a disposition, nothing else runs, and a verified final backup or
+/// a recorded reason when the cluster holds no data.
+async function retireChecks(ctx) {
+    const {cluster, op, state} = ctx;
+    const p = op.parameters;
+    const provider = providerOf(cluster);
+    await ctx.step('dependencies', 'Check that every dependency has a disposition', async () => {
+        const open = (p.dependencies || []).filter(d => !d.disposition);
+        if (open.length) throw new Rejected(`Dependencies without a disposition: ${open.map(d => d.item).join(', ')}.`);
+        const others = state.ops.filter(o => o.cluster_id === cluster.cluster_id && o.op_id !== op.op_id && !TERMINAL.includes(o.state));
+        if (others.length) throw new Blocked(`Operations still in progress: ${others.map(o => `${o.kind} ${o.op_id.slice(0, 8)}`).join(', ')}. Resolve them first.`);
+        return {dependencies: (p.dependencies || []).length};
+    });
+    await ctx.step('protection', 'Check the final backup and its verification', async () => {
+        if (p.final_backup_op) {
+            const backup = state.ops.find(o => o.op_id === p.final_backup_op && o.cluster_id === cluster.cluster_id);
+            if (!backup || backup.kind !== 'backup' || backup.state !== 'succeeded' || backup.steps.get('verify') !== 'done') {
+                throw new Rejected(`The final backup ${p.final_backup_op} did not succeed with a verification: the protection gate is not passed.`);
+            }
+            return {final_backup: p.final_backup_op, verified: true, retention_until: p.retention_until || null};
+        }
+        if (!p.no_backup_reason) throw new Rejected('A verified final backup, or a recorded reason why none is needed, is required.');
+        const tables = [];
+        for (const n of docker.nodes(cluster.spec)) {
+            const rows = await (await provider.connect(cluster, n))(`SELECT database, name, total_rows FROM system.tables WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') AND total_rows > 0`).catch(() => [{database: '?', name: `${n.name} unreachable`, total_rows: '?'}]);
+            tables.push(...rows.map(r => `${n.name}: ${r.database}.${r.name}`));
+        }
+        if (tables.length) throw new Rejected(`The cluster holds data (${tables.slice(0, 5).join(', ')}): a final backup is required.`);
+        return {final_backup: null, reason: p.no_backup_reason};
+    });
 }
 
 function newRevision(ctx, spec, note) {
@@ -1146,29 +1654,7 @@ const HANDLERS = {
             for (const n of new_nodes) await waitNodeReady(cluster, n);
             return {nodes: new_nodes.map(n => n.name)};
         });
-        const schema = await ctx.step('schema', 'Create the databases and tables of a peer replica on the new replicas', async () => {
-            const result = [];
-            for (const n of new_nodes) {
-                const peer = docker.nodes(cluster.spec).find(p => p.shard === n.shard && !new_nodes.some(x => x.name === p.name));
-                if (!peer) throw new Rejected(`Shard ${n.shard} has no existing replica to copy from.`);
-                const copied = await copySchema(await docker.connect(cluster, peer), await docker.connect(cluster, n));
-                result.push({node: n.name, peer: peer.name, ...copied});
-            }
-            return {nodes: result, notes: result.flatMap(r => r.notes)};
-        });
-        await ctx.step('sync', 'Wait until the new replicas have caught up, and compare row counts', async () => {
-            const result = [];
-            for (const n of new_nodes) {
-                const node_query = await docker.connect(cluster, n);
-                const tables = await node_query('SELECT database, table FROM system.replicas');
-                for (const t of tables) await node_query(`SYSTEM SYNC REPLICA ${q(t.database)}.${q(t.table)}`, {raw: true, timeout: 600000});
-                const peer = docker.nodes(cluster.spec).find(p => p.shard === n.shard && !new_nodes.some(x => x.name === p.name));
-                const counts = await compareCounts(await docker.connect(cluster, peer), node_query);
-                if (counts.differences.length) throw new Error(`${n.name} differs from ${peer.name}: ${counts.differences.join('; ')}`);
-                result.push({node: n.name, replicated_tables: counts.tables});
-            }
-            return {nodes: result, schema_notes: schema.notes};
-        });
+        await addedReplicasSync(ctx, docker, new_nodes);
         await ctx.step('topology', 'Check the cluster definition on every node', async () => verifyTopology(cluster));
         if (docker.chproxy(cluster.spec)) await ctx.step('routing', 'Route clients to the new replicas through chproxy', async () => ({...(await docker.route(cluster, [])), ...(await verifyRouting(cluster))}));
         await lifecycle(cluster, 'ready', `replicas ${new_nodes.map(n => n.name).join(', ')} added by ${op.op_id}`);
@@ -1342,8 +1828,8 @@ const HANDLERS = {
         const key = process.env[`${destination.credential_ref}_ACCESS_KEY_ID`];
         const secret = process.env[`${destination.credential_ref}_SECRET_ACCESS_KEY`];
         if (!destination.credential_ref || !key || !secret) throw new Blocked(`The credentials of ${destination.name} are not set on the agent host (${destination.credential_ref || '<REF>'}_ACCESS_KEY_ID, _SECRET_ACCESS_KEY).`);
-        /// Containers reach an endpoint published on the Docker host through the host alias.
-        const endpoint = destination.endpoint.replace(/^(https?:\/\/)(127\.0\.0\.1|localhost)(?=[:/]|$)/, `$1${HOST_ALIAS}`);
+        /// The nodes reach an endpoint published on the agent host through the provider's host alias.
+        const endpoint = destination.endpoint.replace(/^(https?:\/\/)(127\.0\.0\.1|localhost)(?=[:/]|$)/, `$1${providerOf(cluster).hostAlias()}`);
         const url = `${endpoint}/${destination.bucket}/${destination.prefix}/clusters/${cluster.cluster_id}/${op.op_id}`;
         /// One backup per shard, taken from a replica that is caught up, without ON CLUSTER: each one can be opened and
         /// checked on its own, and a node that is down elsewhere does not block it.
@@ -1353,7 +1839,7 @@ const HANDLERS = {
             for (const shard of shards) {
                 let found = null;
                 for (const r of shard.replicas.filter(x => x.state !== 'removed')) {
-                    const state = await replicationCaughtUp(await docker.connect(cluster, {...r, shard: shard.index})).catch(() => null);
+                    const state = await replicationCaughtUp(await providerOf(cluster).connect(cluster, {...r, shard: shard.index})).catch(() => null);
                     if (state && state.ok) { found = r.name; break; }
                 }
                 if (!found) throw new Blocked(`No replica of shard ${shard.index} answers and is caught up: the backup would miss its latest data.`);
@@ -1366,7 +1852,7 @@ const HANDLERS = {
         await ctx.step('backup', 'Back up all databases of every shard', async () => {
             const result = [];
             for (const src of sources.sources) {
-                const node_query = await docker.connect(cluster, nodeOf(src.node));
+                const node_query = await providerOf(cluster).connect(cluster, nodeOf(src.node));
                 const [r] = await node_query(`BACKUP ALL EXCEPT DATABASES system, information_schema, INFORMATION_SCHEMA
                     TO S3(${s(urlOf(src.shard))}, ${s(key)}, ${s(secret)}) SETTINGS id = ${s(`${op.op_id}-${src.shard}`)}`, {timeout: 1800000});
                 if (r.status !== 'BACKUP_CREATED') throw new Error(`The backup of shard ${src.shard} ended with status ${r.status}.`);
@@ -1377,7 +1863,7 @@ const HANDLERS = {
         await ctx.step('verify', 'Open the backup of every shard and compare its tables and rows', async () => {
             const compared = [];
             for (const src of sources.sources) {
-                const node_query = await docker.connect(cluster, nodeOf(src.node));
+                const node_query = await providerOf(cluster).connect(cluster, nodeOf(src.node));
                 const databases = await node_query(`SELECT DISTINCT database AS name FROM system.tables WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA') AND NOT is_temporary`);
                 for (const d of databases) {
                     const probe = `_console_probe_${crypto.randomBytes(4).toString('hex')}`;
@@ -1402,23 +1888,12 @@ const HANDLERS = {
         const {cluster, op} = ctx;
         const target = op.parameters.image;
         if (!target || !IMAGES.some(prefix => target.startsWith(`${prefix}:`))) throw new Rejected(`The image ${target} is not allowed on this agent.`);
-        const version = image => (image.split(':').pop().match(/^(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?/) || []).slice(1).map(Number);
-        const compare = (a, b) => { for (let i = 0; i < 4; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) - (b[i] || 0); return 0; };
         await ctx.step('path', 'Check the upgrade path, the image, and the recovery readiness', async () => {
-            const current = docker.nodes(cluster.spec).map(n => n.image || cluster.spec.image);
-            const from = current.map(version).sort(compare)[0];
-            const to = version(target);
-            if (!to.length) throw new Rejected(`The tag of ${target} is not a ClickHouse version.`);
-            if (compare(to, from) < 0) throw new Rejected(`${target} is older than the running version ${from.join('.')}: a downgrade with persisted data is not supported. Restore a backup into a new cluster of the older version instead.`);
-            /// ClickHouse versions are year.month: more than 12 months apart is more than a year of releases.
-            if ((to[0] * 12 + to[1]) - (from[0] * 12 + from[1]) > 12) throw new Rejected(`From ${from.join('.')} to ${to.join('.')} skips more than a year of releases: upgrade through intermediate versions and check each changelog.`);
+            const result = upgradePath(ctx, docker.nodes(cluster.spec).map(n => n.image || cluster.spec.image), target);
             await run('docker', ['image', 'inspect', target, '--format', '{{.Id}}'], {timeout: 30000}).catch(() => {
                 throw new Blocked(`The image ${target} is not on the Docker host. Pull it (docker pull ${target}), then retry.`);
             });
-            const backups = ctx.state.ops.filter(o => o.cluster_id === cluster.cluster_id && o.kind === 'backup' && o.state === 'succeeded' && Date.now() - o.last_ms < 24 * 3600 * 1000);
-            if (!backups.length && !op.parameters.waive_backup) throw new Rejected('No verified backup of this cluster from the last 24 hours: back up first, or waive the requirement with a reason.');
-            return {from: from.join('.'), to: to.join('.'), backup: backups.length ? backups[backups.length - 1].op_id : `waived: ${op.parameters.waive_backup}`,
-                rollback: 'Not by changing the image back: a newer version may change persisted data. Recovery is a restore of the backup into a new cluster.'};
+            return result;
         });
         await lifecycle(cluster, 'maintenance', `upgrade ${op.op_id}`);
         /// Order: the replicas of each shard from the last one, so that the first replica of every shard serves on the old
@@ -1457,32 +1932,9 @@ const HANDLERS = {
     },
 
     async retire(ctx) {
-        const {cluster, op, state} = ctx;
+        const {cluster, op} = ctx;
         const p = op.parameters;
-        await ctx.step('dependencies', 'Check that every dependency has a disposition', async () => {
-            const open = (p.dependencies || []).filter(d => !d.disposition);
-            if (open.length) throw new Rejected(`Dependencies without a disposition: ${open.map(d => d.item).join(', ')}.`);
-            const others = state.ops.filter(o => o.cluster_id === cluster.cluster_id && o.op_id !== op.op_id && !TERMINAL.includes(o.state));
-            if (others.length) throw new Blocked(`Operations still in progress: ${others.map(o => `${o.kind} ${o.op_id.slice(0, 8)}`).join(', ')}. Resolve them first.`);
-            return {dependencies: (p.dependencies || []).length};
-        });
-        await ctx.step('protection', 'Check the final backup and its verification', async () => {
-            if (p.final_backup_op) {
-                const backup = state.ops.find(o => o.op_id === p.final_backup_op && o.cluster_id === cluster.cluster_id);
-                if (!backup || backup.kind !== 'backup' || backup.state !== 'succeeded' || backup.steps.get('verify') !== 'done') {
-                    throw new Rejected(`The final backup ${p.final_backup_op} did not succeed with a verification: the protection gate is not passed.`);
-                }
-                return {final_backup: p.final_backup_op, verified: true, retention_until: p.retention_until || null};
-            }
-            if (!p.no_backup_reason) throw new Rejected('A verified final backup, or a recorded reason why none is needed, is required.');
-            const tables = [];
-            for (const n of docker.nodes(cluster.spec)) {
-                const rows = await (await docker.connect(cluster, n))(`SELECT database, name, total_rows FROM system.tables WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') AND total_rows > 0`).catch(() => [{database: '?', name: `${n.name} unreachable`, total_rows: '?'}]);
-                tables.push(...rows.map(r => `${n.name}: ${r.database}.${r.name}`));
-            }
-            if (tables.length) throw new Rejected(`The cluster holds data (${tables.slice(0, 5).join(', ')}): a final backup is required.`);
-            return {final_backup: null, reason: p.no_backup_reason};
-        });
+        await retireChecks(ctx);
         ctx.irreversible();
         await lifecycle(cluster, 'retiring', `operation ${op.op_id}`);
         await ctx.step('stop', 'Stop the managed containers', async () => {
@@ -1532,6 +1984,459 @@ const HANDLERS = {
     },
 };
 
+/// Operations of the Kubernetes provider. They change the operator's resources and wait until the operator reports
+/// the cluster settled, then check the result in ClickHouse itself, as the docker-compose operations do. Operations
+/// that are the same for both providers (registration, backups, release) are in HANDLERS.
+const K8S_HANDLERS = {
+    async provision(ctx) {
+        const {cluster, state} = ctx;
+        const k = cluster.spec.kubernetes;
+        const previous = state.ops.find(o => o.cluster_id === cluster.cluster_id && o.kind === 'provision' && o.op_id !== ctx.op.op_id && o.state === 'succeeded');
+        if (previous) throw new Rejected(`The cluster was already provisioned by operation ${previous.op_id}: a second provisioning is not run.`);
+        if (!k) throw new Rejected('The revision has no Kubernetes settings.');
+        await ctx.step('preflight', 'Check the Kubernetes cluster, the operator, the storage class, the namespace, and the images', async () => {
+            const inventory = await kubernetes.inventory();
+            if (!inventory.available) throw new Blocked(`The Kubernetes cluster does not answer: ${inventory.error}`);
+            if (!inventory.operator.ready) throw new Blocked(`The ClickHouse operator is not running in ${K8S.operator_namespace}.`);
+            if (!inventory.operator.verified) throw new Rejected(`The operator ${inventory.operator.version} is not a version this agent was verified with (${K8S.operator_versions.join(', ')}).`);
+            const storage = inventory.storage_classes.find(c => c.name === k.storage_class);
+            if (!storage) throw new Rejected(`The storage class ${k.storage_class} does not exist.`);
+            if (!namespaceAllowed(k.namespace)) throw new Rejected(`The namespace ${k.namespace} is not one this agent may use (${K8S.namespaces.join(', ')}).`);
+            const namespace = await kubeJSON(['get', 'namespace', k.namespace]).catch(() => null);
+            if (k.namespace_mode === 'create' && namespace && (namespace.metadata.labels || {})[LABEL_CLUSTER] !== cluster.cluster_id) {
+                throw new Rejected(`The namespace ${k.namespace} already exists and was not created for this cluster: choose it as an existing namespace, or another name.`);
+            }
+            if (k.namespace_mode === 'existing' && !namespace) throw new Rejected(`The namespace ${k.namespace} does not exist.`);
+            const existing = await kubeJSON(['-n', k.namespace, 'get', 'clickhousecluster', kubernetes.resource(cluster)]).catch(() => null);
+            if (existing && (existing.metadata.labels || {})[LABEL_CLUSTER] !== cluster.cluster_id) throw new Rejected(`A ClickHouseCluster named ${kubernetes.resource(cluster)} exists and is not this cluster's.`);
+            for (const image of [cluster.spec.image, cluster.spec.keeper.image]) {
+                if (!IMAGES.some(prefix => image.startsWith(`${prefix}:`))) throw new Rejected(`The image ${image} is not allowed on this agent (CLUSTER_AGENT_IMAGES: ${IMAGES.join(', ')}).`);
+            }
+            if (cluster.spec.routing && cluster.spec.routing.kind !== 'none') throw new Rejected('Client routing through chproxy is not implemented for Kubernetes.');
+            return {kubernetes: inventory.server_version, operator: inventory.operator.version, storage_class: storage, namespace: k.namespace, namespace_exists: !!namespace};
+        });
+        await ctx.step('credentials', 'Create the Secret with the administrator password and the generated passwords', async () => {
+            const encrypted = ctx.op.parameters.admin_password;
+            if (!encrypted || !encrypted.ciphertext) throw new Rejected('The operation has no administrator password.');
+            const key = agentKey();
+            if (!key || encrypted.key_id !== key.key_id) throw new Blocked(`The administrator password was encrypted for another agent key (${encrypted.key_id}); this agent has ${key ? key.key_id : 'no key'}. Submit the creation again.`);
+            let password;
+            try {
+                password = crypto.privateDecrypt({key: key.private_key, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256'},
+                    Buffer.from(encrypted.ciphertext, 'base64')).toString('utf8');
+            } catch (e) {
+                throw new Rejected('The administrator password cannot be decrypted with this agent\'s key.');
+            }
+            if (password.length < 12 || PASSWORD_FORBIDDEN.test(password)) throw new Rejected('The administrator password must have at least 12 characters, without spaces, quotes, $, #, or backslashes.');
+            const objects = [];
+            if (k.namespace_mode === 'create') objects.push({apiVersion: 'v1', kind: 'Namespace', metadata: {name: k.namespace, labels: kubernetes.labels(cluster)}});
+            /// Generated passwords are kept when the Secret exists (a retried step), so that running it again changes nothing.
+            const current = await kubernetes.secrets(cluster).catch(() => ({}));
+            const value = name => current[name] || crypto.randomBytes(18).toString('base64url');
+            const data = {default_password: value('default_password'), service_password: value('service_password'), admin_password: password};
+            objects.push({apiVersion: 'v1', kind: 'Secret', type: 'Opaque', metadata: {name: kubernetes.secretName(cluster), namespace: k.namespace, labels: kubernetes.labels(cluster)},
+                data: Object.fromEntries(Object.entries(data).map(([n, v]) => [n, Buffer.from(v).toString('base64')]))});
+            await kube(['apply', '--server-side', `--field-manager=${K8S.field_manager}`, '-f', '-'], {input: JSON.stringify({apiVersion: 'v1', kind: 'List', items: objects}), timeout: 60000});
+            return {secret: kubernetes.secretName(cluster), keys: Object.keys(data), user: cluster.spec.security.admin_user};
+        });
+        await lifecycle(cluster, 'provisioning', `operation ${ctx.op.op_id}`);
+        await ctx.step('create', 'Create the KeeperCluster and the ClickHouseCluster', async () => {
+            try {
+                const objects = kubernetes.manifests(cluster, cluster.spec);
+                const service = kubernetes.clientService(cluster);
+                if (service) objects.push(service);
+                await kubernetes.apply(cluster, objects);
+            } finally {
+                await kubernetes.recordOwned(cluster, ctx.op);
+            }
+            return {resources: [`KeeperCluster/${kubernetes.resource(cluster)}`, `ClickHouseCluster/${kubernetes.resource(cluster)}`], namespace: k.namespace};
+        }, {recovery: 'The resources created so far are listed under Retirement → Resources. Retry the operation (it applies the same resources), or clean them up with Destroy.'});
+        await lifecycle(cluster, 'validating', `operation ${ctx.op.op_id}`);
+        await ctx.step('ready', 'Wait until the operator reports every replica and Keeper member ready', async () => {
+            const status = await kubernetes.settle(cluster, 'the operator to create the cluster');
+            return {version: status.version, ready_replicas: status.ready_replicas};
+        });
+        await ctx.step('volumes', `Set the reclaim policy of the volumes to ${k.reclaim_policy}`, async () => {
+            const result = await kubernetes.applyReclaimPolicy(cluster);
+            await kubernetes.recordOwned(cluster, ctx.op);
+            return result;
+        });
+        await ctx.step('quorum', 'Check the Keeper quorum', async () => {
+            const quorum = await waitFor('the Keeper quorum', async () => {
+                const q = await keeperQuorum(cluster);
+                return q.ok ? q : null;
+            });
+            return {leader: quorum.leader, keeper_members: quorum.total};
+        });
+        await ctx.step('topology', 'Check authentication, Keeper sessions, and the cluster definition on every node', async () => verifyTopology(cluster));
+        await ctx.step('replication', 'Write, replicate, and read test data in an isolated database', async () => replicationTest(cluster, ctx.op.op_id));
+        await lifecycle(cluster, 'ready', `validated by operation ${ctx.op.op_id}`);
+    },
+
+    /// Settings go to the resource; the operator applies them (reloading or restarting replicas one at a time) and
+    /// reports when every replica has the new configuration.
+    async configure(ctx) {
+        const {cluster} = ctx;
+        await ctx.step('apply', 'Write the configuration of the new revision to the ClickHouseCluster', async () => {
+            await kubernetes.apply(cluster, kubernetes.manifests(cluster, cluster.spec));
+            return {revision: cluster.revision};
+        });
+        await ctx.step('rollout', 'Wait until the operator has applied it to every replica', async () => {
+            const status = await kubernetes.settle(cluster, 'the operator to apply the configuration');
+            return {ready_replicas: status.ready_replicas};
+        });
+        await ctx.step('verify', 'Check the settings on every node', async () => {
+            const desired = (cluster.spec.settings || {}).server || {};
+            const mismatch = [];
+            for (const n of kubernetes.nodes(cluster.spec)) {
+                const node_query = await kubernetes.connect(cluster, n);
+                for (const [name, value] of Object.entries(desired)) {
+                    const [r] = await node_query(`SELECT value FROM system.server_settings WHERE name = {n:String}`, {params: {n: name}});
+                    if (!r || r.value !== String(value)) mismatch.push(`${n.name}: ${name} = ${r ? r.value : 'unknown'}, desired ${value}`);
+                }
+                for (const [name, value] of Object.entries((cluster.spec.settings || {}).profile || {})) {
+                    const [r] = await node_query(`SELECT toString(getSetting({n:String})) AS value`, {params: {n: name}});
+                    if (r.value !== String(value)) mismatch.push(`${n.name}: profile ${name} = ${r.value}, desired ${value}`);
+                }
+            }
+            if (mismatch.length) throw new Error(`The nodes do not report the desired values: ${mismatch.join('; ')}`);
+            return {revision: cluster.revision};
+        });
+    },
+
+    async reconcile(ctx) {
+        await K8S_HANDLERS.configure(ctx);
+        await ctx.step('volumes', 'Set the reclaim policy of the volumes as configured', async () => kubernetes.applyReclaimPolicy(ctx.cluster));
+    },
+
+    /// CPU and memory are requests and limits of the ClickHouse containers; the operator recreates the pods one replica
+    /// at a time.
+    async resize(ctx) {
+        const {cluster, op} = ctx;
+        await lifecycle(cluster, 'maintenance', `operation ${op.op_id}`);
+        await ctx.step('apply', 'Write the new resources to the ClickHouseCluster', async () => {
+            await kubernetes.apply(cluster, kubernetes.manifests(cluster, cluster.spec));
+            return {resources: cluster.spec.resources};
+        });
+        await ctx.step('rollout', 'Wait until the operator has recreated every replica', async () => kubernetes.settle(cluster, 'the operator to apply the resources').then(s => ({ready_replicas: s.ready_replicas})));
+        await ctx.step('verify', 'Check the resources of the pods', async () => {
+            const pods = await kubeJSON(['-n', kubernetes.namespace(cluster), 'get', 'pods']);
+            const want = {cpu: String(cluster.spec.resources.cpus), memory: `${cluster.spec.resources.memory_mb}Mi`};
+            const wrong = pods.items.filter(p => p.metadata.name.startsWith(`${kubernetes.resource(cluster)}-clickhouse-`) && !p.metadata.name.includes('version-probe'))
+                .filter(p => {
+                    const limits = (p.spec.containers[0].resources || {}).limits || {};
+                    return String(limits.cpu) !== want.cpu || limits.memory !== want.memory;
+                }).map(p => p.metadata.name);
+            if (wrong.length) throw new Error(`Pods without the new resources: ${wrong.join(', ')}`);
+            return want;
+        });
+        await lifecycle(cluster, 'ready', `resize ${op.op_id} completed`);
+    },
+
+    /// Expands the data volumes: the operator increases the size of every claim, which the storage class must allow.
+    /// Volumes are never reduced.
+    async resize_storage(ctx) {
+        const {cluster, op} = ctx;
+        const k = cluster.spec.kubernetes;
+        await ctx.step('check', 'Check that the storage class can expand volumes', async () => {
+            const storage = (await kubernetes.inventory()).storage_classes.find(c => c.name === k.storage_class);
+            if (!storage) throw new Rejected(`The storage class ${k.storage_class} no longer exists.`);
+            if (!storage.expansion) throw new Rejected(`The storage class ${k.storage_class} does not allow volume expansion (allowVolumeExpansion).`);
+            const {claims} = await kubernetes.volumes(cluster);
+            const smaller = claims.filter(c => c.metadata.name.includes('-clickhouse-') && parseFloat(c.spec.resources.requests.storage) > k.data_size_gi);
+            if (smaller.length) throw new Rejected(`Volumes are never reduced: ${smaller.map(c => `${c.metadata.name} has ${c.spec.resources.requests.storage}`).join(', ')}.`);
+            return {storage_class: storage.name, provisioner: storage.provisioner, size_gi: k.data_size_gi};
+        });
+        await ctx.step('apply', `Request ${k.data_size_gi} GiB for the data volumes`, async () => {
+            await kubernetes.apply(cluster, kubernetes.manifests(cluster, cluster.spec));
+            return {size_gi: k.data_size_gi};
+        });
+        await ctx.step('expand', 'Wait until every data volume has the new capacity', async () => {
+            const result = await waitFor('the volumes to expand', async () => {
+                const {claims} = await kubernetes.volumes(cluster);
+                const data = claims.filter(c => c.metadata.name.includes('-clickhouse-'));
+                const done = data.every(c => c.status.capacity && parseFloat(c.status.capacity.storage) >= k.data_size_gi);
+                return done ? data.map(c => ({claim: c.metadata.name, capacity: c.status.capacity.storage})) : null;
+            }, 600000, 5000);
+            await kubernetes.settle(cluster, 'the operator to report the cluster settled');
+            await kubernetes.recordOwned(cluster, op);
+            return {volumes: result};
+        });
+    },
+
+    async restart_node(ctx) {
+        const {cluster, op} = ctx;
+        const nodes = kubernetes.nodes(cluster.spec).filter(n => (op.parameters.nodes || []).includes(n.name));
+        if (!nodes.length) throw new Rejected('No node of this cluster was chosen.');
+        await lifecycle(cluster, 'maintenance', `operation ${op.op_id}`);
+        await rolling(ctx, nodes, async n => {
+            /// The StatefulSet recreates the pod with the same name and volume.
+            await kube(['-n', kubernetes.namespace(cluster), 'delete', 'pod', kubernetes.pod(cluster, n), '--wait=true'], {timeout: 300000});
+            return {pod: kubernetes.pod(cluster, n)};
+        }, 'restart');
+        await lifecycle(cluster, 'ready', `maintenance ${op.op_id} completed`);
+    },
+
+    /// One more replica in every shard: the operator adds the replica with the next index to each shard.
+    async add_replica(ctx) {
+        const {cluster, op} = ctx;
+        const new_nodes = kubernetes.nodes(cluster.spec).filter(n => (op.parameters.nodes || []).includes(n.name));
+        if (!new_nodes.length) throw new Rejected('The revision of this operation has no new replica.');
+        await ctx.step('apply', `Add ${new_nodes.length} replicas: one to every shard`, async () => {
+            await kubernetes.apply(cluster, kubernetes.manifests(cluster, cluster.spec));
+            return {nodes: new_nodes.map(n => n.name)};
+        });
+        await ctx.step('create', 'Wait until the operator has created and started the new replicas', async () => {
+            await kubernetes.settle(cluster, 'the operator to add the replicas');
+            await kubernetes.applyReclaimPolicy(cluster);
+            await kubernetes.recordOwned(cluster, op);
+            return {nodes: new_nodes.map(n => kubernetes.pod(cluster, n))};
+        });
+        await addedReplicasSync(ctx, kubernetes, new_nodes);
+        await ctx.step('topology', 'Check the cluster definition on every node', async () => verifyTopology(cluster));
+        await lifecycle(cluster, 'ready', `replicas ${new_nodes.map(n => n.name).join(', ')} added by ${op.op_id}`);
+    },
+
+    /// One replica fewer in every shard: the operator removes the replica with the highest index of each shard, which
+    /// must be the replicas this operation names.
+    async remove_replica(ctx) {
+        const {cluster, op} = ctx;
+        const names = op.parameters.nodes || (op.parameters.node ? [op.parameters.node] : []);
+        const all = cluster.spec.shards.flatMap(sh => sh.replicas.map(r => ({...r, shard: sh.index})));
+        const removed = all.filter(n => names.includes(n.name));
+        const per_shard = cluster.spec.shards.map(sh => sh.replicas.filter(r => r.state !== 'removed' || names.includes(r.name)));
+        await ctx.step('roles', 'Check that the replicas are the last replica of every shard', async () => {
+            for (const [i, sh] of cluster.spec.shards.entries()) {
+                const last = per_shard[i][per_shard[i].length - 1];
+                if (!last || !names.includes(last.name)) throw new Rejected(`The operator removes the replica with the highest index of every shard: shard ${sh.index} would lose ${last ? last.name : 'nothing'}, which this operation does not name.`);
+                if (per_shard[i].length < 2) throw new Rejected(`${last.name} is the last replica of shard ${sh.index}: removing it would remove the shard's data.`);
+            }
+            return {nodes: names};
+        });
+        await ctx.step('coverage', 'Check that the remaining replicas are synchronized and the Keeper quorum is healthy', async () => {
+            const quorum = await keeperQuorum(cluster);
+            if (!quorum.ok) throw new Blocked(`The Keeper quorum is not healthy (${quorum.answering}/${quorum.total} members answer): no replica is removed while coordination is uncertain.`);
+            const result = [];
+            for (const n of removed) {
+                const peers = all.filter(p => p.shard === n.shard && !names.includes(p.name) && p.state !== 'removed');
+                for (const p of peers) {
+                    const caught = await replicationCaughtUp(await kubernetes.connect(cluster, p)).catch(e => ({ok: false, error: e.message}));
+                    if (!caught.ok) throw new Blocked(`${p.name} is not caught up (${caught.error || `queue ${caught.queue}, delay ${caught.delay} s`}): it must hold all data before ${n.name} is removed.`);
+                }
+                let counts = {note: `${n.name} does not answer: its rows were not compared`};
+                try {
+                    counts = await compareCounts(await kubernetes.connect(cluster, n), await kubernetes.connect(cluster, peers[0]));
+                } catch (e) {
+                    if (e.code !== -1) throw e;
+                }
+                if (counts.differences && counts.differences.length) throw new Blocked(`${n.name} and ${peers[0].name} differ: ${counts.differences.join('; ')}.`);
+                const [w] = await (await kubernetes.connect(cluster, n))(`SELECT sum(data_files) AS files FROM system.distribution_queue`).catch(() => [{files: 0}]);
+                if (Number(w.files) > 0) throw new Blocked(`${n.name} has ${w.files} queued distributed inserts that would be lost: flush them (SYSTEM FLUSH DISTRIBUTED) first.`);
+                result.push({node: n.name, peer: peers[0].name, counts});
+            }
+            return {nodes: result};
+        });
+        ctx.irreversible();
+        await ctx.step('apply', 'Reduce the replicas of every shard', async () => {
+            const spec = JSON.parse(JSON.stringify(cluster.spec));
+            for (const sh of spec.shards) for (const r of sh.replicas) if (names.includes(r.name)) r.state = 'removed';
+            if (JSON.stringify(spec) !== JSON.stringify(cluster.spec)) await newRevision(ctx, spec, `${names.join(', ')} removed by ${op.op_id}`);
+            await kubernetes.apply(cluster, kubernetes.manifests(cluster, cluster.spec));
+            await kubernetes.settle(cluster, 'the operator to remove the replicas');
+            return {revision: cluster.revision};
+        });
+        await ctx.step('metadata', 'Remove the replica metadata of the removed replicas from Keeper', async () => {
+            const dropped = [];
+            for (const n of removed) {
+                const peer = await kubernetes.connect(cluster, all.find(p => p.shard === n.shard && !names.includes(p.name) && p.state !== 'removed'));
+                /// Replicas are named by the macro {replica}: the index of the replica in its shard, from 0.
+                const replica = String(kubernetes.position(n).replica);
+                const tables = await peer(`SELECT database, table FROM system.replicas WHERE has(mapKeys(replica_is_active), {r:String})`, {params: {r: replica}});
+                for (const t of tables) {
+                    await waitFor(`the Keeper session of ${n.name} to expire`, async () => {
+                        try {
+                            await peer(`SYSTEM DROP REPLICA ${s(replica)} FROM TABLE ${q(t.database)}.${q(t.table)}`, {raw: true});
+                            return true;
+                        } catch (e) {
+                            if (e.code === 305 && /active/.test(e.message)) return false;
+                            throw e;
+                        }
+                    }, 120000, 5000);
+                }
+                dropped.push({node: n.name, replica, tables: tables.length});
+            }
+            return {dropped};
+        });
+        await ctx.step('validate', 'Check the remaining cluster', async () => verifyTopology(cluster));
+        await ctx.step('volumes', 'Record the volumes of the removed replicas', async () => {
+            await kubernetes.recordOwned(cluster, op);
+            return {note: `Their claims are kept (the operator's StatefulSets retain them) with reclaim policy ${cluster.spec.kubernetes.reclaim_policy}; delete them with Delete resources after retirement.`};
+        });
+        await lifecycle(cluster, 'ready', `${names.join(', ')} decommissioned by ${op.op_id}`);
+    },
+
+    async add_shard(ctx) {
+        const {cluster, op} = ctx;
+        const new_nodes = kubernetes.nodes(cluster.spec).filter(n => (op.parameters.nodes || []).includes(n.name));
+        if (!new_nodes.length) throw new Rejected('The revision of this operation has no new shard.');
+        await ctx.step('apply', 'Add the shard to the ClickHouseCluster', async () => {
+            await kubernetes.apply(cluster, kubernetes.manifests(cluster, cluster.spec));
+            return {nodes: new_nodes.map(n => n.name)};
+        });
+        await ctx.step('create', 'Wait until the operator has created and started the new shard', async () => {
+            await kubernetes.settle(cluster, 'the operator to add the shard');
+            await kubernetes.applyReclaimPolicy(cluster);
+            await kubernetes.recordOwned(cluster, op);
+            return {nodes: new_nodes.map(n => kubernetes.pod(cluster, n))};
+        });
+        await ctx.step('schema', 'Create the schema of shard 1 on the new shard (empty: existing data is not moved)', async () => {
+            const source = await kubernetes.connect(cluster, kubernetes.nodes(cluster.spec).find(n => n.shard === 1));
+            const result = [];
+            for (const n of new_nodes) result.push({node: n.name, ...(await copySchema(source, await kubernetes.connect(cluster, n)))});
+            return {nodes: result, notes: result.flatMap(r => r.notes)};
+        });
+        await ctx.step('topology', 'Check the cluster definition on every node', async () => verifyTopology(cluster));
+        await ctx.step('replication', 'Write, replicate, and read test data on every shard', async () => replicationTest(cluster, op.op_id));
+        await lifecycle(cluster, 'ready', `shard added by ${op.op_id}`);
+    },
+
+    /// Only the last shard can be removed (the operator removes the shard with the highest index), and only when empty.
+    async remove_shard(ctx) {
+        const {cluster, op} = ctx;
+        const index = Number(op.parameters.shard);
+        const active = cluster.spec.shards.filter(sh => sh.replicas.some(r => r.state !== 'removed' || sh.index === index));
+        const shard = cluster.spec.shards.find(sh => sh.index === index);
+        if (!shard) throw new Rejected(`Shard ${index} does not exist.`);
+        if (active[active.length - 1].index !== index) throw new Rejected(`The operator removes the shard with the highest index: only shard ${active[active.length - 1].index} can be removed.`);
+        if (active.length < 2) throw new Rejected('The last remaining shard cannot be removed.');
+        const replicas = shard.replicas;
+        await ctx.step('empty', 'Check that the shard holds no data', async () => {
+            const node_query = await kubernetes.connect(cluster, {...replicas[0], shard: index});
+            const tables = await node_query(`SELECT database, name, total_rows FROM system.tables WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') AND total_rows > 0`);
+            if (tables.length) throw new Rejected(`Shard ${index} holds data in ${tables.map(t => `${t.database}.${t.name} (${t.total_rows} rows)`).join(', ')}. `
+                + 'Removing a shard with data needs a migration of these rows to the other shards first; the console does not move data.');
+            return {tables_with_data: 0};
+        });
+        ctx.irreversible();
+        await ctx.step('remove', 'Remove the shard from the ClickHouseCluster', async () => {
+            await kubernetes.apply(cluster, kubernetes.manifests(cluster, cluster.spec));
+            await kubernetes.settle(cluster, 'the operator to remove the shard');
+            await kubernetes.recordOwned(cluster, op);
+            return {removed: replicas.map(r => r.name)};
+        });
+        await ctx.step('validate', 'Check the remaining cluster', async () => verifyTopology(cluster));
+        await lifecycle(cluster, 'ready', `shard ${index} removed by ${op.op_id}`);
+    },
+
+    /// The operator replaces the pods one replica at a time with the new image.
+    async upgrade(ctx) {
+        const {cluster, op} = ctx;
+        const target = op.parameters.image;
+        if (!target || !IMAGES.some(prefix => target.startsWith(`${prefix}:`))) throw new Rejected(`The image ${target} is not allowed on this agent.`);
+        await ctx.step('path', 'Check the upgrade path and the recovery readiness', async () => upgradePath(ctx, kubernetes.nodes(cluster.spec).map(n => n.image || cluster.spec.image), target));
+        await lifecycle(cluster, 'maintenance', `upgrade ${op.op_id}`);
+        await ctx.step('apply', `Set the image of the ClickHouseCluster to ${target}`, async () => {
+            const spec = JSON.parse(JSON.stringify(cluster.spec));
+            spec.image = target;
+            for (const sh of spec.shards) for (const r of sh.replicas) delete r.image;
+            await newRevision(ctx, spec, `${target} by ${op.op_id}`);
+            await kubernetes.apply(cluster, kubernetes.manifests(cluster, cluster.spec));
+            return {image: target, revision: cluster.revision};
+        });
+        await ctx.step('rollout', 'Wait until the operator has upgraded every replica', async () => {
+            const status = await kubernetes.settle(cluster, 'the operator to upgrade the replicas', 1800000);
+            return {version: status.version};
+        });
+        await ctx.step('versions', 'Check the version and the errors of every node', async () => {
+            const result = [];
+            for (const n of kubernetes.nodes(cluster.spec)) {
+                const node_query = await kubernetes.connect(cluster, n);
+                const [v] = await node_query('SELECT version() AS version');
+                if (!v.version.startsWith(target.split(':').pop())) throw new Error(`${n.name} reports version ${v.version} after the upgrade, not ${target}.`);
+                const [e] = await node_query(`SELECT count() AS n FROM system.errors WHERE last_error_time > now() - INTERVAL 5 MINUTE AND name IN ('CANNOT_LOAD_CONFIG', 'UNKNOWN_TABLE', 'CORRUPTED_DATA', 'CHECKSUM_DOESNT_MATCH')`);
+                if (Number(e.n) > 0) throw new Error(`${n.name} reports load or data errors after the upgrade (system.errors).`);
+                result.push({node: n.name, version: v.version});
+            }
+            return {nodes: result};
+        });
+        await ctx.step('checks', 'Run the post-upgrade checks', async () => ({...(await verifyTopology(cluster)), ...(await replicationTest(cluster, op.op_id))}));
+        await lifecycle(cluster, 'ready', `upgraded to ${target} by ${op.op_id}`);
+    },
+
+    /// Deletes the operator's resources and the client Service: the pods stop. The volume claims, the volumes, the
+    /// Secret, and the namespace stay until they are deleted with Delete resources.
+    async retire(ctx) {
+        const {cluster, op} = ctx;
+        await retireChecks(ctx);
+        ctx.irreversible();
+        await lifecycle(cluster, 'retiring', `operation ${op.op_id}`);
+        await ctx.step('stop', 'Delete the ClickHouseCluster, the KeeperCluster, and the client Service; keep the volumes', async () => {
+            const ns = kubernetes.namespace(cluster);
+            const name = kubernetes.resource(cluster);
+            await kubernetes.applyReclaimPolicy(cluster);
+            await kube(['-n', ns, 'delete', 'clickhousecluster', name, '--ignore-not-found', '--wait=true'], {timeout: 600000});
+            await kube(['-n', ns, 'delete', 'keepercluster', name, '--ignore-not-found', '--wait=true'], {timeout: 600000});
+            await kube(['-n', ns, 'delete', 'service', `${name}-client`, '--ignore-not-found'], {timeout: 120000});
+            closeForwards(ns);
+            for (const kind of ['clickhousecluster', 'keepercluster']) {
+                await recordResource(cluster.cluster_id, {resource_id: `${kind}:${name}`, kind, name, owner_op: op.op_id, disposition: 'deleted', evidence: `retirement ${op.op_id}`});
+            }
+            const owned = await kubernetes.owned(cluster);
+            for (const r of owned) {
+                await recordResource(cluster.cluster_id, {resource_id: `${r.kind}:${r.name}`, kind: r.kind, name: r.detail ? `${r.name} (${r.detail})` : r.name, owner_op: op.op_id,
+                    disposition: 'retained', retention_until: op.parameters.retention_until || null, evidence: `retirement ${op.op_id}`});
+            }
+            return {deleted: [`ClickHouseCluster/${name}`, `KeeperCluster/${name}`], retained: owned.map(r => `${r.kind}/${r.name}`)};
+        });
+        await recordEvent('', cluster.cluster_id, 'mode', {state: 'retired', message: `retired by ${op.op_id}`});
+        await lifecycle(cluster, 'retired', `retired by ${op.op_id}; volumes, backups, and records are kept`);
+    },
+
+    /// Deletes only the resources listed in the operation, after checking that they are this cluster's. Deleting a
+    /// claim releases its volume; a volume with reclaim policy Retain then stays, with its data, until it is deleted
+    /// too; deleting a volume object does not delete the storage behind a Retain volume.
+    async destroy(ctx) {
+        const {cluster, op} = ctx;
+        const approved = op.parameters.resources || [];
+        if (!['retired', 'failed'].includes(cluster.lifecycle) && cluster.mode !== 'retired') throw new Rejected('Only a retired cluster, or one whose provisioning failed, can have its resources deleted.');
+        if (!Array.isArray(approved) || approved.some(id => typeof id !== 'string' || !/^(clickhousecluster|keepercluster|secret|service|pvc|pv|namespace):[a-z0-9.-]+$/.test(id))) {
+            throw new Rejected('The approved resources must be a list of identifiers such as pvc:<name>.');
+        }
+        if (!approved.length) throw new Rejected('No resource was approved for deletion.');
+        await ctx.step('delete', 'Delete the approved resources', async () => {
+            const owned = await kubernetes.owned(cluster);
+            const ns = kubernetes.namespace(cluster);
+            const order = {clickhousecluster: 0, keepercluster: 1, service: 2, secret: 3, pvc: 4, pv: 5, namespace: 6};
+            const deleted = [];
+            for (const id of [...approved].sort((a, b) => order[a.split(':')[0]] - order[b.split(':')[0]])) {
+                const [kind, name] = id.split(':');
+                if (!owned.some(r => r.kind === kind && r.name === name)) {
+                    await recordResource(cluster.cluster_id, {resource_id: id, kind, name, owner_op: op.op_id, disposition: 'deleted', evidence: 'not found as this cluster\'s: nothing deleted'});
+                    continue;
+                }
+                if (kind === 'namespace') {
+                    const others = (await kubeJSON(['-n', ns, 'get', 'pvc,pods,statefulsets'])).items;
+                    if (others.length) throw new Blocked(`The namespace ${ns} still holds ${others.length} objects (${others.slice(0, 3).map(o => `${o.kind}/${o.metadata.name}`).join(', ')}): delete them first.`);
+                    await kube(['delete', 'namespace', ns, '--wait=true'], {timeout: 600000});
+                } else if (kind === 'pv') {
+                    /// A volume with reclaim policy Delete is deleted by its provisioner with its claim.
+                    await kube(['delete', 'pv', name, '--ignore-not-found', '--wait=true'], {timeout: 300000});
+                } else {
+                    await kube(['-n', ns, 'delete', kind, name, '--ignore-not-found', '--wait=true'], {timeout: 300000});
+                }
+                await recordResource(cluster.cluster_id, {resource_id: id, kind, name, owner_op: op.op_id, disposition: 'deleted', evidence: `deleted by ${op.op_id}`});
+                deleted.push(id);
+            }
+            const remaining = await kubernetes.owned(cluster).catch(() => []);
+            for (const r of remaining.filter(r => r.kind === 'pv')) {
+                await recordResource(cluster.cluster_id, {resource_id: `pv:${r.name}`, kind: 'pv', name: `${r.name} (${r.detail})`, owner_op: op.op_id, disposition: 'retained',
+                    evidence: 'a volume whose claim was deleted: with reclaim policy Retain it keeps the data until it is deleted'});
+            }
+            return {deleted};
+        });
+    },
+};
+
 /// Runs an operation step by step. Completed steps are recorded, so a restarted agent continues after the last
 /// completed step; steps are written so that running one again is harmless.
 async function execute(state, op) {
@@ -1556,7 +2461,7 @@ async function execute(state, op) {
                 throw e;
             }
         }};
-    await HANDLERS[op.kind](ctx);
+    await ((cluster.provider === 'kubernetes' && K8S_HANDLERS[op.kind]) || HANDLERS[op.kind])(ctx);
 }
 
 class Cancelled extends Error {}
@@ -1665,7 +2570,7 @@ async function cycle() {
     const state = await loadState();
     const key = agentKey();
     await recordEvent(`agent:${AGENT_ID}`, '', 'heartbeat', {state: 'alive', data: {providers: Object.keys(PROVIDERS), environments: ENVIRONMENTS, state_dir: !!STATE_DIR,
-        public_key: key ? key.public_key : null, key_id: key ? key.key_id : null}});
+        public_key: key ? key.public_key : null, key_id: key ? key.key_id : null, ...(PROVIDERS.kubernetes ? {kubernetes: await kubernetes.inventory()} : {})}});
     await processOperations(state);
     for (const cluster of state.clusters) {
         if (cluster.mode === 'retired' || !cluster.spec || ['planned', 'provisioning', 'retiring', 'retired', 'destroyed'].includes(cluster.lifecycle)) continue;
@@ -1694,6 +2599,6 @@ async function main() {
     }
 }
 
-export {keeperMntr, docker};
+export {keeperMntr, docker, kubernetes};
 
 if (import.meta.url === `file://${process.argv[1]}`) await main();
