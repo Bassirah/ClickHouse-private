@@ -644,10 +644,15 @@ async function processDeletions(state) {
     }
 }
 
+/// Adds `results` to the test result of a destination. The row is read again right before the write, so that a
+/// change made in the console since this cycle started (enabling, disabling, editing) is not overwritten.
 async function recordDestinationCapabilities(destination, results) {
-    const merged = {...parseJSON(destination.test_result, {}), ...results};
-    const row = {...destination, test_result: JSON.stringify(merged), tested_at: destination.tested_at || null, deleted: false};
-    delete row.updated_by;
+    const current = (await query(`SELECT id, name, toString(type) AS type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled,
+            allowed_databases, test_result, if(tested_at IS NULL, '', toString(tested_at)) AS tested_at, description, deleted
+        FROM ${q(DB)}.backup_destinations FINAL WHERE id = {id:String}`, {params: {id: destination.id}}))[0];
+    if (!current || current.deleted) return;
+    const merged = {...parseJSON(current.test_result, {}), ...results};
+    const row = {...current, test_result: JSON.stringify(merged), tested_at: current.tested_at || null, deleted: false};
     await query(`INSERT INTO ${q(DB)}.backup_destinations (id, name, description, type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled, allowed_databases, test_result, tested_at, deleted) FORMAT JSONEachRow\n${JSON.stringify(row)}`, {raw: true});
 }
 
