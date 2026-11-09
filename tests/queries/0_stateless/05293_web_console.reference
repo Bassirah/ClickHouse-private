@@ -21,6 +21,7 @@ script-src 'unsafe-inline';
 --- destinations come from the server configuration, with defaults
 Content-Type: application/json; charset=UTF-8
 admin_database console_admin
+backup_s3_endpoints (empty)
 clickstack_url /clickstack/
 cloud_url https://clickhouse.cloud/
 documentation_url https://clickhouse.com/docs/

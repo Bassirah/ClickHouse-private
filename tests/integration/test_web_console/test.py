@@ -13,6 +13,7 @@ DEFAULTS = {
     "cloud_url": "https://clickhouse.cloud/",
     "clickstack_url": "/clickstack/",
     "admin_database": "console_admin",
+    "backup_s3_endpoints": "",
 }
 
 

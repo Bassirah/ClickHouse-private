@@ -33,7 +33,7 @@ ${CLICKHOUSE_CURL} -sS "${BASE}/console/config.json" | python3 -c '
 import json, sys
 config = json.load(sys.stdin)
 for key in sorted(config):
-    print(key, config[key])
+    print(key, config[key] or "(empty)")
 '
 
 echo "--- the embedded pages implement the integration contract of the console"

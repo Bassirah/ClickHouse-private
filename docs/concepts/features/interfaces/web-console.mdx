@@ -86,6 +86,7 @@ The destinations of the resource links and of ClickStack are set in the `web_con
 | `cloud_url` | `https://clickhouse.cloud/` |
 | `clickstack_url` | `/clickstack/` |
 | `admin_database` | `console_admin`: the database of the [administration tables](#console-tables) |
+| `backup_s3_endpoints` | Empty: the S3 endpoints that [backup destinations](#backup-destinations) may use, separated by commas, for example `https://s3.eu-west-1.amazonaws.com,https://minio.example.internal:9000`. With an empty value, only disk destinations can be added. |
 
 For example, in a network without Internet access, point the documentation to an internal mirror and remove the other external links:
 
@@ -236,6 +237,167 @@ The actor, the time, and the server of each row are columns that the server fill
 
 To remove the administration data, drop the database. The console then works as if it was never set up.
 
+## Backup & Restore {#backup-and-restore}
+
+The **Backup & Restore** page of the **Administration** category runs the native `BACKUP` and `RESTORE` statements of ClickHouse. It does not copy data itself. It adds what the statements lack: a list of approved destinations, a durable record of every operation, schedules, retention that keeps incremental chains intact, restores that do not touch existing data unless you ask, and restore tests.
+
+| View | What it shows |
+|---|---|
+| Overview | Operations of the last 7 days (total, failed or unknown, running), available backups and how many passed a restore test, recent failures, schedules, destinations, and the last heartbeat of the backup worker. |
+| Backups | The inventory: one row per backup with its scope, destination, type and base, size and file count when the server reported them, and checks (artifact opened, restore test). |
+| Restore | The restore wizard for a chosen backup. |
+| Schedules | Schedules with their next runs, and a retention preview. |
+| Destinations | The approved destinations, their test results, and the S3 endpoint allowlist. |
+| Operations | Every backup, restore, restore test, deletion, and destination test, with its state and the source of that state. |
+| Recovery verification | The restore tests and their checks. |
+
+The page needs the console tables: when they are missing, the page offers **Set up**, which creates the [backup tables](#backup-tables) in the `admin_database`.
+
+### Recovery coverage {#recovery-coverage}
+
+A backup contains what `BACKUP` copies: nothing more. Plan the recovery of the rest separately.
+
+| Object | Covered |
+|---|---|
+| Tables of the `MergeTree` family, `Log` family, and `Memory`: schema and data | Yes |
+| Views, materialized views, dictionaries: definitions | Yes. The target table of a materialized view is backed up only if it is in the scope. |
+| Tables of external engines (`S3`, `URL`, `Kafka`, `MySQL`, `PostgreSQL`, and similar): definitions | Yes; their data is stored elsewhere and is not backed up. The review step lists them. |
+| Users, roles, settings profiles, quotas, row policies created with SQL | Only when chosen as a separate scope item |
+| Users and settings in configuration files (`users.xml`), server configuration | No: keep them in configuration management |
+| Named collections, including the S3 credentials of destinations | No |
+| Keeper data other than the metadata of replicated tables | No |
+| Point-in-time recovery | No. A backup is a snapshot of when each table was copied; changes between backups are lost. |
+
+Each table is backed up from the data parts it has when its own backup starts. A backup of several tables is therefore not a transactionally consistent snapshot: rows inserted during the backup may be in one table and missing from another. The review step of the wizard says so, and lists unfinished mutations and running schema changes.
+
+### Backup destinations {#backup-destinations}
+
+Backups go only to destinations that an administrator added. Users choose a destination by name; they never type a path or a URL.
+
+- **Disk**: a disk of the server that is allowed in `backups.allowed_disk`, and a prefix inside it. The prefix may not contain `..` or start with `/`.
+- **S3**: an endpoint from `backup_s3_endpoints`, a bucket, and a prefix. The access key is stored by the server in a named collection `console_backup_<id>`, created with `CREATE NAMED COLLECTION` from the destination form. The console tables keep only the collection's name. The server masks the key in `system.query_log` and its logs, and the console never reads it back. HTTPS endpoints are verified with the server's usual certificate checks.
+
+:::note
+The server checks `remote_url_allow_hosts` only for redirects of `BACKUP TO S3`, not for the endpoint itself. A user with `WRITE ON S3` can therefore make the server send requests to any address it can reach, including internal and cloud metadata addresses. The console allows only the endpoints in `backup_s3_endpoints`. Do not grant `READ ON S3` or `WRITE ON S3` to users who should not have that ability outside the console.
+:::
+
+A new destination is disabled until it passes **Test**: the server writes a small backup of the destinations table to `<prefix>/_console_test/<uuid>` and opens it. Listing and deleting at the destination are tested by the [backup worker](#backup-worker) with its own credentials, which also removes the test backup. The test runs on the server the console is connected to. In a cluster, every server that runs backups needs the same access.
+
+Removing a destination deletes neither its backups nor its named collection. When the credentials are no longer needed, drop the collection with `DROP NAMED COLLECTION`.
+
+### Backup operations {#backup-operations}
+
+The backup wizard asks for the scope (whole databases, tables, partitions of a table, and, as a separate item, access entities), a destination, and the type: full, or incremental on an earlier backup of the same scope and destination, whose artifact must open. The review step lists the objects, the external tables, the views that read from databases outside the scope, and the consistency statement above. The console can also capture the row count and a fingerprint (`groupBitXor(cityHash64(*))`) of each table before and after the backup, to compare restores with. When the source changed during the backup, the result says so and the values are not used for checks.
+
+Each operation has an ID that is also the `id` setting of the native operation in `system.backups`, the `log_comment` of its statements, and the correlation ID of its audit records. Before submitting, the console records the operation (`queued`), then submits `BACKUP ... ASYNC` and records the outcome of the submission:
+
+| State | Meaning |
+|---|---|
+| `queued` | Recorded, not yet accepted by the server. |
+| `running` | Accepted by the server. |
+| `succeeded`, `failed`, `cancelled` | Reported by the server (`system.backups`, then `system.backup_log`). |
+| `unknown` | The console could not determine the outcome: the answer to the submission was lost, or the server has no record and the artifact could not be checked. Check the target before running the operation again. |
+
+Operations run in the server. Closing the browser does not cancel them, and does not lose them: the next visit to the page, and every cycle of the backup worker, reconciles the unfinished operations. When the server no longer lists an operation, for example after a restart, the console opens the artifact: a complete backup is recorded as `succeeded`, a missing one as `failed` with the explanation that it was interrupted. An operation is never submitted twice: the server refuses a second backup with the same ID or location.
+
+**Cancel** in the Operations view runs `KILL QUERY` for the server operation. The server removes the partial backup. Rows restored before a restore was cancelled stay in its target.
+
+The server shows no progress of a running backup in percent, and the console does not estimate one: it shows the elapsed time, and the files and bytes written when the server reports them. When an S3 destination becomes unreachable, the server retries each request for about an hour (`backup_restore_s3_retry_attempts`), and the operation stays `running` until you cancel it. The destination test and the artifact checks use two attempts and fail in seconds.
+
+### Restoring {#restoring}
+
+The restore wizard checks the chain of the backup (every base must open), the target, the names, conflicts, and asks you to type the name of the first target database to confirm.
+
+- **Target**: by default, a new database `restore_<database>_<time>` for each database of the backup, so a restore never touches existing data. `RESTORE DATABASE ... AS` rewrites the references of views and materialized views to the new database.
+- **Conflicts**: the console uses `create_table = 'create'` and `create_database = 'create'` and never `allow_non_empty_tables`, so the server refuses to restore over an existing object instead of appending to it. When a target exists, the wizard stops and offers a separate **Drop** dialog, with what depends on the database, a typed confirmation, and its own audit record.
+- **Access entities**: restored only when chosen, with `restore_access_entities`, as a separate step that needs the access management privileges.
+- **Privileges and capacity**: the wizard checks the privileges with `CHECK GRANT` before starting, and shows the size of the backup and the free space of the default disk, or says that it is unknown and why.
+
+After a restore, the console compares the target with the backup: the tables and their engines, the row counts, and, when the backup captured them, the fingerprints. Each check is recorded with the operation.
+
+### Schedules and retention {#schedules-and-retention}
+
+A schedule backs up chosen databases hourly, daily, or weekly at a time in a time zone, as full backups or as incremental backups with a full backup every N runs. Schedules are run by the [backup worker](#backup-worker), not by the browser or the server.
+
+Daylight saving time changes are handled as follows. A run is due at the first minute, on or after the scheduled local time, of each local day (or hour). When the clock is set back and a local time occurs twice, the schedule runs at the first occurrence. When the clock is set forward and the local time does not exist, it runs at the first minute after the gap. A run that was missed because no worker was running is made once, when a worker starts within the same period; older missed runs are not made up.
+
+Each run has an operation ID and an artifact name derived from the schedule and the local time of the run, so two workers that see the same run submit it only once. A run is postponed while another operation of the same schedule, destination, or databases is running. When the base of an incremental run is missing or does not open, the schedule either fails the run or makes a full backup, as chosen.
+
+Retention keeps the last N chains (a full backup and the incremental backups based on it). The Schedules view previews which backups retention would delete. A backup that is the base of another backup that is kept is never deleted, by retention or by hand: the inventory marks it **Protected**, the deletion dialog refuses it, and the worker checks it again before deleting. Do not configure bucket lifecycle rules that expire objects of a backup prefix: they can delete a base and break the chains that depend on it.
+
+Deletions are requested in the console and executed by the worker, because SQL cannot delete a backup.
+
+### Recovery verification {#recovery-verification}
+
+**Test restore** restores a backup into new databases named `console_verify_<id>_<database>` on the server the console is connected to, compares them with the backup and with the values captured when it was made, and drops them. The result is recorded with its checks, shown in the inventory and in **Recovery verification**, and audited; a failed test stays visible until a later one passes. Schedules can run a restore test after each backup.
+
+A restore test shows that the backup opens and that its data matches, on this server. It does not test a restore on another server, of another version, or the recovery of what the backup does not cover.
+
+### Backup worker {#backup-worker}
+
+`utils/web-console/backup_worker.mjs` is a process that runs next to the server. It needs Node.js 18 or later and no packages. Each cycle (every 30 seconds by default) it:
+
+- reconciles unfinished operations;
+- submits due scheduled backups, and restore tests of schedules that ask for them;
+- applies retention and executes requested deletions;
+- tests listing and deleting at destinations, and removes destination test artifacts;
+- records a heartbeat, shown on the Overview, and calls a webhook when a scheduled operation fails.
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=backup_worker CLICKHOUSE_PASSWORD=... \
+PROD_S3_ACCESS_KEY_ID=... PROD_S3_SECRET_ACCESS_KEY=... \
+node utils/web-console/backup_worker.mjs
+```
+
+Run it as a service (for example with systemd) on the server host: deleting from a disk destination needs access to the disk's directory. Several workers may run at the same time. The worker reads S3 credentials from environment variables named after the destination's credential reference (`<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY`, `<REF>_REGION`), and a schedule's webhook URL from the variable named in the schedule. It writes only to the console tables, and logs JSON lines without credentials.
+
+Its service account needs the privileges of a **Backup Administrator** (see below) for the databases of the schedules, the `SELECT` privilege on them for fingerprints, and `INSERT` on the four backup tables and the audit log.
+
+### Backup privileges {#backup-privileges}
+
+As everywhere in the console, every action is a statement run as you and authorized by the server. These are the privileges each action needs, and the role templates that bundle them:
+
+| Action | Privileges |
+|---|---|
+| See the page | `SELECT` on the four backup tables |
+| Back up | `BACKUP` on the scope; `READ, WRITE ON DISK`, or `NAMED COLLECTION` on the destination's collection and `READ, WRITE ON S3`; `INSERT` on `backup_operations`, `backup_events`, and `audit_log` |
+| Restore | `READ ON DISK` or `READ ON S3` and the collection; `CREATE DATABASE`, `CREATE TABLE`, `CREATE VIEW`, `CREATE DICTIONARY`, `INSERT` on the target; for access entities, the access management privileges |
+| Test restore | As restore, on `console_verify_*`, and `DROP DATABASE` on it |
+| Check an artifact | `CREATE DATABASE, DROP DATABASE ON console_inspect_*.*` (the artifact is opened with the `Backup` database engine) |
+| Manage destinations | `INSERT` on `backup_destinations`; for S3, `CREATE NAMED COLLECTION`, `ALTER NAMED COLLECTION`, `DROP NAMED COLLECTION` on `console_backup_*` |
+| Manage schedules | `INSERT` on `backup_schedules` |
+| Cancel | `KILL QUERY` |
+
+| Template | Grants |
+|---|---|
+| Backup Viewer | `SELECT` on the backup tables, the audit log, `system.backups`, `system.backup_log`, and `system.disks`; `SHOW DATABASES`. |
+| Backup Operator | The viewer's, plus backing up the chosen databases to disks (optionally S3), checking artifacts, and requesting deletions; optionally `KILL QUERY`. |
+| Restore Operator | The viewer's, plus restoring into new databases named `restore_*` and restore tests. It cannot drop databases other than its restore tests, or restore access entities. |
+| Backup Administrator | All of the above for the chosen databases, plus destinations, schedules, and `KILL QUERY`. |
+
+`READ ON S3` and `WRITE ON S3` apply to every S3 URL, not only to the configured destinations, and `READ ON DISK` and `WRITE ON DISK` to every disk: grant them only to users trusted with that.
+
+### Backup tables {#backup-tables}
+
+| Table | Contents |
+|---|---|
+| `backup_destinations` | `ReplacingMergeTree`: one row per destination, without credentials. |
+| `backup_schedules` | `ReplacingMergeTree`: one row per schedule. |
+| `backup_operations` | `MergeTree`: one row per operation, written once when it is requested. |
+| `backup_events` | `MergeTree`: the state changes and checks of each operation, appended. The current state is the latest event. |
+
+As with the other console tables, the requester and the time are filled in by the server. Rows are never updated: deleting a backup appends a `deleted` event.
+
+### Backup runbooks {#backup-runbooks}
+
+- **An operation is `unknown`.** Look at **Operations** for the source of the state and the error. For a backup, select **Check artifact** in the inventory: if the backup opens, it is usable. For a restore, inspect the target databases before restoring again into new ones.
+- **A backup was interrupted.** A backup interrupted by a server failure is recorded as `failed`, and its partial files stay at the destination: select **Delete** on its row to have the worker remove them.
+- **An operation stays `running`.** `system.backups` shows the server's view. For S3, check that the endpoint is reachable from the server, then cancel the operation. For `ON CLUSTER` operations, a server that does not answer makes the operation wait (see [Limitations](#limitations)).
+- **A scheduled backup did not run.** On the Overview, check the worker heartbeat, then the worker's log. A run is skipped while an operation on the same databases or destination is running, and postponed runs are not made up after the period.
+- **A deletion failed.** The operation shows the reason, for example that the backup is the base of another one, or that the worker has no credentials or no access to the disk directory. Partial deletions on S3 list the keys that remain.
+- **A restore test failed.** The checks list the tables whose counts or fingerprints differ. A fingerprint difference with equal counts usually means the source changed during the backup without the console capturing it; test the next backup before relying on this one.
+- **Recovering the console tables.** They are ordinary tables and can be in a backup's scope. Restore them into a new database and set `admin_database` to it, or copy their rows back.
+
 ## Integration contract {#integration-contract}
 
 The pages served by the server (`/dashboard`, `/binary`, `/merges`, `/schema`, `/jemalloc`, `/processors-profile`, and `/docs`) call `window.parent.clickhouseConsole.getConnection(window)` once at startup. When the page is embedded by the console on the same origin, this returns the server URL, the user, and the password, and the page hides its own connection fields. The console returns the connection only to frames it created for these pages, and only while you are signed in. When the page is opened on its own, or embedded by a page of another origin, the call is not made and the page behaves as before.
@@ -256,3 +418,8 @@ ClickStack is a separate application with its own connection settings, entered i
 - The component access policy is enforced by the console only, and its tables are local to one server (see [Component access](#component-access)).
 - The console cannot close another user's open native connections when suspending the user (see [Suspending a user](#suspending-a-user)).
 - Quotas do not count queries that read no table, such as `SELECT 1`.
+- Backups do not provide point-in-time recovery, and a backup of several tables is not a consistent snapshot of them (see [Recovery coverage](#recovery-coverage)).
+- `BACKUP ... ON CLUSTER` waits for every server of the cluster. When one does not answer, the operation does not finish until `backup_restore_failure_after_host_disconnected_for_seconds` (an hour by default), and a server waiting for it does not shut down until then. The console runs backups on the server it is connected to.
+- The server does not check `remote_url_allow_hosts` for the endpoint of `BACKUP TO S3`; the console restricts endpoints with `backup_s3_endpoints` (see [Backup destinations](#backup-destinations)).
+- Restore tests run on the server the console is connected to, which shares resources with the production workload.
+- Schedules, retention, and deletions need the [backup worker](#backup-worker). Without it, the page shows that no worker is running, and requested deletions stay `queued`.
