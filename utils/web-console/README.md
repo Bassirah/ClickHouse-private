@@ -24,6 +24,8 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/cluster_agent.mjs` | Cluster agent: executes cluster lifecycle operations through the docker-compose provider, and observes clusters (Node.js 18, no packages). |
 | `utils/web-console/access_policy_worker.mjs` | Access policy worker: imports user attributes from a feed, and reconciles the native grants, role memberships, and row policies of the policy rules, acting as each rule's author (Node.js 18, no packages). |
 | `utils/web-console/data_access_e2e.mjs` | Browser acceptance checks of Data Access Policies with synthetic users and data, over HTTP and the native protocol, including the access policy worker (Playwright; not part of the build). |
+| `utils/web-console/cluster_k8s_e2e.mjs` | Browser acceptance checks of the Kubernetes provider of Cluster Management: the wizard's choices, provisioning, configuration and drift, storage expansion, replicas, backup, retirement, and deletion (Playwright; not part of the build). |
+| `utils/web-console/k8s_lab.sh` | Creates and deletes the Kubernetes lab: a k3d cluster with cert-manager, the ClickHouse operator, and an expandable storage class. |
 | `utils/web-console/cluster_e2e.mjs` | Browser acceptance checks of Cluster Management against a running agent: provisioning, registration, drift, scaling, failures, and retirement (Playwright; not part of the build). |
 | `utils/web-console/Dockerfile` | Image with a locally built binary on top of the official image. |
 
@@ -205,6 +207,22 @@ node data_access_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass --
     --worker ~/src/ClickHouse-private/utils/web-console/access_policy_worker.mjs \
     --console-html ~/src/ClickHouse-private/programs/server/console.html \
     --cluster dap_secret --partial-cluster console_test --screenshots shots
+```
+
+The Kubernetes provider has its own lab and checks. `k8s_lab.sh up` creates a k3d cluster `chlab` with cert-manager
+v1.16.2, the ClickHouse operator v0.0.8, and the storage class `csi-hostpath-expandable` (the CSI host-path driver, which
+allows volume expansion; k3s's `local-path` does not), and writes `tmp/k8s/kubeconfig`. Start the agent with it, then run
+the checks; they create clusters `k8s-*` in namespaces `chc-k8s-*` and delete them:
+
+```bash
+utils/web-console/k8s_lab.sh up
+CLUSTER_AGENT_KUBECONFIG=$PWD/tmp/k8s/kubeconfig CLUSTER_AGENT_K8S_NAMESPACES='chc-*' \
+CLICKHOUSE_URL=http://127.0.0.1:28123 CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD=devpass \
+CLUSTER_AGENT_STATE_DIR=$PWD/tmp/clusterlab/state E2E_S3_ACCESS_KEY_ID=... E2E_S3_SECRET_ACCESS_KEY=... \
+node utils/web-console/cluster_agent.mjs &
+cp utils/web-console/cluster_k8s_e2e.mjs ~/console-e2e/ && cd ~/console-e2e
+node cluster_k8s_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass --kubeconfig ~/src/ClickHouse-private/tmp/k8s/kubeconfig \
+    --expandable csi-hostpath-expandable --fixed local-path --destination 'e2e s3' --screenshots shots
 ```
 
 Without root access for `playwright install-deps`, unpack the missing libraries locally and point the loader at them:
