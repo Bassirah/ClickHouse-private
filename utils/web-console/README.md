@@ -7,7 +7,7 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 
 | File | Role |
 |---|---|
-| `programs/server/console.html` | The console: login, home page, sidebar, panel lifecycle, navigation registry (`COMPONENTS`), and the Administration pages (users, roles, component access, profiles and quotas, audit, backup and restore). |
+| `programs/server/console.html` | The console: login, home page, sidebar, panel lifecycle, navigation registry (`COMPONENTS`), and the Administration pages (users, roles, component access, profiles and quotas, audit, backup and restore, clusters). |
 | `src/Server/WebUIRequestHandler.{h,cpp}` | `ConsoleWebUIRequestHandler`: serves the page for `/console/*` and `/console/config.json`. |
 | `src/Server/HTTPHandlerFactory.cpp` | Registers `/console` and the `console` handler type of `http_handlers`. |
 | `src/Core/ServerSettings.cpp` | Accepts the `web_console` configuration section. |
@@ -21,6 +21,10 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/access_e2e.mjs` | Browser acceptance checks of the Administration pages (Playwright; not part of the build). |
 | `utils/web-console/backup_worker.mjs` | Backup worker: schedules, reconciliation, retention, deletions (Node.js 18, no packages). |
 | `utils/web-console/backup_e2e.mjs` | Browser acceptance checks of Backup & Restore, including a server restart and an unavailable destination (Playwright; not part of the build). |
+| `utils/web-console/cluster_agent.mjs` | Cluster agent: executes cluster lifecycle operations through the docker-compose provider, and observes clusters (Node.js 18, no packages). |
+| `utils/web-console/access_policy_worker.mjs` | Access policy worker: imports user attributes from a feed, and reconciles the native grants, role memberships, and row policies of the policy rules, acting as each rule's author (Node.js 18, no packages). |
+| `utils/web-console/data_access_e2e.mjs` | Browser acceptance checks of Data Access Policies with synthetic users and data, over HTTP and the native protocol, including the access policy worker (Playwright; not part of the build). |
+| `utils/web-console/cluster_e2e.mjs` | Browser acceptance checks of Cluster Management against a running agent: provisioning, registration, drift, scaling, failures, and retirement (Playwright; not part of the build). |
 | `utils/web-console/Dockerfile` | Image with a locally built binary on top of the official image. |
 
 All HTML pages are embedded into the binary with `#embed`: **any change to an `.html` file needs a
@@ -173,6 +177,34 @@ node backup_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass \
     --worker ~/src/ClickHouse-private/utils/web-console/backup_worker.mjs \
     --server-restart ~/src/ClickHouse-private/tmp/console-dev/e2e/restart.sh \
     --server-log ~/src/ClickHouse-private/tmp/console-dev/log/clickhouse-server.log --screenshots shots
+```
+
+Cluster Management has its own checks. They need the cluster agent running against the same server with the
+docker-compose provider for the environment `lab`, the images `clickhouse/clickhouse-server:26.9.8.3` and
+`contentsquareplatform/chproxy:v1.30.0` (the clusters of the checks use chproxy) on the Docker host, and a credential reference `PLATFORM` (the agent's `PLATFORM_USER` and `PLATFORM_PASSWORD`) for the
+registration check. They create lab clusters named `e2e-*`, retire them, and delete their resources:
+
+```bash
+cd ~/src/ClickHouse-private
+CLICKHOUSE_URL=http://127.0.0.1:28123 CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD=devpass \
+CLUSTER_AGENT_STATE_DIR=$PWD/tmp/clusterlab/state PLATFORM_USER=default PLATFORM_PASSWORD=devpass \
+node utils/web-console/cluster_agent.mjs &
+cp utils/web-console/cluster_e2e.mjs ~/console-e2e/ && cd ~/console-e2e
+node cluster_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass --screenshots shots
+```
+
+Data Access Policies has its own checks. They create a database `dap_e2e_<run>` with synthetic users and roles, check every
+result as those users over HTTP and with the native client, run the access policy worker with an attribute feed file,
+and remove everything at the end. `--cluster` names a cluster with an interserver secret that contains the server, for
+the distributed checks; `--partial-cluster` names a cluster with an unavailable server, for the partial deployment check:
+
+```bash
+cp utils/web-console/data_access_e2e.mjs ~/console-e2e/ && cd ~/console-e2e
+node data_access_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass --native-port 29000 \
+    --clickhouse ~/src/ClickHouse-private/build/programs/clickhouse \
+    --worker ~/src/ClickHouse-private/utils/web-console/access_policy_worker.mjs \
+    --console-html ~/src/ClickHouse-private/programs/server/console.html \
+    --cluster dap_secret --partial-cluster console_test --screenshots shots
 ```
 
 Without root access for `playwright install-deps`, unpack the missing libraries locally and point the loader at them:
