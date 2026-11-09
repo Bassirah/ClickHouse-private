@@ -1,0 +1,27 @@
+--- an asynchronous backup is listed under its ID
+<id>
+BACKUP_CREATED
+--- a second backup with the same location or the same ID is refused
+error 598
+error 36
+--- an incremental backup on a missing base is refused
+error 599
+--- a missing backup cannot be opened
+error 599
+--- the Backup engine opens a backup read-only
+events
+totals
+1000
+--- restore into a new database: views are rewritten, data matches
+RESTORED
+1	1
+1
+--- restoring over an existing database or table is refused, and nothing is appended
+error 82
+error 608
+1000
+--- privileges
+error 497
+error 497
+ok
+error 497
