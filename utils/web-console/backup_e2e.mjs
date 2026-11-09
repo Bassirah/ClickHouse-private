@@ -113,7 +113,9 @@ async function go(target) {
         history.pushState(null, '', t);
         dispatchEvent(new PopStateEvent('popstate'));
     }, target);
-    await until(() => page.evaluate(() => !document.querySelector('#admin-view .spinner')), 120000, 'the page to load');
+    /// The check of unfinished operations runs in the background after the page is shown (`.reconcile-notice`).
+    await until(() => page.evaluate(() => ![...document.querySelectorAll('#admin-view .spinner')].some(s => !s.closest('.reconcile-notice'))),
+        120000, 'the page to load');
     await sleep(300);
 }
 
@@ -306,7 +308,14 @@ await test('Server restarts during a backup: the state is reconciled without run
     check(await sql("SELECT count() FROM system.backups WHERE id = {id:String}", ADMIN_USER, ADMIN_PASSWORD, {id: run.op_id}) === '0', 'the operation survived the restart');
     await signIn();
     await go('/console/admin-backups?tab=operations');
-    await until(async () => ['failed', 'succeeded', 'unknown'].includes(await opState(run.op_id)), 120000, 'the reconciliation');
+    /// The first read of the interrupted S3 backup after the restart can take minutes (MinIO keeps the upload
+    /// of the killed server locked): the console then records `unknown`, and a later visit records the outcome.
+    await until(async () => {
+        if (['failed', 'succeeded'].includes(await opState(run.op_id))) return true;
+        await go('/console/admin-backups?tab=operations');
+        await until(() => page.evaluate(() => !document.querySelector('.reconcile-notice .spinner')), 300000, 'the check of unfinished operations');
+        return ['failed', 'succeeded'].includes(await opState(run.op_id));
+    }, 600000, 'the reconciliation');
     const state = await opState(run.op_id);
     const error = await sql(`SELECT argMax(error, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`, ADMIN_USER, ADMIN_PASSWORD, {id: run.op_id});
     check(state === 'failed' && error.includes('interrupted'), `state ${state}: ${error}`);
