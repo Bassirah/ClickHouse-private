@@ -45,17 +45,15 @@ The Web Terminal is unavailable when it is disabled with the `enable_webterminal
 
 ## Signing in and out {#signing-in-and-out}
 
-The sign-in form has the same fields and URL rules as the [SQL Console](/interfaces/sql-console): the server URL, the username, and the password. The console checks them by running `SELECT currentUser(), version(), hostName()`, which needs no privileges. If the check fails, it tells apart:
+The sign-in form asks for a username and a password. The console signs in to the server that serves it, at the address of the page. It checks the credentials by running `SELECT currentUser(), version(), hostName()`, which needs no privileges. If the check fails, it tells apart:
 
 - an incorrect username or password;
 - a user that may not connect from your address, or that lacks permissions;
-- a server that cannot be reached;
-- a TLS certificate that the browser does not trust (the browser does not report the difference from an unreachable server, so the message names both);
-- a request that the browser blocked: mixed content, or a CORS policy that does not allow the console's origin.
+- a server that cannot be reached.
 
 If you open a panel's address without being signed in, the console asks you to sign in and then opens that panel.
 
-**Sign out** and **Switch connection** close every panel, which ends their queries, timers, and terminal sessions. They also discard the password and the ClickHouse connection that ClickStack stored for the current browser tab. After signing out, the Back button does not restore the signed-in state.
+**Sign out** and **Switch connection** (to sign in as another user) close every panel, which ends their queries, timers, and terminal sessions. They also discard the password and the ClickHouse connection that ClickStack stored for the current browser tab. After signing out, the Back button does not restore the signed-in state.
 
 The home page shows the connection status the server reported at the last check. The console checks the connection again every minute while the tab is visible, and when you select **Check connection**.
 
@@ -223,6 +221,8 @@ The **Console actions** tab shows the records that the console writes after each
 
 The **Access changes seen by the server** tab shows `CREATE`, `ALTER`, and `DROP` statements for users, roles, profiles, quotas, and policies, and `GRANT` and `REVOKE`, from `system.query_log`, including rejected attempts. Statements with a console correlation ID are marked as made in the console, all others as made outside of it. This covers only the server the console is connected to, and does not cover users or sessions with `log_queries` disabled, changes to configuration files, or statements older than the `query_log` retention.
 
+The **Access decisions** tab shows query-time authorization decisions, apart from administrative changes: reads the server refused with `ACCESS_DENIED`, from `system.query_log`, with the literals of the queries replaced by `?`, and the runs of access tests (see [Data Access Policies](#data-access-policies)). Statements of the access policy worker run as `EXECUTE AS <rule author>` and appear on the server tab.
+
 The pages always read the current state from the server, so a change made outside of the console is shown on the next load or refresh.
 
 ### Console tables {#console-tables}
@@ -236,6 +236,186 @@ The pages always read the current state from the server, so a change made outsid
 The actor, the time, and the server of each row are columns that the server fills in (`MATERIALIZED currentUser()`, `now64()`, and `hostName()`), with `CHECK` constraints that reject other values even when `insert_allow_materialized_columns` is enabled. So a user who can insert into these tables cannot write rows in another user's name. They are ordinary tables, though: users with `ALTER`, `TRUNCATE`, or `DROP` on them can change or remove rows, so the audit log is not tamper-proof. Grant only `SELECT` and `INSERT` on them, and keep `ALTER` and `DROP` to the server administrators. To change the retention later, run `ALTER TABLE console_admin.audit_log MODIFY TTL toDateTime(event_time) + INTERVAL <days> DAY`.
 
 To remove the administration data, drop the database. The console then works as if it was never set up.
+
+## Data Access Policies {#data-access-policies}
+
+The **Data Access Policies** page of the **Administration** category controls which columns and rows of tables each user can read, explains the effective access of a user, and provisions native controls from trusted user attributes. Hiding a component in the console is not data authorization: only the server controls on this page are, and they apply to every client that reaches the server, including the SQL Console, BI tools, drivers, the HTTP interface, and the native protocol.
+
+The page keeps five mechanisms apart:
+
+| Mechanism | What it is | Enforced by | On this page |
+|---|---|---|---|
+| Column permissions | Native `GRANT SELECT(column) ON db.table` | The server, for every query | **Column Permissions**, **Effective Access** |
+| Row policies | Native `CREATE ROW POLICY ... USING <filter>` | The server, for every `SELECT` | **Row Policies**, **Effective Access** |
+| Attribute-driven provisioning | Rules on user attributes, translated into native roles, grants, and row policies | The server, after a deployment or reconciliation | **Attributes & Classifications**, **Policy Rules**, **Policy Deployments** |
+| Dynamic, request-time ABAC | A decision per query from attributes of the request (purpose, device, time, network) | Not provided | Rules on such attributes are refused |
+| Column masking | Returning a transformed value instead of the stored one | Not provided: native masking policies are refused by this build | Not offered |
+
+Attribute-driven provisioning is not per-query ABAC: a change of an attribute takes effect when the rules are deployed or reconciled, not on the next query. The console does not present views as masking policies.
+
+### Verified behavior {#data-access-verified-behavior}
+
+These are the behaviors of the server version this page was built for, checked on it with synthetic users and data. Confirm them on another release with the access tests.
+
+| Requirement | Existing capability | Enforcement point | Added by the console | Version limitation |
+|---|---|---|---|---|
+| Read only some columns | `GRANT SELECT(col, ...)` | Query analysis on the server that runs the query | Column matrix, grant and revoke with review, broader-grant detection | `SELECT *` fails unless every column is granted; `count()` works with any column grant |
+| Read only some rows | `CREATE ROW POLICY ... AS permissive / restrictive` on a table or `db.*` | Every `SELECT` on the server that reads the table | Structured filter editor, combined filter per user, bypass paths | Filters reads only; not `INSERT`, `ALTER UPDATE`, or `ALTER DELETE` |
+| Users without a matching policy | `access_control_improvements.users_without_row_policies_can_read_rows` (default `true`) | Server configuration | Flagged per user as "All rows: no policy applies" | The setting cannot be read with SQL: the console assumes the default |
+| Explain effective access | `system.grants`, `system.role_grants`, `system.row_policies`, `SHOW GRANTS ... FINAL` | — | Role paths, default and activatable roles, conflicts, sources | Shows one server; sessions of other users are not observable |
+| Verify access at runtime | `EXECUTE AS <user>` with `IMPERSONATE ON <user>` | The server, with the target user's grants, default roles, and row policies | **Verify with the server**, access tests | Needs `allow_impersonate_user` and `IMPERSONATE` per target user |
+| Distributed reads | Shards apply their own row policies for the connecting user and those of the initial user, if a user of that name exists on the shard | Each shard | Distributed tables listed as bypass paths | Column grants are checked on the Distributed table, not on the shard's table |
+| Reads through views | `SQL SECURITY DEFINER` and `NONE` views read as their definer | The view | Listed as bypass paths | Row policies of the reader on the base table do not apply inside the view; `currentUser()` inside still returns the reader |
+| Masking | `CREATE MASKING POLICY` | — | Not offered | Refused: "Masking Policies are available only in ClickHouse Cloud" |
+
+### Column permissions {#data-access-column-permissions}
+
+**Column Permissions** shows, for a chosen table, a matrix of users and roles against columns: ✓ for a column grant, ● for a grant on the whole table, the database, or every database, and parentheses when the grant comes from a role that is not a default role (active only after `SET ROLE`). Below it are the broader grants, with the role path that gives them and whether they override column grants; the direct column grants to users; and grants on columns that no longer exist.
+
+Column grants are positive: a narrow grant never cancels a grant on the whole table or a wider one, which still gives every column. To restrict a user to some columns, revoke the broader grant (or add a partial revoke), then grant the columns, preferably to a role. A column grant covers the existing columns only; table, database, and global grants also cover columns and tables created later. A renamed column keeps its grant under the old name, which then names a column that no longer exists: the page lists such grants with **Revoke**.
+
+**Grant columns** grants `SELECT` on the chosen columns to a role or a user. The review warns when the grantee already reads every column through a broader grant, so that the change has no effect, and when `SELECT *` will fail for it.
+
+### Row policies {#data-access-row-policies}
+
+**Row Policies** lists every row policy with its table or database, kind, filter, targets, and source, and offers **Create row policy**, **Edit**, and **Remove**. The editor writes the filter from conditions on columns of the table (`=`, `≠`, "is one of", "is none of", and "= the user name" for `currentUser()`), joined with `AND`, with values quoted for the column's type, and offers presets for columns such as `branch`, `company`, `tenant`, and `region`. An expression can be typed only by administrators who can create and alter row policies on every table (`CREATE ROW POLICY, ALTER ROW POLICY ON *.*`); it is checked with the server's parser (`EXPLAIN AST`, `EXPLAIN QUERY TREE`) and refused when it contains subqueries, table functions, or references to other tables. The review lists the affected users with their combined filter before and after the change.
+
+**Effect on a table** shows, for each user who can read the table or to whom a policy applies, the rows visible at login: all rows (no policy exists, or none applies to the user), no rows, or the combined filter, which is the permissive policies joined with `OR`, and the restrictive ones with `AND`. It also lists:
+
+- **Bypass paths**: views that run as their definer, materialized views, and Distributed, Merge, and Buffer tables whose definition names the table. A match by name is a candidate for review, not a proof.
+- **Users who can change rows**: users with `INSERT`, `ALTER UPDATE`, `ALTER DELETE`, or wider grants, who can write rows outside their filter.
+
+On a cluster, row policies are evaluated by the server that reads the table. Create them `ON CLUSTER` (or in a replicated user directory) so that every shard has them, and configure an interserver `<secret>` for the cluster so that the shards know the initial user.
+
+### Effective access {#data-access-effective-access}
+
+**Effective Access** explains, for a user, a table, and an operation (`SELECT` or `INSERT`):
+
+- the identity, its source (SQL, configuration, LDAP), state, and default roles;
+- the roles granted to the user with their paths, which are active at login, and which apply only after `SET ROLE`;
+- per column, whether the configured grants give it at login and with all granted roles, and which grant gives it, directly or through which role path;
+- the row filter at login and with all granted roles, and the policies with their sources;
+- conflicts: column grants made ineffective by a broader grant, several permissive policies, a filter that changes with `SET ROLE`, and policy rules whose intent other grants contradict.
+
+Inspecting grants is not a proof. The page distinguishes the configured entitlement, the access in the default-role context, the result verified by the server, and what is unknown. **Verify with the server** runs `EXECUTE AS <user> CHECK GRANT` for every column and counts the visible rows as the user. It needs `IMPERSONATE` on that user: grant it only on dedicated test users. Without it the result is shown as unknown, with the server's message.
+
+### Access tests {#data-access-tests}
+
+**Access Tests** stores approved positive and negative tests: a user, a table, columns (or only a count of the rows), and the expected outcome: allowed, optionally with a number of rows, or denied (`ACCESS_DENIED`). **Run** reads the table as the user with `EXECUTE AS`, so the server applies that user's grants, default roles, and row policies as for a direct connection. An error other than `ACCESS_DENIED`, including a missing `IMPERSONATE` grant, is an error, never a pass. A run records the outcome and the number of rows, never the data.
+
+The browser acceptance checks (`utils/web-console/data_access_e2e.mjs`) repeat the checks over HTTP and with the native client, as the synthetic users themselves.
+
+### Attributes and classifications {#data-access-attributes}
+
+An attribute definition names the attribute, its category (user, resource, operation, or environment), whether it is evaluated per request, its source of truth, its **writer**, its owner, and how long a value stays fresh. The writer is the database user whose values are trusted, typically the account of an identity provider or HR import. The server records who wrote each value (`MATERIALIZED currentUser()`); a value written by anyone else, a value older than the freshness limit, or a value of an undefined attribute is shown as **Not trusted** and treated as missing. ClickHouse does not read identity provider claims itself: values reach it only through this table, and nothing a browser sends is taken as evidence.
+
+The reserved user attribute `employment_status` disables an identity for every rule when its value is `disabled`, `suspended`, `terminated`, or `inactive`.
+
+Data classifications label columns (for example `pii`, `financial`, or `secret`) with their source and owner. A label does not hide a column by itself: rules give access to the columns of a label.
+
+### Policy rules {#data-access-rules}
+
+A rule selects users with conditions on user attributes (all must hold) and provisions one of:
+
+| Kind | Example | Generated native controls |
+|---|---|---|
+| Grant a role | Analysts in department Finance get the role `finance_reports` | `GRANT finance_reports TO <user>` per matched user |
+| Filter rows by an attribute | Branch staff read only the rows of their branch | One permissive row policy per value, `dap_<rule>_<value hash>`, `USING branch = '<value>' TO <users>`; and `dap_<rule>_none`, `USING 0`, for users in scope without a trusted value and for disabled identities |
+| Columns of a label need a clearance | Users without clearance `secret` cannot read columns labeled `secret` | A role `dap_<rule>_cleared` with `SELECT(<column>)` on every column of the label, granted to the cleared users |
+
+Each rule also says what happens when an attribute is missing or stale: **revoke** (default: what the rule gave is removed, and a row filter shows no row) or **keep** (what was provisioned from the last known value stays until the value is fresh again; nothing new is provisioned from a stale value). **Exceptions** lists users the rule never provisions, for an entitlement revoked on purpose.
+
+Rules only add access. A rule never removes a grant made outside the platform, so this is not deny-overrides: a user who lacks a clearance still reads the classified columns through a broader grant. **Effective Access** and **Verify** report such conflicts. A rule on an attribute evaluated per request, or on a non-user attribute, is refused, because a permanent grant cannot follow it.
+
+Every change is a new revision with its author, recorded by the server. **Explain** shows the business rule, the resolved attributes of each matched and excluded user, the generated controls with their state on the server, the target nodes, and the result of the last deployment.
+
+### Policy deployments {#data-access-deployments}
+
+**Policy Deployments** computes the difference between the desired state of every enabled rule and the server, and shows it before anything changes:
+
+- Only entities the platform owns, recorded in `dap_owned`, are changed or removed. An entity that exists but was not created by the platform is left alone and listed, with **Adopt** for generated names; a role a rule grants that a user already has from elsewhere is reported and kept when the rule stops applying.
+- An owned entity that was removed outside the platform is reported and not restored, unless **Restore entities that were removed outside the platform** is chosen. To revoke an entitlement on purpose, add an exception to the rule.
+- Statements are idempotent (`IF NOT EXISTS`, `OR REPLACE`, `IF EXISTS`), so deploying again repairs a partial deployment. With **Apply changes to: ON CLUSTER**, the result shows each server, and a server that did not answer is shown as unfinished.
+- The page also lists rules that cannot be deployed, users who read a filtered table outside every rule, and disabled identities.
+
+**Verify** checks that every generated control is present, and that no user known to the identity sources keeps a revoked access through another grant, and lists queries still running for those users. A revocation is reported complete only when these checks pass on the server the console is connected to; other servers of a cluster are covered by the per-server results of the deployment.
+
+Deployments, reconciliations, and verifications are recorded in `dap_deployments` with the actor, the rules and revisions, each step with its per-server result, and the verification.
+
+### Access policy worker {#access-policy-worker}
+
+`utils/web-console/access_policy_worker.mjs` keeps the server in line with the rules when nobody has the console open. Each cycle it imports the attribute feed (when configured), computes the desired state with the same functions as the console, which it loads from `console.html`, applies the difference, and records ownership, the deployment, and an audit record.
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=access_policy_worker CLICKHOUSE_PASSWORD=... \
+    ATTRIBUTE_FEED=/var/lib/clickhouse-console/hr-feed.json ATTRIBUTE_FEED_SOURCE=hr INTERVAL_SECONDS=60 \
+    node utils/web-console/access_policy_worker.mjs
+```
+
+The worker is not an escalation path: it holds no privilege to grant anything. Each statement runs as `EXECUTE AS <author>`, the user who wrote the current revision of the rule, so the server checks that user's own privileges, including the grant option and `CLUSTER` for `ON CLUSTER`. Its account needs:
+
+```sql
+GRANT SELECT ON console_admin.* TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_owned TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_deployments TO access_policy_worker;
+GRANT INSERT ON console_admin.audit_log TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_user_attributes TO access_policy_worker;  -- only with a feed
+GRANT SELECT ON system.users TO access_policy_worker;  -- and system.roles, system.role_grants, system.grants, system.row_policies
+GRANT SHOW USERS, SHOW ROLES, SHOW ROW POLICIES ON *.* TO access_policy_worker;
+GRANT IMPERSONATE ON <each rule author> TO access_policy_worker;
+```
+
+The feed is a JSON file or an `https://` URL (with `ATTRIBUTE_FEED_TOKEN` as a bearer token) of `[{"user": "...", "attributes": {"department": "...", ...}}]`. Only attributes defined with the feed's source are imported; a value the feed no longer reports is removed. Define the attributes with the worker's account as their writer.
+
+**Revocation latency.** An attribute change reaches the server within one interval after the feed reports it (60 seconds by default), plus the delay of the feed itself. Grants and row policies are checked when a query starts: a running query finishes with the access it started with, and new queries of open sessions use the new access.
+
+**Identity source outage.** When the feed cannot be read, nothing is written and the values age. Until they pass the freshness limit of their attribute, the access already provisioned stays active. After that, each rule applies its setting: **revoke** removes the access (row filters show no row), **keep** holds what was provisioned. Set the freshness limit to the longest outage you accept.
+
+**Disabled identities.** A ClickHouse user authenticates with its own credentials, not with the identity provider. Disabling the identity (`employment_status`) removes what rules gave and makes row filter rules show no row, but the user can still sign in and use grants made outside the platform until the account is suspended on the **Users** page or dropped.
+
+### Dynamic access and masking {#data-access-dynamic}
+
+Request-time ABAC and column masking need an enforcement boundary that sees every query. Findings on this server version:
+
+- **Native masking** is refused in this build (`SUPPORT_IS_DISABLED`: "Masking Policies are available only in ClickHouse Cloud"). The statement is parsed, so its syntax is no evidence of support. While checking it, `CREATE MASKING POLICY ... TO NONE` raised a logical error (inconsistent AST formatting of `TO NONE`): an exception in a release build.
+- **Controlled views** with `SQL SECURITY DEFINER` read the base table as the definer while `currentUser()` returns the reader, so a view can decide per user, for example `if(currentUser() IN (SELECT user_name FROM <entitled users>), ssn, concat('***-', right(ssn, 2)))`. Checked on synthetic data: the entitled reader gets the value and the others the mask; a filter on the real value through the view matches nothing, because filters, joins, grouping, and ordering operate on the masked value; but whatever the mask leaves visible can be probed (`LIKE '***-1%'` matched), and the base table's row policies do not apply inside the view (the reader saw 2 rows instead of 1), so they must be repeated in the view. Such a view is safe only when the readers have no grant on the base table, and no other path (another view, a Distributed or Merge table, a dictionary, a materialized view, `remote()` with other credentials) reaches it. Hashing is not anonymization: a hash of a low-entropy value, such as a national identifier, is reversed by enumerating the values.
+- **A query gateway** enforces only if no client can reach the server directly; ClickHouse has no mechanism that confines users to a gateway except network rules and the users' allowed hosts. Rewriting SQL needs the server's parser, not regular expressions.
+- **An engine enhancement** (planner-level masking and request attributes) is the only option that covers every protocol and distributed execution; it is upstream work.
+
+Recommendation: keep authorization in native controls (column grants, row policies, and the attribute-driven provisioning above). For masking, use controlled definer views only for named tables whose base-table access is revoked for all readers, and verify the absence of other paths with **Row Policies → Bypass paths** and access tests. The console does not provide request-time ABAC or masking, and nothing on this page is presented as such.
+
+### Performance {#data-access-performance}
+
+A row policy adds its filter to every query of the users it applies to, as if they had written it: on 50 million rows, `sum(v)` took 0.15 s with a policy `branch = 'north'` against 0.17 s with the same `WHERE` written by hand (median of 5 runs, on the development server). A policy disables the answer of `count()` from the table's metadata: `count()` took 0.10 s with the policy against 0.01 s without. Index the columns used in filters (the primary key or a skip index) on large tables.
+
+### Data access tables {#data-access-tables}
+
+**Set up** on the **Access Tests**, **Attributes & Classifications**, **Policy Rules**, or **Policy Deployments** tab creates them in the admin database. Column permissions, row policies, and effective access need no table.
+
+| Table | Contents |
+|---|---|
+| `dap_attributes` | Attribute definitions, with source, writer, owner, and freshness. |
+| `dap_user_attributes` | Attribute values, with their source, observation time, and writer. |
+| `dap_classifications` | Column labels, with source and owner. |
+| `dap_rules` | Rule revisions (`MergeTree`, one row per revision). |
+| `dap_owned` | Entities created by the platform, by stable key. |
+| `dap_deployments` | Deployments, reconciliations, and verifications, with per-step and per-server results. |
+| `dap_access_tests` | Approved access tests. |
+| `dap_test_runs` | Outcomes of test runs, kept for 365 days. |
+
+As for the other console tables, the writer and time of each row are filled in by the server. Grant `SELECT` on them to the readers of the page, `INSERT` on the tables of each task (attributes, values, classifications, rules, tests, runs, and `dap_owned` for deployments) to its administrators, and keep `ALTER` and `DROP` to the server administrators.
+
+Administrative changes are recorded in the console audit log (actions `dap_*`; search for `dap_` on **Audit Activity**). Query-time decisions are kept apart: **Audit Activity → Access decisions** shows reads the server refused (`ACCESS_DENIED` in `system.query_log`, with the literals of queries replaced by `?`) and the runs of access tests.
+
+### Data access runbooks {#data-access-runbooks}
+
+- **A user reads columns it should not.** Open **Effective Access** for the user and table: the "Given by" column names the grant and role path. Revoke the broader grant; a column grant does not narrow it.
+- **A user sees every row.** **Row Policies → Effect on a table** shows "no policy applies": add the user (or a role it has at login) to a policy.
+- **A deployment is partly applied.** The history shows the failed step and the servers. Fix the cause (often the author's missing grant option or `CLUSTER` privilege), then deploy again: the statements are idempotent.
+- **An entity is reported as existing but not owned.** Remove or rename it, or **Adopt** it to let the platform manage it.
+- **Revocation is not complete.** **Verify** lists the other grants that still give the access, and running queries. Revoke the other grants, or suspend the user.
+- **The worker reports a failure.** The audit record names the step and the server's message; the worker acts as the rule author, so the author needs the privileges for every generated statement.
+- **To migrate or recover**, back up the admin database with the other console tables. The native entities (roles, grants, row policies) are backed up with the access entities of the server (`BACKUP ... system.users`, roles, and row policies). After a restore, run **Verify**: drift between `dap_owned` and the server is reported, not silently repaired.
 
 ## Backup & Restore {#backup-and-restore}
 
@@ -438,7 +618,7 @@ ClickHouse has no SQL statement that creates servers, provisions infrastructure,
 
 | View | What it shows |
 |---|---|
-| Cluster Inventory | Registered clusters with their environment, owner, provider, mode, lifecycle state, health, versions, the age of the last observation, drift, and operations that need attention; the state of the cluster agent. |
+| Cluster Inventory | Registered clusters with their environment, owner, provider, mode, lifecycle state, health, versions, the age of the last observation, drift, and operations that need attention; the state of the cluster agent. Filters: a search on name, identifier, owner, and workload; environment, provider, mode, and lifecycle; and **Needs attention** (drift, failed or blocked operations, or a cluster that is not healthy). |
 | Create Cluster | The creation wizard. |
 | Register Existing | Read-only registration of an existing deployment. |
 | Overview | Identity, endpoints, secret references, health, recovery targets and measured evidence, recent operations. |
@@ -466,6 +646,7 @@ One provider is implemented: **docker-compose**, a local lab. All its containers
 | Remove a shard | None | Provider | Only an empty shard | Data migration is not automated |
 | Resize CPU and memory | None | Docker limits | Rolling recreation | Storage cannot be resized: Docker volumes have no size |
 | Restart and upgrade | None | Provider | Rolling, with peer checks; upgrade gates and stop on failure | No downgrade; no automatic rollback |
+| Client routing | None (HTTP clients choose a node) | chproxy image on the host | Optional chproxy container; its node list follows the topology and maintenance | One chproxy container: a single point of failure; HTTP only |
 | Keeper membership | Keeper reconfiguration | Provider | Not implemented: observed only | The ensemble is fixed at provisioning |
 | Backup and verification | `BACKUP`, the `Backup` database engine | An S3 destination of Backup & Restore | One verified backup per shard | Disk destinations are unreachable from lab nodes |
 | Restore into a replacement cluster | `RESTORE` | Provider | Not automated: documented procedure | |
@@ -486,10 +667,10 @@ node utils/web-console/cluster_agent.mjs
 
 | Variable | Meaning |
 |---|---|
-| `CLUSTER_AGENT_STATE_DIR` | Directory of the generated deployments and their secrets (required for docker-compose). |
+| `CLUSTER_AGENT_STATE_DIR` | Directory of the generated deployments and their secrets, and of the agent's key pair `agent-key.pem` (readable by its owner), whose public key the agent publishes for encrypting administrator passwords (required for docker-compose). |
 | `CLUSTER_AGENT_ENVIRONMENTS` | Environments the agent may change (default `lab,development`). Operations on clusters in other environments are rejected. |
 | `CLUSTER_AGENT_PORT_RANGE` | Host ports for lab endpoints, bound to `127.0.0.1` (default `31000-31999`). |
-| `CLUSTER_AGENT_IMAGES` | Image repositories allowed for lab nodes (default `clickhouse/clickhouse-server`). |
+| `CLUSTER_AGENT_IMAGES` | Image repositories allowed for lab containers (default `clickhouse/clickhouse-server,contentsquareplatform/chproxy`). |
 | `CLUSTER_AGENT_HOST_ALIAS` | Name of the Docker host as seen from the containers, used to reach S3 endpoints published on it (default `host.docker.internal`). |
 | `<REF>_USER`, `<REF>_PASSWORD` | Credentials of a registered deployment whose credential reference is `<REF>`. |
 | `<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY` | Credentials of an S3 backup destination, as for the [backup worker](#backup-worker). |
@@ -514,9 +695,9 @@ The wizard has eight steps:
 
 1. **Purpose and ownership**: name, environment, owner, workload, expected data and growth, concurrency, ingestion, availability goal, and RPO and RTO targets. Sizing from these numbers is an estimate.
 2. **Infrastructure provider**: only implemented providers can be chosen, and only when an agent offers them for the environment.
-3. **Topology**: shards, replicas per shard, Keeper members (1, 3, or 5), and the cluster name. The wizard explains what failures the topology tolerates, separately for replicas and for the Keeper quorum, and that a lab on one host is one failure domain.
+3. **Topology**: shards, replicas per shard, Keeper members (1, 3, or 5), the cluster name, and the [client routing](#cluster-client-routing): none, or chproxy. The wizard explains what failures the topology tolerates, separately for replicas, the Keeper quorum, and the routing, and that a lab on one host is one failure domain.
 4. **Storage and resources**: CPU and memory per node, the image, and the storage model (a local volume per node and per Keeper member).
-5. **Security**: the administrative user. The agent generates its password, the cluster secret, and the interserver credentials on its host; they appear in no plan, URL, log, or console table.
+5. **Security**: the administrator user of the cluster and its password (at least 12 characters, without spaces, quotes, `$`, `#`, or backslashes, typed twice). The browser encrypts the password with the public key that the cluster agent publishes (RSA-OAEP with SHA-256): the plan and the console tables contain only the ciphertext, which only that agent can decrypt. The agent writes the password to the secrets file of the deployment on its host, and the nodes read it from the environment; it appears in no plan, URL, log, or console table. The agent and chproxy use a separate user, `console_service`, with a password the agent generates, as it does the cluster secret and the interserver credentials. The cluster is ready only after the administrator user signs in on every node.
 6. **Operational policies**: backup destination, maintenance window, and an optional notification reference.
 7. **Plan**: the containers, volumes, network, endpoints, configuration, expected disruption, preconditions, readiness checks, and what happens if provisioning fails.
 8. **Readiness**, done by the agent after submission: every node answers and authenticates, Keeper has a leader and a quorum, every node lists the topology, and a test database is written, replicated, read through the cluster, and dropped. The cluster is **ready** only after these checks, not when its containers run.
@@ -562,6 +743,24 @@ For managed clusters, the agent compares the desired values with what the nodes 
 - **Add shard** creates the nodes of a new shard with the schema of shard 1, empty. Existing rows stay where they are; Distributed tables route new rows by their sharding key over all shards from then on, which changes the shard of a key. The dialog requires an acknowledgement of this.
 - **Remove shard** is accepted only for a shard without rows. Moving data between shards (source and target mappings, a sharding expression, backfill and catch-up, duplicate and missing-row checks, cutover) is not automated.
 
+### Client routing with chproxy {#cluster-client-routing}
+
+A cluster can be created with [chproxy](https://github.com/ContentSquare/chproxy), an HTTP proxy for ClickHouse, in front of its nodes. Choose **Client routing: chproxy** on the topology step, with:
+
+- the image (`contentsquareplatform/chproxy:<version>`, already on the Docker host; the agent does not pull images);
+- the proxy user that clients authenticate with, mapped to the administrative user of the nodes;
+- the limits of that user: concurrent queries and the maximum time of a query.
+
+The agent creates a `chproxy` container with an endpoint on `127.0.0.1` and a generated configuration. The configuration takes both passwords from the environment, so the file contains no secret. The password of the proxy user is `CH_PROXY_PASSWORD` in the secrets file of the deployment on the agent host; give it to applications through your secret management. chproxy checks every node every 5 seconds and sends queries only to healthy nodes.
+
+The cluster is ready only after chproxy finds every node healthy, sends queries to them, and refuses a wrong password. The agent keeps chproxy in step with the cluster, reloading its configuration without restarting it:
+
+- it adds new replicas and shards to the routing once they are ready;
+- before stopping a node (decommissioning, restart, resize, upgrade), it takes the node out of the routing, and puts it back when the node has caught up;
+- it removes decommissioned nodes and removed shards.
+
+**Nodes & Topology** shows the endpoint, the proxy user and its limits, and the routed nodes with their health; the cluster is degraded when chproxy does not answer. chproxy routes HTTP only: clients of the native protocol connect to the nodes directly. chproxy itself is one container: when it stops, its clients lose access while direct connections keep working.
+
 ### Keeper {#cluster-keeper}
 
 Keeper is a separate ensemble, created at provisioning with 1, 3, or 5 members. The Keeper view shows each member's role, version, znode count, and latency, and whether a quorum exists. Changing the ClickHouse replicas never resizes Keeper, and membership changes are not implemented. Operations that remove nodes stop when the quorum is uncertain.
@@ -570,7 +769,7 @@ Keeper keeps its log and snapshots in its own volumes. Table backups contain the
 
 ### Maintenance and upgrades {#cluster-upgrades}
 
-**Restart** restarts nodes one at a time. Before each node, the other replicas of its shard must be caught up; after it, the node must answer and catch up. ClickHouse has no drain command: queries running on a stopping node fail and clients reconnect; inserts queued for distribution are sent after the restart.
+**Restart** restarts nodes one at a time. Before each node, the other replicas of its shard must be caught up; after it, the node must answer and catch up. ClickHouse has no drain command. With chproxy, the agent takes the node out of its routing before stopping it and puts it back once the node has caught up, so clients of chproxy are not sent to it; queries already running on the node fail. Without chproxy, clients connected to the node reconnect. Inserts queued for distribution are sent after the restart.
 
 **Upgrade** changes the image of the nodes:
 
@@ -599,14 +798,14 @@ The console never creates a second authoritative deployment on its own: switchin
 
 ### Decommissioning and retirement {#cluster-retirement}
 
-Decommissioning a node: identify its roles; check the remaining replicas and the Keeper quorum; compare row counts when the node answers; check running queries and queued distributed inserts; stop it (the irreversible boundary); remove it from the cluster definition; remove its replica metadata from Keeper with `SYSTEM DROP REPLICA` (justified because the agent stopped and removed the node); check the remaining cluster; remove the container; keep or delete its volume as chosen.
+Decommissioning a node: identify its roles; check the remaining replicas and the Keeper quorum; compare row counts when the node answers; check running queries and queued distributed inserts; take it out of the routing of chproxy, if the cluster has one; stop it (the irreversible boundary); remove it from the cluster definition; remove its replica metadata from Keeper with `SYSTEM DROP REPLICA` (justified because the agent stopped and removed the node); check the remaining cluster; remove the container; keep or delete its volume as chosen.
 
 Retirement is separate from deletion:
 
 1. **Dependency review**: applications and connections, ingestion pipelines, scheduled jobs, users and integrations, dashboards, backup schedules, and other dependencies each need a recorded disposition. Unknown is not accepted.
 2. **Protection**: a verified final backup, or a recorded reason why none is needed (refused when the cluster holds data); the retention deadline of the retained resources; legal or operational holds.
 3. **Execution**: the agent checks the dependencies, that no other operation is in progress, and the protection gate; then stops the containers, records every resource with its disposition and deadline, and sets the mode to Retired.
-4. **Deletion**, a separate operation that needs the capability `destroy`: only the resources selected, only when Docker labels them as the cluster's, and not before their retention deadline. The result lists every resource as retained, stopped, or deleted, with its owner and evidence.
+4. **Deletion**, a separate operation that needs the capability `destroy`: only the resources selected (**Select all** selects every remaining resource), only when Docker labels them as the cluster's, and not before their retention deadline. The result lists every resource as retained, stopped, or deleted, with its owner and evidence.
 
 Backups made through Backup & Restore, the configuration history, the operations, and the audit records remain after retirement and deletion. A registered deployment is only retired from the inventory.
 
@@ -669,6 +868,6 @@ ClickStack is a separate application with its own connection settings, entered i
 - The server does not check `remote_url_allow_hosts` for the endpoint of `BACKUP TO S3`; the console restricts endpoints with `backup_s3_endpoints` (see [Backup destinations](#backup-destinations)).
 - Restore tests run on the server the console is connected to, which shares resources with the production workload.
 - Schedules, retention, and deletions need the [backup worker](#backup-worker). Without it, the page shows that no worker is running, and requested deletions stay `queued`.
-- Cluster Management implements one provider, a Docker Compose lab on one host: its nodes are one failure domain, without TLS, load balancing, storage resizing, or Keeper membership changes (see [Supported capabilities](#cluster-capability-matrix)).
+- Cluster Management implements one provider, a Docker Compose lab on one host: its nodes are one failure domain, without TLS, storage resizing, or Keeper membership changes, and its optional chproxy is a single container (see [Supported capabilities](#cluster-capability-matrix)).
 - Lifecycle operations need the [cluster agent](#cluster-setup). Without it, operations stay queued and observations become stale.
 - Restoring a backup into a replacement cluster, moving data between shards, and switching traffic to a recovery site are not automated.
