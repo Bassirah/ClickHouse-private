@@ -377,9 +377,10 @@ void ClickStackUIRequestHandler::handleRequest(HTTPServerRequest & request, HTTP
 namespace
 {
 
-/// Destinations of the links and integrations in the console. Each one can be overridden in the
-/// `web_console` section of the server configuration, for example to point `documentation_url` to an
-/// internal mirror in a network without Internet access. An empty value marks it as not configured.
+/// Destinations of the links and integrations in the console, and the database of its administration
+/// tables. Each one can be overridden in the `web_console` section of the server configuration, for
+/// example to point `documentation_url` to an internal mirror in a network without Internet access. An
+/// empty destination marks it as not configured. The values are public: the page reads them before login.
 struct ConsoleDestination
 {
     std::string_view config_key;
@@ -393,6 +394,8 @@ constexpr ConsoleDestination console_destinations[] =
     {"website_url", "https://clickhouse.com/"},
     {"cloud_url", "https://clickhouse.cloud/"},
     {"clickstack_url", "/clickstack/"},
+    /// The audit log, the component access policy, and the protected accounts of the console.
+    {"admin_database", "console_admin"},
 };
 
 String getConsoleConfigJSON(const Poco::Util::AbstractConfiguration & config)
