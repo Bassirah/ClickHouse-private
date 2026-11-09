@@ -28,7 +28,8 @@
       "Bash(nm:*)",
       "Bash(pwd)",
       "WebFetch(domain:github.com)",
-      "WebSearch(*)"
+      "WebSearch(*)",
+      "Github-access"
     ]
   }
 }
