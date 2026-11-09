@@ -396,8 +396,8 @@ constexpr ConsoleDestination console_destinations[] =
     {"clickstack_url", "/clickstack/"},
     /// The audit log, the component access policy, and the protected accounts of the console.
     {"admin_database", "console_admin"},
-    /// S3-compatible endpoints allowed as backup destinations in the console, comma-separated origins.
-    /// Empty: none. The server does not check the endpoint of `BACKUP ... TO S3` against
+    /// S3-compatible endpoints allowed as backup destinations in the console, comma-separated: origins, or patterns
+    /// (`https://*.example.com`, `https://*`, `*`) that the console never matches against internal addresses. Empty: none. The server does not check the endpoint of `BACKUP ... TO S3` against
     /// `remote_url_allow_hosts`, so this list is what keeps the console from pointing backups elsewhere.
     {"backup_s3_endpoints", ""},
 };
