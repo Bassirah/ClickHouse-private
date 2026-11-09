@@ -633,7 +633,7 @@ ClickHouse has no SQL statement that creates servers, provisions infrastructure,
 
 ### Supported capabilities {#cluster-capability-matrix}
 
-One provider is implemented: **docker-compose**, a local lab. All its containers run on one Docker host, so they are not independent failure domains: the lab is for development and tests, not for high availability. Kubernetes and Linux-server providers are listed in the wizard as not available.
+Two providers are implemented. **docker-compose** is a local lab: all its containers run on one Docker host, so they are not independent failure domains; it is for development and tests, not for high availability. **kubernetes** deploys with the ClickHouse operator (see [Kubernetes provider](#cluster-kubernetes)). The Linux-server provider is listed in the wizard as not available. The table describes the docker-compose provider.
 
 | Capability | Native ClickHouse support | Infrastructure dependency | Implementation | Verified limitations |
 |---|---|---|---|---|
@@ -653,6 +653,75 @@ One provider is implemented: **docker-compose**, a local lab. All its containers
 | Decommission a node | `SYSTEM DROP REPLICA` | Provider | Ten-step workflow with checks | No load balancer: clients of the node are not moved |
 | Retire and delete | None | Provider | Dependency review, protection gate, scoped deletion | Backups are deleted in Backup & Restore only |
 
+### Kubernetes provider {#cluster-kubernetes}
+
+The **kubernetes** provider deploys clusters with the [ClickHouse operator](https://github.com/ClickHouse/clickhouse-operator) of ClickHouse Inc. A cluster of the console is one `KeeperCluster` and one `ClickHouseCluster` (`clickhouse.com/v1alpha1`) named `chc-<id>`, in a namespace of the agent's Kubernetes cluster, with a Secret `chc-<id>-console` and, when chosen, a client Service `chc-<id>-client`. The operator creates the StatefulSets, pods, Services, ConfigMaps, and a volume claim per pod. The agent uses `kubectl` with fixed argument lists, and reaches the pods with `kubectl port-forward`: nothing is exposed for it outside the cluster.
+
+It was verified with operator v0.0.8 (2026-09-25), cert-manager v1.16.2, and k3s v1.31.5 in k3d. The agent refuses an operator version it was not verified with (`CLUSTER_AGENT_OPERATOR_VERSIONS`). Behavior of that operator that the provider relies on:
+
+- `replicas` is the number of replicas of every shard: all shards have the same size, and the operator adds or removes the replica or the shard with the highest index. The console therefore adds or removes one replica in every shard, and removes only the last shard.
+- The cluster in `remote_servers` is named `default`, with an interserver secret; the macros `shard` and `replica` are indexes from 0; the `default` database is `Replicated`.
+- Deleting the resources deletes the pods and Services, but not the volume claims: the StatefulSets retain them when deleted or scaled down.
+- A larger data volume in the resource is applied by the operator to every claim; it fails on a storage class that does not allow expansion.
+- Settings, resources, and the image are rolled out one replica at a time; the operator reports the result with conditions (`Ready`, `Healthy`, `ConfigurationInSync`, `ClusterSizeAligned`, `VersionInSync`), which the agent waits for before its own checks in ClickHouse.
+
+#### Choices in the wizard {#cluster-kubernetes-choices}
+
+The agent publishes what it finds in its Kubernetes cluster (version, operator, storage classes with their provisioner, reclaim policy, expansion, and binding mode, and the namespaces it may use), and the wizard offers these as choices:
+
+| Choice | Options | Effect |
+|---|---|---|
+| Namespace | A new namespace (default `chc-<name>`), or an existing one | Only namespaces matching `CLUSTER_AGENT_K8S_NAMESPACES`. A new namespace is labeled as the cluster's and can be deleted with it; an existing one is never deleted. |
+| Storage class | The classes of the cluster | The volumes of the nodes and of the Keeper members. The wizard shows whether the class allows expansion. |
+| Volume reclaim policy | Retain (default), Delete | Set by the agent on every volume of the cluster, whatever the class says. With Retain, a volume and its data stay when its claim is deleted, until the volume is deleted too. With Delete, the provisioner deletes the volume with its claim. |
+| Volume sizes | Data volume per node, Keeper volume per member, in GiB | The claims of the operator. |
+| Client Service | None, ClusterIP, NodePort, LoadBalancer | A Service in front of all ClickHouse pods, ports 8123 and 9000. |
+| Images | ClickHouse server, ClickHouse Keeper | Pinned versions from the allowed repositories; the nodes pull them. |
+| CPU and memory | Per node | Requests and limits of the ClickHouse containers. |
+
+chproxy is not offered on Kubernetes: use the client Service.
+
+#### Operations {#cluster-kubernetes-operations}
+
+| Operation | Implementation | Verified in the lab |
+|---|---|---|
+| Provision | Preflight (Kubernetes, operator and its version, storage class, namespace, images), the Secret, the two resources, readiness reported by the operator, the reclaim policy of the volumes, the Keeper quorum, topology and administrator sign-in on every node, and a write, replicate, and read test | Yes |
+| Configuration | Settings in `extraConfig` and the default profile; rollout reported by the operator; values checked on every node; drift between the applied resources and the cluster, and between the settings and the nodes | Yes |
+| Expand storage | A larger data volume, refused on a class without expansion and for a smaller size; capacity checked on every claim | Yes (lab driver: the size is recorded but not enforced) |
+| Add replicas | One replica in every shard; schema of a peer, catch-up, and row counts | Yes |
+| Remove replicas | The last replica of every shard, after the remaining replicas are caught up and the Keeper quorum is healthy; replica metadata dropped from Keeper; claims kept | Yes |
+| Add or remove a shard | A shard with the schema of shard 1; only the last shard, only when empty | Yes |
+| Restart a node | The pod is deleted and recreated by its StatefulSet, one at a time, after peer checks | Yes |
+| Resize CPU and memory | Requests and limits; rollout reported by the operator | Implemented; not run in the lab suite |
+| Upgrade | The image of the resource; the operator replaces the pods one replica at a time; version and errors checked on every node | Implemented; not run in the lab suite (it needs another image version on the nodes) |
+| Backup | As for Docker; the pods reach an S3 endpoint on the agent host through `CLUSTER_AGENT_K8S_HOST_ALIAS` | Yes, to MinIO through `host.k3d.internal` |
+| Retire | The two resources and the client Service are deleted; the claims, volumes, Secret, and namespace are kept and recorded | Yes |
+| Delete resources | Only the approved resources of the cluster: resources, Secret, Service, claims, volumes, and the namespace when it was created for the cluster and is empty | Yes |
+| Keeper membership | Not implemented | |
+
+Deleting the volume object of a Retain volume does not delete the storage behind it: Kubernetes leaves it to the storage system. Check it there before reusing the space.
+
+#### Agent setup for Kubernetes {#cluster-kubernetes-setup}
+
+The provider is enabled when the agent has a kubeconfig:
+
+```bash
+CLUSTER_AGENT_KUBECONFIG=/etc/clickhouse-console/kubeconfig CLUSTER_AGENT_K8S_NAMESPACES='chc-*' \
+CLICKHOUSE_URL=... CLICKHOUSE_USER=cluster_agent CLICKHOUSE_PASSWORD=... CLUSTER_AGENT_STATE_DIR=... \
+node utils/web-console/cluster_agent.mjs
+```
+
+| Variable | Meaning |
+|---|---|
+| `CLUSTER_AGENT_KUBECONFIG` | The kubeconfig of the agent; enables the provider. |
+| `CLUSTER_AGENT_KUBE_CONTEXT` | A context of the kubeconfig (default: its current context). |
+| `CLUSTER_AGENT_K8S_NAMESPACES` | Namespaces the agent may use: names, or prefixes followed by `*` (default `chc-*`). |
+| `CLUSTER_AGENT_OPERATOR_NAMESPACE` | Namespace of the operator (default `clickhouse-operator-system`). |
+| `CLUSTER_AGENT_OPERATOR_VERSIONS` | Operator versions the agent accepts (default `v0.0.8`). |
+| `CLUSTER_AGENT_K8S_HOST_ALIAS` | Name of the agent host as seen from the pods, for S3 endpoints published on it (default `host.k3d.internal`). |
+
+The account of the kubeconfig needs, in the namespaces it may use: `get`, `list`, `create`, `patch`, and `delete` on `clickhouseclusters` and `keeperclusters` (`clickhouse.com`), Secrets, and Services; `get`, `list`, and `delete` on pods and persistent volume claims; `create` on `pods/portforward`. Cluster-wide: `get` and `list` on namespaces, storage classes, and persistent volumes; `patch` and `delete` on persistent volumes (reclaim policy and deletion); `create` and `delete` on namespaces when it creates them; `get` on the operator's Deployments. It needs no right on other namespaces, and never cluster-admin. Anyone who can read Secrets in a cluster's namespace can read its passwords.
+
 ### Setting up {#cluster-setup}
 
 1. On the **Clusters** page, select **Set up**. This creates the [cluster tables](#cluster-tables) in the `admin_database`. It creates or changes no deployment.
@@ -670,12 +739,12 @@ node utils/web-console/cluster_agent.mjs
 | `CLUSTER_AGENT_STATE_DIR` | Directory of the generated deployments and their secrets, and of the agent's key pair `agent-key.pem` (readable by its owner), whose public key the agent publishes for encrypting administrator passwords (required for docker-compose). |
 | `CLUSTER_AGENT_ENVIRONMENTS` | Environments the agent may change (default `lab,development`). Operations on clusters in other environments are rejected. |
 | `CLUSTER_AGENT_PORT_RANGE` | Host ports for lab endpoints, bound to `127.0.0.1` (default `31000-31999`). |
-| `CLUSTER_AGENT_IMAGES` | Image repositories allowed for lab containers (default `clickhouse/clickhouse-server,contentsquareplatform/chproxy`). |
+| `CLUSTER_AGENT_IMAGES` | Image repositories allowed for nodes (default `clickhouse/clickhouse-server,clickhouse/clickhouse-keeper,contentsquareplatform/chproxy`). |
 | `CLUSTER_AGENT_HOST_ALIAS` | Name of the Docker host as seen from the containers, used to reach S3 endpoints published on it (default `host.docker.internal`). |
 | `<REF>_USER`, `<REF>_PASSWORD` | Credentials of a registered deployment whose credential reference is `<REF>`. |
 | `<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY` | Credentials of an S3 backup destination, as for the [backup worker](#backup-worker). |
 
-The agent runs only `docker` with fixed argument lists, never a shell, and never text from the browser as a command. Docker objects carry the labels `io.clickhouse.console.cluster` and `io.clickhouse.console.managed-by`; the agent stops or deletes only objects with the labels of the cluster it works on.
+The agent runs only `docker` and `kubectl` with fixed argument lists, never a shell, and never text from the browser as a command; Secrets reach `kubectl` on its standard input, never in its arguments. For the Kubernetes provider, see [Agent setup for Kubernetes](#cluster-kubernetes-setup). Docker objects carry the labels `io.clickhouse.console.cluster` and `io.clickhouse.console.managed-by`; the agent stops or deletes only objects with the labels of the cluster it works on.
 
 ### Modes and states {#cluster-modes}
 
@@ -694,7 +763,7 @@ The lifecycle state (`planned`, `provisioning`, `validating`, `ready`, `degraded
 The wizard has eight steps:
 
 1. **Purpose and ownership**: name, environment, owner, workload, expected data and growth, concurrency, ingestion, availability goal, and RPO and RTO targets. Sizing from these numbers is an estimate.
-2. **Infrastructure provider**: only implemented providers can be chosen, and only when an agent offers them for the environment.
+2. **Infrastructure provider**: only implemented providers can be chosen, and only when an agent offers them for the environment. With **kubernetes**, the step offers the namespace, storage class, volume reclaim policy, and client Service (see [Choices in the wizard](#cluster-kubernetes-choices)), and the later steps the volume sizes and the Keeper image; the cluster name is `default`, and chproxy is not offered.
 3. **Topology**: shards, replicas per shard, Keeper members (1, 3, or 5), the cluster name, and the [client routing](#cluster-client-routing): none, or chproxy. The wizard explains what failures the topology tolerates, separately for replicas, the Keeper quorum, and the routing, and that a lab on one host is one failure domain.
 4. **Storage and resources**: CPU and memory per node, the image, and the storage model (a local volume per node and per Keeper member).
 5. **Security**: the administrator user of the cluster and its password (at least 12 characters, without spaces, quotes, `$`, `#`, or backslashes, typed twice). The browser encrypts the password with the public key that the cluster agent publishes (RSA-OAEP with SHA-256): the plan and the console tables contain only the ciphertext, which only that agent can decrypt. The agent writes the password to the secrets file of the deployment on its host, and the nodes read it from the environment; it appears in no plan, URL, log, or console table. The agent and chproxy use a separate user, `console_service`, with a password the agent generates, as it does the cluster secret and the interserver credentials. The cluster is ready only after the administrator user signs in on every node.
