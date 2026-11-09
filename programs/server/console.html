@@ -9414,7 +9414,8 @@ const CLUSTER_CAPABILITIES = [
 const CLUSTER_PROVIDERS = [
     {id: 'docker-compose', title: 'Docker Compose (local lab)', implemented: true,
      note: 'Containers on the agent\'s Docker host, bound to 127.0.0.1. All nodes share one host: they are not independent failure domains. For development and tests.'},
-    {id: 'kubernetes', title: 'Kubernetes (operator)', implemented: false, note: 'Not implemented: no verified operator integration.'},
+    {id: 'kubernetes', title: 'Kubernetes (ClickHouse operator)', implemented: true,
+     note: 'A KeeperCluster and a ClickHouseCluster of the ClickHouse Inc. operator, in a namespace of the agent\'s Kubernetes cluster, with volumes of the storage class you choose. Verified with operator v0.0.8.'},
     {id: 'linux', title: 'Linux servers (agent)', implemented: false, note: 'Not implemented: no verified host automation integration.'},
 ];
 
@@ -9448,7 +9449,7 @@ const NODE_BADGES = {ok: ['Answers', 'ok'], unreachable: ['Unreachable', 'warn']
 
 const OP_TITLES = {register: 'Register and discover', provision: 'Provision', adopt: 'Adopt management', release: 'Release management', configure: 'Change configuration',
     reconcile: 'Reconcile drift', resize: 'Resize', add_replica: 'Add replica', add_shard: 'Add shard', remove_shard: 'Remove shard', remove_replica: 'Decommission node',
-    restart_node: 'Restart nodes', backup: 'Back up', upgrade: 'Upgrade', keeper_change: 'Change Keeper membership', retire: 'Retire', destroy: 'Delete resources'};
+    restart_node: 'Restart nodes', backup: 'Back up', upgrade: 'Upgrade', resize_storage: 'Expand storage', keeper_change: 'Change Keeper membership', retire: 'Retire', destroy: 'Delete resources'};
 
 const OBSERVATION_STALE_SECONDS = 120;
 
@@ -9724,7 +9725,15 @@ async function createClusterWizard(state) {
         availability: 'lab', rpo_hours: 24, rto_hours: 4, provider: 'docker-compose', shards: 1, replicas: 2, keepers: 3, cluster_name: 'main',
         image: 'clickhouse/clickhouse-server:26.9.8.3', cpus: 2, memory_mb: 2048, admin_user: 'cluster_admin', admin_password: '', admin_password_confirm: '', backup_destination_id: '',
         routing: 'none', proxy_image: 'contentsquareplatform/chproxy:v1.30.0', proxy_user: 'app', proxy_max_concurrent: 20, proxy_max_execution: 300,
-        maintenance_window: 'Sunday 02:00-04:00 UTC', notify_ref: ''};
+        maintenance_window: 'Sunday 02:00-04:00 UTC', notify_ref: '',
+        keeper_image: 'clickhouse/clickhouse-keeper:26.9.8.3', k8s_namespace_mode: 'create', k8s_namespace: '', k8s_storage_class: '', k8s_reclaim_policy: 'Retain',
+        k8s_data_gi: 10, k8s_keeper_gi: 1, k8s_service_type: 'none'};
+    const inventory = (state.agents[0] && state.agents[0].data.kubernetes) || null;
+    const k8s = () => w.provider === 'kubernetes';
+    if (inventory && inventory.storage_classes) {
+        const preferred = inventory.storage_classes.find(c => c.default) || inventory.storage_classes[0];
+        w.k8s_storage_class = preferred ? preferred.name : '';
+    }
     const field = (label, key, attrs = {}, hint) => {
         const input = h('input', {type: attrs.type || 'text', value: w[key], autocomplete: 'off', spellcheck: false, ...attrs,
             oninput: e => { w[key] = attrs.type === 'number' ? Number(e.target.value) : e.target.value; }});
@@ -9732,6 +9741,40 @@ async function createClusterWizard(state) {
     };
     /// Option values are strings: compare as strings, so that a numeric value such as 3 Keeper members is shown selected.
     const choice = (label, key, options, hint) => adminField(label, select(options, String(w[key]), {onchange: e => { w[key] = /^\d+$/.test(e.target.value) ? Number(e.target.value) : e.target.value; }}), hint);
+    const storageClass = () => (inventory && inventory.storage_classes || []).find(c => c.name === w.k8s_storage_class) || null;
+    const namespaceOf = () => w.k8s_namespace || `chc-${w.name}`;
+    /// The choices of the Kubernetes provider: from what the agent reports about its Kubernetes cluster.
+    const kubernetesChoices = () => {
+        if (!inventory) return h('div', {className: 'message warning'}, 'The cluster agent reports no Kubernetes cluster: start it with CLUSTER_AGENT_KUBECONFIG.');
+        if (!inventory.available) return h('div', {className: 'message error'}, `The agent cannot reach its Kubernetes cluster: ${inventory.error}`);
+        const details = h('div', {className: 'note'});
+        const describe = () => {
+            const c = storageClass();
+            details.textContent = c ? `Provisioner ${c.provisioner}; reclaim policy ${c.reclaim_policy}; volume expansion ${c.expansion ? 'allowed' : 'not allowed: storage cannot be resized later'}; `
+                + `binding ${c.binding}.${c.binding === 'Immediate' ? ' Volumes are created before pods are scheduled: with node-local storage, pods follow their volumes to one node.' : ''}` : '';
+        };
+        const classes = select(inventory.storage_classes.map(c => [c.name, `${c.name}${c.default ? ' (default)' : ''}${c.expansion ? ', expandable' : ''}`]), w.k8s_storage_class,
+            {onchange: e => { w.k8s_storage_class = e.target.value; describe(); }});
+        describe();
+        const name_field = field('Namespace', 'k8s_namespace', {placeholder: `chc-${w.name}`}, `A new namespace for this cluster. Allowed by the agent: ${inventory.namespace_patterns.join(', ')}.`);
+        const existing = adminField('Namespace', select([['', 'Choose a namespace'], ...inventory.namespaces.map(n => [n, n])], w.k8s_namespace,
+            {onchange: e => { w.k8s_namespace = e.target.value; }}), 'An existing namespace the agent may use. Other objects in it are left alone.');
+        const sync = () => { name_field.hidden = w.k8s_namespace_mode !== 'create'; existing.hidden = w.k8s_namespace_mode !== 'existing'; };
+        const mode = adminField('Namespace', select([['create', 'Create a namespace for this cluster'], ['existing', 'Use an existing namespace']], w.k8s_namespace_mode,
+            {onchange: e => { w.k8s_namespace_mode = e.target.value; w.k8s_namespace = ''; sync(); }}));
+        sync();
+        return h('div', {},
+            kvList([['Kubernetes', inventory.server_version || 'unknown'],
+                ['Operator', inventory.operator.version ? [`${inventory.operator.image} `, inventory.operator.verified ? badge('Verified', 'ok') : badge('Not verified', 'bad'),
+                    inventory.operator.ready ? '' : [' ', badge('Not running', 'bad')]] : badge('Not installed', 'bad')]]),
+            h('div', {className: 'form-grid'}, mode, name_field, existing,
+                h('div', {}, adminField('Storage class', classes, 'Volumes of the nodes and the Keeper members are claims of this class.'), details),
+                choice('Volume reclaim policy', 'k8s_reclaim_policy', [['Retain', 'Retain: keep the volume and its data when its claim is deleted'], ['Delete', 'Delete: the provisioner deletes the volume with its claim']],
+                    'The agent sets it on every volume of the cluster, whatever the class says. Retain is recommended: deleting data then takes a separate, explicit deletion of the volume.'),
+                choice('Client Service', 'k8s_service_type', [['none', 'None: the operator\'s internal Services only'], ['ClusterIP', 'ClusterIP: inside the Kubernetes cluster'],
+                    ['NodePort', 'NodePort: on every Kubernetes node'], ['LoadBalancer', 'LoadBalancer: through the cluster\'s load balancer']],
+                    'A Service in front of all ClickHouse pods, for clients. The agent itself connects through kubectl port-forward.')));
+    };
     const plan = () => {
         const project = 'chc-<cluster id>';
         const nodes = [];
@@ -9754,15 +9797,30 @@ async function createClusterWizard(state) {
             if (!w.owner.trim()) return 'Enter an owner.';
             return null;
         }},
-        {title: 'Infrastructure provider', render: () => h('div', {},
+        {title: 'Infrastructure provider', render: () => {
+            const k8s_box = h('div', {className: 'box', hidden: !k8s()}, h('h3', {}, 'Kubernetes'), kubernetesChoices());
+            return h('div', {},
             dataTable([{title: 'Provider', render: p => h('label', {className: 'check'}, h('input', {type: 'radio', name: 'cluster-provider', value: p.id, checked: w.provider === p.id,
-                disabled: !p.implemented, onchange: () => { w.provider = p.id; }}), h('span', {}, p.title))},
+                disabled: !p.implemented, onchange: () => { w.provider = p.id; k8s_box.hidden = !k8s(); }}), h('span', {}, p.title))},
             {title: 'Status', render: p => (p.implemented ? badge('Implemented', 'ok') : badge('Not available'))}, {title: 'Notes', render: p => p.note}], CLUSTER_PROVIDERS, null, 'Providers'),
-            h('p', {className: 'note'}, `The cluster agent validates provider access, the image, free ports, and the host's resources before it creates anything. `
-                + `Agent: ${state.agents[0] ? `${state.agents[0].op_id.replace(/^agent:/, '')}, last seen ${formatSeconds(state.agents[0].age)} ago, environments ${(state.agents[0].data.environments || []).join(', ')}` : 'none has reported'}.`)),
+            k8s_box,
+            h('p', {className: 'note'}, `The cluster agent checks the provider before it creates anything: for Docker, the image, free ports, and the host's resources; for Kubernetes, the operator, the storage class, and the namespace. `
+                + `Agent: ${state.agents[0] ? `${state.agents[0].op_id.replace(/^agent:/, '')}, last seen ${formatSeconds(state.agents[0].age)} ago, environments ${(state.agents[0].data.environments || []).join(', ')}` : 'none has reported'}.`));
+        },
         validate: () => {
             if (!state.agents[0] || !(state.agents[0].data.providers || []).includes(w.provider)) return 'No running cluster agent offers this provider.';
             if (!(state.agents[0].data.environments || []).includes(w.environment)) return `The agent does not change the environment ${w.environment}. Choose an environment it serves, or configure the agent.`;
+            if (k8s()) {
+                if (!inventory || !inventory.available) return 'The agent cannot reach its Kubernetes cluster.';
+                if (!inventory.operator.ready) return 'The ClickHouse operator is not running in the Kubernetes cluster.';
+                if (!inventory.operator.verified) return `The operator ${inventory.operator.version} is not a version the agent was verified with.`;
+                const namespace = namespaceOf();
+                if (!/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(namespace)) return 'A namespace has 1 to 63 lowercase letters, digits, and dashes, and starts and ends with a letter or digit.';
+                if (!inventory.namespace_patterns.some(p => (p.endsWith('*') ? namespace.startsWith(p.slice(0, -1)) : namespace === p))) return `The agent may not use the namespace ${namespace} (${inventory.namespace_patterns.join(', ')}).`;
+                if (w.k8s_namespace_mode === 'create' && inventory.namespaces.includes(namespace)) return `The namespace ${namespace} exists: choose it as an existing namespace, or another name.`;
+                if (w.k8s_namespace_mode === 'existing' && !w.k8s_namespace) return 'Choose the namespace.';
+                if (!storageClass()) return 'Choose a storage class.';
+            }
             return null;
         }},
         {title: 'Topology', render: () => {
@@ -9775,8 +9833,12 @@ async function createClusterWizard(state) {
                 field('Proxy user', 'proxy_user', {}, 'The user clients authenticate with at chproxy; its password is generated on the agent host.'),
                 field('Concurrent queries per proxy user', 'proxy_max_concurrent', {type: 'number', min: 1, max: 10000}),
                 field('Maximum query time (seconds)', 'proxy_max_execution', {type: 'number', min: 1, max: 86400}));
+            if (k8s()) {
+                w.routing = 'none';
+                w.cluster_name = 'default';
+            }
             const routing_select = select([['none', 'None: clients connect to the nodes'], ['chproxy', 'chproxy: a proxy that balances queries across healthy nodes']], w.routing,
-                {onchange: e => { w.routing = e.target.value; proxy_fields.hidden = w.routing !== 'chproxy'; draw(); }});
+                {onchange: e => { w.routing = e.target.value; proxy_fields.hidden = w.routing !== 'chproxy'; draw(); }, disabled: k8s()});
             proxy_fields.hidden = w.routing !== 'chproxy';
             const routing_box = h('div', {}, adminField('Client routing', routing_select,
                 'chproxy (ContentSquare) receives HTTP queries, authenticates its users, applies their limits, and forwards each query to a node its heartbeat finds healthy. '
@@ -9785,8 +9847,11 @@ async function createClusterWizard(state) {
                 h('div', {className: 'form-grid'},
                     redraw(field('Shards', 'shards', {type: 'number', min: 1, max: 4})), redraw(field('Replicas per shard', 'replicas', {type: 'number', min: 1, max: 3})),
                     redraw(choice('Keeper members', 'keepers', [['1', '1 (no fault tolerance)'], ['3', '3 (survives 1)'], ['5', '5 (survives 2)']])),
-                    field('Cluster name in remote_servers', 'cluster_name', {}, 'Used by ON CLUSTER and the cluster() function.')),
+                    k8s() ? adminField('Cluster name in remote_servers', h('input', {type: 'text', value: 'default', disabled: true}), 'The operator names the cluster default.')
+                        : field('Cluster name in remote_servers', 'cluster_name', {}, 'Used by ON CLUSTER and the cluster() function.')),
                 h('p', {className: 'note'}, 'ClickHouse replica count and Keeper quorum are separate: Keeper is a distinct ensemble, and changing the replicas does not resize it.'),
+                k8s() ? h('p', {className: 'note'}, 'The operator keeps the same number of replicas in every shard, and adds or removes the replica or shard with the highest index. '
+                    + 'Client routing through chproxy is not available on Kubernetes: use the client Service.') : null,
                 routing_box,
                 h('h3', {}, 'What this topology tolerates'), tolerance);
             draw();
@@ -9803,16 +9868,31 @@ async function createClusterWizard(state) {
             }
             return null;
         }},
-        {title: 'Storage and resources', render: () => h('div', {},
+        {title: 'Storage and resources', render: () => (k8s() ? h('div', {},
+            h('div', {className: 'form-grid'}, field('CPUs per node', 'cpus', {type: 'number', min: 0.5, step: 0.5}), field('Memory per node (MiB)', 'memory_mb', {type: 'number', min: 512}),
+                field('Image', 'image', {}, 'An image of an allowed repository; the Kubernetes nodes pull it.'),
+                field('Keeper image', 'keeper_image', {}, 'clickhouse/clickhouse-keeper:<version>; pinned, never latest.'),
+                field('Data volume per node (GiB)', 'k8s_data_gi', {type: 'number', min: 1}), field('Keeper volume per member (GiB)', 'k8s_keeper_gi', {type: 'number', min: 1})),
+            kvList([['Resources', 'Requests and limits of each ClickHouse container: the scheduler reserves them, and the container cannot use more.'],
+                ['Data storage', `A claim of ${w.k8s_data_gi} GiB per node from the storage class ${w.k8s_storage_class}, reclaim policy ${w.k8s_reclaim_policy}. `
+                    + (storageClass() && storageClass().expansion ? 'The class allows expansion: Scaling can enlarge the volumes later; they are never reduced.' : 'The class does not allow expansion: plan the size now.')],
+                ['Keeper storage', `A claim of ${w.k8s_keeper_gi} GiB per member for its log and snapshots.`],
+                ['Object storage', 'Not configured by this provider.'],
+                ['Backups', 'Through Backup & Restore destinations (next steps), not the volumes.']]))
+            : h('div', {},
             h('div', {className: 'form-grid'}, field('CPUs per node', 'cpus', {type: 'number', min: 0.5, step: 0.5}), field('Memory per node (MiB)', 'memory_mb', {type: 'number', min: 512}),
                 field('Image', 'image', {}, 'An image of an allowed repository that is already on the Docker host (the agent does not pull images).')),
             kvList([['Data storage', 'A local Docker volume per node (persistent; not shrinkable; size limited by the host disk).'],
                 ['Keeper storage', 'A local Docker volume per member for its log and snapshots.'],
                 ['Object storage', 'Not configured by this provider. Object storage does not make an OSS deployment stateless: metadata and coordination remain on the nodes and in Keeper.'],
-                ['Backups', 'Through Backup & Restore destinations (next steps), not the node volumes.']])),
+                ['Backups', 'Through Backup & Restore destinations (next steps), not the node volumes.']]))),
         validate: () => {
             if (!(w.cpus >= 0.5) || !(w.memory_mb >= 512)) return 'Give each node at least 0.5 CPU and 512 MiB.';
             if (!/^[a-z0-9./_-]+:[A-Za-z0-9._-]+$/.test(w.image)) return 'Enter an image as repository:tag.';
+            if (k8s()) {
+                if (!/^clickhouse\/clickhouse-keeper:[0-9][A-Za-z0-9._-]*$/.test(w.keeper_image)) return 'Enter the Keeper image as clickhouse/clickhouse-keeper:<version>.';
+                if (!(Number.isInteger(w.k8s_data_gi) && w.k8s_data_gi >= 1) || !(Number.isInteger(w.k8s_keeper_gi) && w.k8s_keeper_gi >= 1)) return 'Enter the volume sizes in whole GiB, at least 1.';
+            }
             return null;
         }},
         {title: 'Security', render: () => h('div', {},
@@ -9820,7 +9900,13 @@ async function createClusterWizard(state) {
             field('Administrator password', 'admin_password', {type: 'password', autocomplete: 'new-password'},
                 'At least 12 characters, without spaces, quotes, $, #, or backslashes. Encrypted in this browser for the cluster agent, and stored only on the agent host.'),
             field('Confirm the password', 'admin_password_confirm', {type: 'password', autocomplete: 'new-password'}),
-            kvList([['Administrator password', 'Encrypted in the browser with the public key of the cluster agent (RSA-OAEP); the console tables and the plan hold only the ciphertext. '
+            kvList(k8s() ? [['Administrator password', 'Encrypted in the browser with the public key of the cluster agent (RSA-OAEP); the console tables and the plan hold only the ciphertext. '
+                + `The agent writes it to a Kubernetes Secret in ${namespaceOf()}, and the pods read it from their environment: it is never in the operator's resources. It is not shown again.`],
+                ['Service user', 'console_service, with a password the agent generates into the same Secret: the agent uses it. It never reaches the browser.'],
+                ['Inter-node authentication', 'The operator generates the cluster secret and the interserver credentials.'],
+                ['Network', 'The cluster network of Kubernetes. The agent reaches the pods with kubectl port-forward; clients through the client Service, if chosen.'],
+                ['TLS', 'Not configured by the console: the operator supports it with cert-manager certificates, which are not set up here.'],
+                ['Access to the Secret', `Anyone who can read Secrets in ${namespaceOf()} can read the passwords: restrict it with Kubernetes RBAC.`]] : [['Administrator password', 'Encrypted in the browser with the public key of the cluster agent (RSA-OAEP); the console tables and the plan hold only the ciphertext. '
                 + 'The agent writes it to the secrets file of the deployment (readable by its owner), and the nodes read it from the environment. It is not shown again.'],
                 ['Service user', 'console_service, with a password the agent generates on its host: the agent and chproxy use it. It never reaches the browser.'],
                 ['Inter-node authentication', 'A generated cluster secret for distributed queries, and interserver credentials for replication.'],
@@ -9847,6 +9933,26 @@ async function createClusterWizard(state) {
         validate: () => (w.notify_ref && !/^[A-Z][A-Z0-9_]{0,63}$/.test(w.notify_ref) ? 'The notification reference is an environment variable name.' : null)},
         {title: 'Plan', render: () => {
             const p = plan();
+            if (k8s()) {
+                const ns = namespaceOf();
+                const pods = [];
+                for (let s = 0; s < w.shards; s++) for (let r = 0; r < w.replicas; r++) pods.push(`chc-<id>-clickhouse-${s}-${r}-0`);
+                return h('div', {},
+                    kvList([['Cluster', `${w.name} (${w.environment}, owner ${w.owner})`], ['Provider', `Kubernetes ${inventory.server_version}, operator ${inventory.operator.version}`],
+                        ['Namespace', `${ns} (${w.k8s_namespace_mode === 'create' ? 'created for this cluster' : 'existing'})`],
+                        ['Resources to create', `Secret chc-<id>-console; KeeperCluster chc-<id> (${w.keepers} members); ClickHouseCluster chc-<id> (${w.shards} shards × ${w.replicas} replicas)`
+                            + `${w.k8s_service_type !== 'none' ? `; Service chc-<id>-client (${w.k8s_service_type})` : ''}${w.k8s_namespace_mode === 'create' ? `; Namespace ${ns}` : ''}`],
+                        ['Created by the operator', `StatefulSets, pods (${pods.join(', ')}; Keeper chc-<id>-keeper-<n>-0), Services, ConfigMaps, and a claim per pod`],
+                        ['Topology', `${w.shards} shards × ${w.replicas} replicas, cluster default; Keeper: ${w.keepers} members`],
+                        ['Storage', `${w.k8s_data_gi} GiB per node and ${w.k8s_keeper_gi} GiB per Keeper member, class ${w.k8s_storage_class}; reclaim policy ${w.k8s_reclaim_policy} set on every volume`],
+                        ['Resources per node', `${w.cpus} CPU, ${w.memory_mb} MiB (requests and limits)`], ['Images', `${w.image}; Keeper ${w.keeper_image}`],
+                        ['Users', `${w.admin_user} (administrator, with the password you set), console_service (for the agent, generated), and the operator's default and operator users`],
+                        ['Expected disruption', 'None: a new deployment.'],
+                        ['Preconditions checked by the agent', 'Kubernetes answers; the operator runs and is a verified version; the storage class exists; the namespace is allowed and free; the images are allowed; your capability create_cluster.'],
+                        ['Readiness', `The operator reports every replica and Keeper member ready and the configuration in sync; the Keeper quorum; every node answers and authenticates, also as ${w.admin_user}; every node lists the topology; a test database is written, replicated, read, and dropped.`],
+                        ['If provisioning fails', 'The resources created so far are recorded and listed under Retirement. Delete resources removes them; volumes with reclaim policy Retain are kept until deleted separately.']]),
+                    h('p', {className: 'note'}, 'Submitting records the cluster and its desired configuration (revision 1) and queues the operation. The plan contains no credentials.'));
+            }
             return h('div', {},
                 kvList([['Cluster', `${w.name} (${w.environment}, owner ${w.owner})`], ['Provider', w.provider],
                     ['Topology', `${w.shards} shards × ${w.replicas} replicas: ${p.nodes.join(', ')}; Keeper: ${p.keepers.join(', ')}`],
@@ -9886,11 +9992,13 @@ async function submitClusterCreation(state, w) {
     {
         const cluster_id = crypto.randomUUID();
         const op_id = crypto.randomUUID();
-        const spec = {schema: 1, cluster_name: w.cluster_name, image: w.image,
-            keeper: {image: w.image, members: Array.from({length: w.keepers}, (_, i) => ({node_id: crypto.randomUUID(), name: `keeper${i + 1}`, server_id: i + 1}))},
+        const spec = {schema: 1, cluster_name: w.provider === 'kubernetes' ? 'default' : w.cluster_name, image: w.image,
+            keeper: {image: w.provider === 'kubernetes' ? w.keeper_image : w.image, members: Array.from({length: w.keepers}, (_, i) => ({node_id: crypto.randomUUID(), name: `keeper${i + 1}`, server_id: i + 1}))},
             shards: Array.from({length: w.shards}, (_, i) => ({index: i + 1, replicas: Array.from({length: w.replicas}, (_, r) => ({node_id: crypto.randomUUID(), name: `s${i + 1}r${r + 1}`, state: 'active'}))})),
-            resources: {cpus: w.cpus, memory_mb: w.memory_mb}, storage: {kind: 'local-volume'}, settings: {server: {}, profile: {}},
-            security: {admin_user: w.admin_user, service_user: 'console_service', tls: false, network: 'loopback'},
+            resources: {cpus: w.cpus, memory_mb: w.memory_mb}, storage: {kind: w.provider === 'kubernetes' ? 'kubernetes-volume' : 'local-volume'}, settings: {server: {}, profile: {}},
+            security: {admin_user: w.admin_user, service_user: 'console_service', tls: false, network: w.provider === 'kubernetes' ? 'kubernetes' : 'loopback'},
+            ...(w.provider === 'kubernetes' ? {kubernetes: {namespace: w.k8s_namespace || `chc-${w.name}`, namespace_mode: w.k8s_namespace_mode, storage_class: w.k8s_storage_class,
+                data_size_gi: w.k8s_data_gi, keeper_size_gi: w.k8s_keeper_gi, reclaim_policy: w.k8s_reclaim_policy, service_type: w.k8s_service_type}} : {}),
             routing: w.routing === 'chproxy' ? {kind: 'chproxy', image: w.proxy_image, user: w.proxy_user, max_concurrent_queries: w.proxy_max_concurrent,
                 max_execution_time_s: w.proxy_max_execution} : {kind: 'none'}};
         const cluster_row = {cluster_id, name: w.name, environment: w.environment, owner: w.owner, description: w.description, provider: w.provider, connection: '{}',
@@ -9980,7 +10088,8 @@ function renderClusterDetails(root, route, page) {
 }
 
 const clusterRouting = cluster => (cluster.spec && cluster.spec.routing && cluster.spec.routing.kind === 'chproxy' ? cluster.spec.routing : null);
-const managed = cluster => cluster.provider === 'docker-compose' && cluster.mode === 'manage' && cluster.spec && cluster.spec.shards;
+const managed = cluster => ['docker-compose', 'kubernetes'].includes(cluster.provider) && cluster.mode === 'manage' && cluster.spec && cluster.spec.shards;
+const onKubernetes = cluster => cluster.provider === 'kubernetes' && cluster.spec && cluster.spec.kubernetes;
 const activeNodes = spec => spec.shards.flatMap(sh => sh.replicas.filter(r => r.state !== 'removed').map(r => ({...r, shard: sh.index})));
 
 function capabilityButton(text, capability, fn, options = {}) {
@@ -10001,13 +10110,20 @@ function clusterOverview(state, cluster) {
             ['Provider', cluster.provider], ['Management mode', `${cluster.mode}${cluster.provider === 'external' ? ' (no provider integration: the console observes, and does not change the deployment)' : ''}`],
             ['Lifecycle', [lifecycleBadge(cluster.lifecycle), ` ${cluster.lifecycle_message || ''}`]],
             ['Desired configuration', cluster.revision ? `revision ${cluster.revision}` : 'none yet'],
-            ['Endpoints', cluster.provider === 'external' ? (cluster.connection.endpoints || []).join(', ') : (cluster.spec ? activeNodes(cluster.spec).map(n => n.http_port ? `${n.name} http://127.0.0.1:${n.http_port}` : `${n.name} (port not assigned yet)`).join(', ') : '—')],
+            ['Endpoints', cluster.provider === 'external' ? (cluster.connection.endpoints || []).join(', ')
+                : onKubernetes(cluster) ? `Pods ${activeNodes(cluster.spec).map(n => `${n.name} = ${k8sPod(cluster, n)}`).join(', ')} in ${cluster.spec.kubernetes.namespace} (the agent connects with kubectl port-forward)`
+                    + (cluster.spec.kubernetes.service_type !== 'none' ? `; clients: Service ${k8sResource(cluster)}-client (${cluster.spec.kubernetes.service_type}), ports 8123 and 9000` : '; no client Service')
+                : (cluster.spec ? activeNodes(cluster.spec).map(n => n.http_port ? `${n.name} http://127.0.0.1:${n.http_port}` : `${n.name} (port not assigned yet)`).join(', ') : '—')],
             ...(clusterRouting(cluster) ? [['Client endpoint (chproxy)', clusterRouting(cluster).port ? `http://127.0.0.1:${clusterRouting(cluster).port}, user ${clusterRouting(cluster).user}` : 'port not assigned yet']] : []),
             ...(cluster.provider === 'docker-compose' && cluster.spec && cluster.spec.security ? [['Administrator user', cluster.spec.security.service_user
                 ? `${cluster.spec.security.admin_user} (password set at creation; CH_USER_PASSWORD on the agent host). The agent and chproxy use ${cluster.spec.security.service_user}.`
                 : `${cluster.spec.security.admin_user} (generated password; CH_ADMIN_PASSWORD on the agent host)`]] : []),
-            ['Secrets', cluster.provider === 'docker-compose' ? `Referenced: secrets.env of the deployment on the agent host${clusterRouting(cluster) ? ' (CH_PROXY_PASSWORD is the password of the proxy user)' : ''}` : `Referenced: ${cluster.connection.credential_ref || '—'}_USER / _PASSWORD on the agent host`],
+            ...(onKubernetes(cluster) && cluster.spec.security ? [['Administrator user', `${cluster.spec.security.admin_user} (password set at creation; key admin_password of the Secret `
+                + `${k8sResource(cluster)}-console). The agent uses ${cluster.spec.security.service_user}.`]] : []),
+            ['Secrets', onKubernetes(cluster) ? `Secret ${k8sResource(cluster)}-console in ${cluster.spec.kubernetes.namespace}: admin_password, service_password, default_password; read by the pods from their environment`
+                : cluster.provider === 'docker-compose' ? `Referenced: secrets.env of the deployment on the agent host${clusterRouting(cluster) ? ' (CH_PROXY_PASSWORD is the password of the proxy user)' : ''}` : `Referenced: ${cluster.connection.credential_ref || '—'}_USER / _PASSWORD on the agent host`],
         ])),
+        onKubernetes(cluster) ? kubernetesBox(state, cluster) : null,
         h('div', {className: 'box'}, h('h2', {}, 'Health'), kvList([
             ['Last observation', observedAt(cluster)], ['ClickHouse nodes', healthSummary(cluster)],
             ['Keeper', x.keeper.length ? `${x.quorum ? 'quorum' : 'no quorum'}; leader ${x.leader || 'none'}` : (cluster.provider === 'external' ? 'not observed: Keeper of a registered deployment is reported by its nodes (Nodes & Topology)' : '—')],
@@ -10021,6 +10137,37 @@ function clusterOverview(state, cluster) {
         ])),
         h('div', {className: 'box'}, h('h2', {}, 'Recent operations'), clusterOperationsTable(cluster, cluster.ops.slice(0, 5))),
     ];
+}
+
+/// Names the operator gives to the resources of a cluster (`chc-` and the first 10 hex digits of its identifier).
+function k8sResource(cluster) {
+    return `chc-${cluster.cluster_id.replace(/-/g, '').slice(0, 10)}`;
+}
+
+function k8sPod(cluster, node) {
+    const m = /^s(\d+)r(\d+)$/.exec(node.name);
+    return m ? `${k8sResource(cluster)}-clickhouse-${Number(m[1]) - 1}-${Number(m[2]) - 1}-0` : node.name;
+}
+
+/// The storage class of a cluster as the agent reports it now, or null.
+function k8sStorageClass(state, cluster) {
+    const inventory = state.agents[0] && state.agents[0].data.kubernetes;
+    return inventory && inventory.storage_classes ? inventory.storage_classes.find(c => c.name === cluster.spec.kubernetes.storage_class) || null : null;
+}
+
+function kubernetesBox(state, cluster) {
+    const k = cluster.spec.kubernetes;
+    const inventory = state.agents[0] && state.agents[0].data.kubernetes;
+    const storage = k8sStorageClass(state, cluster);
+    return h('div', {className: 'box'}, h('h2', {}, 'Kubernetes'), kvList([
+        ['Namespace', `${k.namespace} (${k.namespace_mode === 'create' ? 'created for this cluster' : 'existing'})`],
+        ['Resources', `KeeperCluster ${k8sResource(cluster)}, ClickHouseCluster ${k8sResource(cluster)}, Secret ${k8sResource(cluster)}-console${k.service_type !== 'none' ? `, Service ${k8sResource(cluster)}-client` : ''}`],
+        ['Operator', inventory && inventory.operator ? `${inventory.operator.image}${inventory.operator.verified ? '' : ' (not a verified version)'}` : 'not reported by the agent'],
+        ['Storage class', storage ? `${storage.name} (${storage.provisioner}; expansion ${storage.expansion ? 'allowed' : 'not allowed'})` : `${k.storage_class} (not reported by the agent now)`],
+        ['Volumes', `${k.data_size_gi} GiB per node, ${k.keeper_size_gi} GiB per Keeper member`],
+        ['Reclaim policy', `${k.reclaim_policy}: ${k.reclaim_policy === 'Retain' ? 'a volume and its data stay when its claim is deleted, until the volume is deleted too' : 'the provisioner deletes a volume with its claim'}`],
+        ['Client Service', k.service_type === 'none' ? 'none' : `${k8sResource(cluster)}-client, ${k.service_type}`],
+    ]));
 }
 
 function nodeRow(o) {
@@ -10066,7 +10213,7 @@ function clusterNodes(state, cluster) {
             }})),
             {title: '', render: r => (managed(cluster) ? h('span', {className: 'actions-row'},
                 capabilityButton('Restart', 'maintain', () => restartDialog(cluster, [r.name])),
-                capabilityButton('Decommission', 'decommission', () => decommissionDialog(cluster, {...r, shard: shard.index}))) : null)},
+                onKubernetes(cluster) ? null : capabilityButton('Decommission', 'decommission', () => decommissionDialog(cluster, {...r, shard: shard.index}))) : null)},
         ], replicas, null, `Shard ${shard.index}`)));
     }
     const routing = clusterRouting(cluster);
@@ -10237,6 +10384,7 @@ function clusterScaling(state, cluster) {
     ], nodes, 'Not observed yet.', 'Capacity'),
     h('p', {className: 'note'}, `Requirements recorded at creation: ${JSON.stringify(cluster.requirements || {})}. Disk shows the host file system that holds the Docker volumes.`)));
     if (!managed(cluster)) return [...out, paragraph('Scaling needs a managed cluster with a provider integration.')];
+    if (onKubernetes(cluster)) return [...out, kubernetesScaling(state, cluster)];
     const spec = cluster.spec;
     out.push(h('div', {className: 'box'}, h('h2', {}, 'Change resources or topology'), dataTable([
         {title: 'Operation', render: r => h('strong', {}, r[0])}, {title: 'What it involves', render: r => r[1]}, {title: '', render: r => r[2]},
@@ -10253,6 +10401,89 @@ function clusterScaling(state, cluster) {
         ['Expand or reduce storage', 'Not supported by this provider: Docker volumes have no size; they use the host file system. Reducing storage in place is never assumed.', null],
     ], null, 'Scaling operations')));
     return out;
+}
+
+/// Scaling with the operator: it keeps the same number of replicas in every shard, and adds or removes the replica or
+/// shard with the highest index.
+function kubernetesScaling(state, cluster) {
+    const spec = cluster.spec;
+    const shards = spec.shards.filter(sh => sh.replicas.some(r => r.state !== 'removed'));
+    const per_shard = shards[0].replicas.filter(r => r.state !== 'removed').length;
+    const storage = k8sStorageClass(state, cluster);
+    return h('div', {className: 'box'}, h('h2', {}, 'Change resources or topology'), dataTable([
+        {title: 'Operation', render: r => h('strong', {}, r[0])}, {title: 'What it involves', render: r => r[1]}, {title: '', render: r => r[2]},
+    ], [
+        ['Change CPU or memory', `Now ${spec.resources.cpus} CPU and ${spec.resources.memory_mb} MiB per node (requests and limits). The operator recreates the pods one replica at a time.`,
+            capabilityButton('Resize', 'scale', () => resizeDialog(cluster))],
+        ['Add a replica to every shard', `Now ${per_shard} replicas per shard. The operator adds one replica to each shard; the agent creates the schema of a peer on it, waits until replication has caught up, and compares row counts.`,
+            capabilityButton('Add replicas', 'scale', () => k8sReplicasDialog(cluster, +1))],
+        ['Remove a replica from every shard', `Removes the replica with the highest index of each shard (${shards.map(sh => sh.replicas.filter(r => r.state !== 'removed').slice(-1)[0].name).join(', ')}), `
+            + 'after checking that the other replicas are caught up and the Keeper quorum is healthy. Their volume claims are kept.',
+            capabilityButton('Remove replicas', 'decommission', () => k8sReplicasDialog(cluster, -1), {disabled: per_shard < 2, title: per_shard < 2 ? 'Every shard has one replica.' : null})],
+        ['Add a shard', `A shard of ${per_shard} replicas with the schema of shard 1, empty. Existing rows are not redistributed.`,
+            capabilityButton('Add shard', 'scale', () => addShardDialog(cluster))],
+        ['Remove the last shard', `Only shard ${shards[shards.length - 1].index}, and only when it holds no data: the operator removes the shard with the highest index.`,
+            capabilityButton('Remove shard', 'scale', () => removeShardDialog(cluster), {disabled: shards.length < 2, title: shards.length < 2 ? 'The cluster has one shard.' : null})],
+        ['Expand storage', storage && storage.expansion ? `Now ${spec.kubernetes.data_size_gi} GiB per node. The storage class ${storage.name} allows expansion: the operator enlarges every data volume. Volumes are never reduced.`
+            : `Not available: the storage class ${spec.kubernetes.storage_class} ${storage ? 'does not allow volume expansion' : 'is not reported by the agent'}.`,
+            capabilityButton('Expand', 'scale', () => expandStorageDialog(cluster), {disabled: !(storage && storage.expansion)})],
+    ], null, 'Scaling operations'));
+}
+
+function k8sReplicasDialog(cluster, delta) {
+    const spec = JSON.parse(JSON.stringify(cluster.spec));
+    const shards = spec.shards.filter(sh => sh.replicas.some(r => r.state !== 'removed'));
+    const names = [];
+    for (const sh of shards) {
+        const active = sh.replicas.filter(r => r.state !== 'removed');
+        if (delta > 0) {
+            const name = `s${sh.index}r${active.length + 1}`;
+            const existing = sh.replicas.find(r => r.name === name);
+            if (existing) existing.state = 'active';
+            else sh.replicas.push({node_id: crypto.randomUUID(), name, state: 'active'});
+            names.push(name);
+        } else {
+            names.push(active[active.length - 1].name);
+        }
+    }
+    if (delta > 0) {
+        if (shards[0].replicas.filter(r => r.state !== 'removed').length > 5) {
+            openDialog('Add replicas', [paragraph('At most 5 replicas per shard.')], [button('Close', closeDialog)]);
+            return;
+        }
+        submitClusterOperation(cluster, 'add_replica', {spec, parameters: {nodes: names}, capability: 'scale', note: `replicas ${names.join(', ')} added`,
+            summary: `Add replicas ${names.join(', ')} to ${cluster.name}`,
+            warning: 'The new replicas are declared ready only after their replicated tables have caught up and their row counts match a peer.'});
+        return;
+    }
+    const confirm = h('input', {type: 'text', autocomplete: 'off'});
+    formDialog(`Remove a replica from every shard of ${cluster.name}`, [
+        kvList([['Replicas removed', names.join(', ')], ['Pods', names.map(name => k8sPod(cluster, {name})).join(', ')]]),
+        h('ol', {className: 'steps'}, ...['Check that the replicas are the last of their shards, and that each shard keeps a replica.',
+            'Check that the remaining replicas are caught up, the Keeper quorum is healthy, and no distributed inserts are queued on the removed replicas.',
+            'Reduce the replicas of the ClickHouseCluster (the irreversible boundary): the operator removes the pods.',
+            'Remove their replica metadata from Keeper (SYSTEM DROP REPLICA).', 'Check the remaining cluster.',
+            `Keep their volume claims (reclaim policy ${cluster.spec.kubernetes.reclaim_policy}); delete them with Delete resources after retirement.`].map(t => h('li', {}, t))),
+        adminField(`Type ${cluster.name} to confirm`, confirm),
+    ], 'Review', () => {
+        if (confirm.value !== cluster.name) return 'The name does not match.';
+        return operationPlan(cluster, 'remove_replica', {parameters: {nodes: names}, capability: 'decommission', danger: true,
+            summary: `Remove replicas ${names.join(', ')} of ${cluster.name}`,
+            warning: 'Clients connected to these pods lose their connection. The agent refuses when the remaining replicas are not caught up.'});
+    });
+}
+
+function expandStorageDialog(cluster) {
+    const size = h('input', {type: 'number', min: cluster.spec.kubernetes.data_size_gi + 1, value: cluster.spec.kubernetes.data_size_gi * 2});
+    formDialog(`Expand the storage of ${cluster.name}`, [adminField('Data volume per node (GiB)', size, `Now ${cluster.spec.kubernetes.data_size_gi} GiB. Volumes are never reduced.`),
+        paragraph('The operator requests the new size for every data volume; the storage class expands them, online when its driver supports it. Keeper volumes are not changed.')], 'Review', () => {
+        const value = Number(size.value);
+        if (!Number.isInteger(value) || value <= cluster.spec.kubernetes.data_size_gi) return `Enter a whole number of GiB larger than ${cluster.spec.kubernetes.data_size_gi}.`;
+        const spec = JSON.parse(JSON.stringify(cluster.spec));
+        spec.kubernetes.data_size_gi = value;
+        return operationPlan(cluster, 'resize_storage', {spec, capability: 'scale', note: `data volumes ${value} GiB`, summary: `Expand the data volumes of ${cluster.name} to ${value} GiB`,
+            warning: 'An expanded volume cannot be reduced again. The agent refuses when the storage class does not allow expansion.'});
+    });
 }
 
 function resizeDialog(cluster) {
@@ -10288,7 +10519,8 @@ function addReplicaDialog(cluster) {
 }
 
 function addShardDialog(cluster) {
-    const replicas = h('input', {type: 'number', value: 2, min: 1, max: 3});
+    const per_shard = cluster.spec.shards.find(sh => sh.replicas.some(r => r.state !== 'removed')).replicas.filter(r => r.state !== 'removed').length;
+    const replicas = h('input', {type: 'number', value: onKubernetes(cluster) ? per_shard : 2, min: 1, max: 3, disabled: !!onKubernetes(cluster)});
     const ack = checkbox('I understand that existing rows stay on their shards: nothing is redistributed, and the sharding of new rows changes.', false);
     formDialog(`Add a shard to ${cluster.name}`, [adminField('Replicas of the new shard', replicas), ack.element,
         paragraph('Data placement after the change: a Distributed table computes the shard of each new row from its sharding key over all shards, '
@@ -10313,10 +10545,14 @@ function removeShardDialog(cluster) {
         openDialog('Remove shard', [paragraph('The cluster has one shard: it cannot be removed.')], [button('Close', closeDialog)]);
         return;
     }
-    const shard = select(shards.map(sh => [String(sh.index), `Shard ${sh.index}`]), String(shards[shards.length - 1].index));
-    formDialog(`Remove a shard of ${cluster.name}`, [adminField('Shard', shard), paragraph('The agent refuses a shard that holds rows in any table. Its nodes are stopped and removed; their volumes are kept.')],
+    const shard = select((onKubernetes(cluster) ? shards.slice(-1) : shards).map(sh => [String(sh.index), `Shard ${sh.index}`]), String(shards[shards.length - 1].index));
+    formDialog(`Remove a shard of ${cluster.name}`, [adminField('Shard', shard), paragraph(onKubernetes(cluster)
+        ? 'The operator removes the shard with the highest index. The agent refuses it when it holds rows in any table; its volume claims are kept.'
+        : 'The agent refuses a shard that holds rows in any table. Its nodes are stopped and removed; their volumes are kept.')],
         'Review', () => {
-            return operationPlan(cluster, 'remove_shard', {parameters: {shard: Number(shard.value)}, capability: 'scale', summary: `Remove shard ${shard.value} of ${cluster.name}`, danger: true,
+            const spec = onKubernetes(cluster) ? JSON.parse(JSON.stringify(cluster.spec)) : undefined;
+            if (spec) for (const r of spec.shards.find(sh => sh.index === Number(shard.value)).replicas) r.state = 'removed';
+            return operationPlan(cluster, 'remove_shard', {spec, parameters: {shard: Number(shard.value)}, capability: 'scale', summary: `Remove shard ${shard.value} of ${cluster.name}`, danger: true,
                 warning: 'Refused when the shard holds data. Routing: Distributed tables stop sending rows to it once the topology is updated.'});
         });
 }
@@ -10374,14 +10610,15 @@ function clusterMaintenance(state, cluster) {
             'A failed check stops the rollout: the remaining nodes stay on the old version.', 'After the last node: topology and replication checks.'].map(t => h('li', {}, t))),
         h('div', {className: 'message warning'}, 'Rollback: changing the image back is not a downgrade path, because a newer version may write data or metadata that an older one cannot read. '
             + 'The recovery alternative is a restore of the pre-upgrade backup into a new cluster of the old version.')),
-        h('div', {className: 'box'}, h('h2', {}, 'Certificates and credentials'), paragraph('This provider configures no TLS certificates. Rotating the generated credentials is not implemented: '
-            + 'they are in the secrets file of the deployment on the agent host.'))];
+        h('div', {className: 'box'}, h('h2', {}, 'Certificates and credentials'), paragraph(onKubernetes(cluster)
+            ? `No TLS certificates are configured (the operator supports them with cert-manager). Rotating the credentials is not implemented: they are in the Secret ${k8sResource(cluster)}-console.`
+            : 'This provider configures no TLS certificates. Rotating the generated credentials is not implemented: they are in the secrets file of the deployment on the agent host.'))];
 }
 
 function upgradeDialog(cluster) {
     const image = h('input', {type: 'text', value: cluster.spec.image, spellcheck: false});
     const waive = h('input', {type: 'text', placeholder: 'only if no recent verified backup exists'});
-    formDialog(`Upgrade ${cluster.name}`, [adminField('Target image', image, 'repository:tag, already on the Docker host.'),
+    formDialog(`Upgrade ${cluster.name}`, [adminField('Target image', image, onKubernetes(cluster) ? 'repository:tag; the Kubernetes nodes pull it. The operator replaces the pods one replica at a time.' : 'repository:tag, already on the Docker host.'),
         adminField('Reason to waive the backup requirement', waive, 'Recorded with the operation.')], 'Review', () => {
         if (!/^[a-z0-9./_-]+:[0-9][A-Za-z0-9._-]*$/.test(image.value)) return 'Enter repository:version.';
         return operationPlan(cluster, 'upgrade', {parameters: {image: image.value, waive_backup: waive.value.trim() || undefined}, capability: 'upgrade',
