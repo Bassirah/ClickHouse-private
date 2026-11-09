@@ -30,7 +30,7 @@ The console has no separate backend: every action is a SQL statement run with th
 | Data Access Policies | Column permissions and row policies with their combined effect, effective access per user, access tests run as the user, and attribute-driven rules that provision native roles, grants, and row policies, deployed from the console and reconciled by the access policy worker. |
 | Component Access | A policy of which components, Resources links, and Administration pages each user or role can open, compared with the native privileges that govern them. |
 | Backup & Restore | Approved destinations (disks and S3, including external S3 servers allowed in the console), a backup wizard, durable operations, restores into new databases, restore tests, schedules with retention, and recovery verification. |
-| Cluster Management | The lifecycle of ClickHouse deployments: create (with an optional chproxy load balancer), register, monitor, configure, scale, upgrade, back up, decommission, and retire. One provider is implemented: a Docker Compose lab. |
+| Cluster Management | The lifecycle of ClickHouse deployments: create (with an optional chproxy load balancer), register, monitor, configure, scale, upgrade, back up, decommission, and retire. Two providers are implemented: a Docker Compose lab, and Kubernetes with the ClickHouse operator (namespace, storage class, volume reclaim policy, volume sizes, and client Service chosen in the wizard; storage expansion). |
 
 ### Where to find it
 
@@ -52,6 +52,7 @@ Each feature was developed on its own branch, each based on the previous one. Th
 | `private/console-cluster-chproxy` | chproxy as an option of cluster creation |
 | `private/console-login-clusters-ui` | Simpler login, Cluster Inventory filters, cluster administrator credentials |
 | `private/console-data-access-policies` | Data Access Policies |
+| `private/console-cluster-kubernetes` | Kubernetes provider of Cluster Management |
 
 `private/main` is the unchanged upstream base.
 
@@ -81,7 +82,7 @@ CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=<service account> CLICKHOUS
 
 * [`docs/concepts/features/interfaces/web-console.mdx`](docs/concepts/features/interfaces/web-console.mdx): the user and administrator documentation: configuration (the `web_console` section), security model, every page, the backup worker, the cluster agent, the access policy worker, runbooks, and limitations.
 * [`utils/web-console/README.md`](utils/web-console/README.md): building, running a development instance, testing, and packaging.
-* Tests: functional tests `05293_web_console`, `05294_web_console_access_management`, and `05295_web_console_backup`; the integration test `test_web_console`; and browser acceptance checks in `utils/web-console/` (`console_e2e.mjs`, `access_e2e.mjs`, `backup_e2e.mjs`, `cluster_e2e.mjs`, `data_access_e2e.mjs`).
+* Tests: functional tests `05293_web_console`, `05294_web_console_access_management`, and `05295_web_console_backup`; the integration test `test_web_console`; and browser acceptance checks in `utils/web-console/` (`console_e2e.mjs`, `access_e2e.mjs`, `backup_e2e.mjs`, `cluster_e2e.mjs`, `cluster_k8s_e2e.mjs`, `data_access_e2e.mjs`).
 
 ## How To Install (Linux, macOS, FreeBSD)
 
