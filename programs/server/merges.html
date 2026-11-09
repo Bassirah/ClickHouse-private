@@ -5,6 +5,49 @@
     <title>ClickHouse Merges Visualizer</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1NCIgaGVpZ2h0PSI0OCIgdmlld0JveD0iMCAwIDkgOCI+PHN0eWxlPi5ve2ZpbGw6I2ZjMH0ucntmaWxsOnJlZH08L3N0eWxlPjxwYXRoIGQ9Ik0wLDcgaDEgdjEgaC0xIHoiIGNsYXNzPSJyIi8+PHBhdGggZD0iTTAsMCBoMSB2NyBoLTEgeiIgY2xhc3M9Im8iLz48cGF0aCBkPSJNMiwwIGgxIHY4IGgtMSB6IiBjbGFzcz0ibyIvPjxwYXRoIGQ9Ik00LDAgaDEgdjggaC0xIHoiIGNsYXNzPSJvIi8+PHBhdGggZD0iTTYsMCBoMSB2OCBoLTEgeiIgY2xhc3M9Im8iLz48cGF0aCBkPSJNOCwzLjI1IGgxIHYxLjUgaC0xIHoiIGNsYXNzPSJvIi8+PC9zdmc+">
     <style>
+        /* The design of the other built-in web UIs: the dark theme has the colors of the SQL Console (`/ui`),
+           the light theme those of the web console (`/console`). */
+        :root {
+            color-scheme: light;
+            --bg: #f6f7f9;
+            --surface: #ffffff;
+            --surface-hover: #f0f1f3;
+            --border: #d9dbe0;
+            --text: #161517;
+            --muted: #53575f;
+            --accent: #faff69;
+            --accent-text: #161517;
+            --accent-border: #c7cc00;
+            --focus: #1d5fd6;
+            /* Buttons, as in the SQL Console: the main action is black, the others are outlined. */
+            --primary-bg: #302e32;
+            --primary-hover: #43464c;
+            --primary-active: #161517;
+            --primary-text: #ffffff;
+            --primary-border: #302e32;
+            --border-hover: #c3c6cc;
+            --pressed: #e6e7ea;
+            --part: #fbfccf;
+            --part-border: #c9cb6a;
+        }
+        [data-theme="dark"] {
+            color-scheme: dark;
+            --bg: #1f1f1c;
+            --surface: #282828;
+            --surface-hover: #323232;
+            --border: #414141;
+            --text: #f2f2f2;
+            --muted: #b3b6bd;
+            --accent: #faff69;
+            --accent-text: #1f1f1c;
+            --accent-border: #faff69;
+            --focus: #8ab4ff;
+            --primary-border: #53575f;
+            --border-hover: #53575f;
+            --pressed: #3a3a36;
+            --part: #3b3c22;
+            --part-border: #74762f;
+        }
         * {
             box-sizing: border-box;
         }
@@ -12,102 +55,194 @@
             height: 100%;
             overflow: auto;
             margin: 0;
-            background: #F8F8F8;
-            font-size: 16pt;
+            background: var(--bg);
+            color: var(--text);
         }
         body {
-            font-family: Liberation Sans, DejaVu Sans, sans-serif, Noto Color Emoji, Apple Color Emoji, Segoe UI Emoji;
-            padding: 1rem;
+            font-family: Inter, -apple-system, "Segoe UI", Roboto, "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.45;
+            padding: 0 1rem 1rem;
         }
-
         input, textarea {
-            border: 3px solid #EEE;
-            font-size: 16pt;
-            padding: 0.25rem;
+            font: inherit;
+            color: var(--text);
+            margin: 0;
         }
-
-        #url {
-            width: 80%;
+        input[type="text"], input[type="password"], textarea {
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--bg);
+            padding: 0 0.6rem;
+            outline: none;
         }
-        #user, #password {
-            width: 10%;
-        }
-        #query {
-            width: 100%;
-            height: 3rem;
-        }
-
-        input[type="button"] {
-            background: #FED;
-            width: 2rem;
+        input[type="text"], input[type="password"] {
             height: 2rem;
         }
-        input[type="button"]:hover {
-            background: #F88;
+        input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
+            border-color: var(--focus);
+            box-shadow: 0 0 0 1px var(--focus);
+        }
+        :focus-visible {
+            outline: 2px solid var(--focus);
+            outline-offset: 1px;
+        }
+
+        /* Toolbar, like the tab bar of the SQL Console. */
+        .inputs {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            margin: 0 -1rem 1rem;
+            padding: 0.6rem 1rem;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+        }
+        form {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        #connection-params {
+            flex-basis: 100%;
+            display: flex;
+            gap: 0.5rem;
+        }
+        #url {
+            flex: 7;
+            min-width: 0;
+        }
+        #user, #password {
+            flex: 1.5;
+            min-width: 0;
+        }
+        #query {
+            flex-basis: 100%;
+            height: 3.25rem;
+            padding: 0.45rem 0.6rem;
+            font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+            font-size: 13px;
+            resize: vertical;
+        }
+        input[type="button"] {
+            height: 2rem;
+            padding: 0 0.8rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--surface);
+            font-weight: 500;
             cursor: pointer;
         }
-
+        input[type="button"]:hover {
+            background: var(--surface-hover);
+            border-color: var(--border-hover);
+        }
+        input[type="button"]:active {
+            background: var(--pressed);
+        }
+        #play {
+            min-width: 4.5rem;
+            background: var(--primary-bg);
+            color: var(--primary-text);
+            border-color: var(--primary-border);
+            font-weight: 600;
+        }
+        #play:hover {
+            background: var(--primary-hover);
+            border-color: var(--primary-hover);
+        }
+        #play:active {
+            background: var(--primary-active);
+            border-color: var(--primary-active);
+        }
         #slower {
-            margin-left: 1rem;
+            margin-left: 0.5rem;
         }
-
         #speed {
-            background: #DDD;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 3.5rem;
+            height: 2rem;
+            padding: 0 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--surface-hover);
+            color: var(--muted);
+            font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
         }
-
         #time, #stats {
-            padding-left: 1rem;
-            font-family: monospace;
+            padding-left: 0.5rem;
+            font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+            color: var(--muted);
         }
-
         #stats {
             white-space: pre-wrap;
         }
 
         #canvas {
-            margin-top: 0.25rem;
-            font-size: 10pt;
+            font-size: 12px;
         }
-
         .table, .partition {
             padding: 0.5rem;
-            border: 3px solid #EEE;
-            background: white;
+            margin: 0 0.5rem 0.5rem 0;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--surface);
             overflow: hidden;
         }
-
         .partition {
             float: left;
         }
-
         .table_title, .partition_title {
             text-align: center;
+            font-weight: 600;
         }
-
+        .table_title {
+            font-size: 14px;
+            margin-bottom: 0.4rem;
+        }
+        .partition_title {
+            color: var(--muted);
+        }
         .part {
             display: inline-block;
             padding: 0;
             margin: 0.1rem;
-            border: 1px solid black;
-            background: #FED;
+            border: 1px solid var(--part-border);
+            border-radius: 2px;
+            background: var(--part);
             overflow: hidden;
             position: relative; /* This enables the positioning context for the child elements. */
         }
-
         .part_title {
             text-align: center;
         }
-
         .part:hover {
             overflow: visible;
         }
-
         .part:hover .part_title {
             z-index: 1;
             position: absolute;
-            background: yellow;
+            padding: 0 0.25rem;
+            border-radius: 2px;
+            background: var(--accent);
+            color: var(--accent-text);
         }
     </style>
+    <script>
+        /// The theme chosen in the other web UI pages, otherwise the system preference.
+        let stored_theme = null;
+        try {
+            stored_theme = window.localStorage.getItem('theme');
+        } catch (e) {
+            /// Storage is disabled.
+        }
+        if (stored_theme == 'dark' || (!stored_theme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.setAttribute('data-theme', 'dark');
+        }
+    </script>
 </head>
 <body>
 <div class="inputs">
@@ -117,8 +252,8 @@
             <input id="hidden-submit" type="submit" hidden="true"/>
         </div>
         <textarea spellcheck="false" data-gramm="false" id="query">SELECT * FROM system.part_log ORDER BY event_date, event_time, event_time_microseconds</textarea>
-        <input id="play" type="button" value="▶">
-        <input id="slower" type="button" value="⏪"><span id="speed">10x</span><input id="faster" type="button" value="⏩"></input>
+        <input id="play" type="button" value="Play">
+        <input id="slower" type="button" value="Slower" title="Replay slower"><span id="speed">10x</span><input id="faster" type="button" value="Faster" title="Replay faster"></input>
         <span id="time">0000-00-00 00:00:00</span>
         <span id="stats"></span>
     </form>
@@ -368,7 +503,7 @@ async function load() {
     let response, reply, error;
     try {
         loading = true;
-        document.getElementById('play').value = '⏹';
+        document.getElementById('play').value = 'Stop';
 
         response = await fetch(url, { method: "POST", body: query });
         const reader = response.body.getReader();
@@ -405,7 +540,7 @@ async function load() {
 
     loading = false;
     stopping = false;
-    document.getElementById('play').value = '▶';
+    document.getElementById('play').value = 'Play';
 }
 
 function stop() {

@@ -99,6 +99,15 @@ async function waitForHome(page) {
     await page.waitForSelector('#home-view:not([hidden]) .overview');
 }
 
+/// Clicks a control of the console header or sidebar. While a component is open, they are hidden (focus
+/// mode), so first press the arrow that shows them, as a user would.
+async function clickConsole(page, selector) {
+    /// A message of the console (such as the ClickStack notice on its first opening) is acknowledged first.
+    if (await page.evaluate(() => document.getElementById('admin-dialog').open)) await page.click('#admin-dialog .dialog-actions button.primary');
+    if (await page.evaluate(() => document.getElementById('shell').classList.contains('focus'))) await page.click('#console-toggle');
+    await page.click(selector);
+}
+
 function frameOf(page, path) {
     return page.frames().find(f => new URL(f.url(), BASE).pathname.startsWith(path));
 }
@@ -226,11 +235,11 @@ await test('Home cards and sidebar list every component and resolve to the same 
     /// Click every internal card and its sidebar entry: both land on the same route.
     for (const section of cards) {
         for (const card of section.items.filter(i => !i.target)) {
-            await page.click(`#sidebar a[data-component="home"]`);
+            await clickConsole(page, `#sidebar a[data-component="home"]`);
             await page.click(`.card[data-component="${card.id}"] .card-foot a`);
             const from_card = page.url();
-            await page.click(`#sidebar a[data-component="home"]`);
-            await page.click(`#sidebar a[data-component="${card.id}"]`);
+            await clickConsole(page, `#sidebar a[data-component="home"]`);
+            await clickConsole(page, `#sidebar a[data-component="${card.id}"]`);
             check(page.url() === from_card && from_card === `${BASE}/console/${card.id}`, `${card.id}: ${from_card} vs ${page.url()}`);
             check(await page.getAttribute(`#sidebar a[data-component="${card.id}"]`, 'aria-current') === 'page', `${card.id} not highlighted`);
         }
@@ -271,7 +280,7 @@ await test('Refresh of a deep link asks to log in again and returns to the panel
     await page.goto(`${BASE}/console`);
     await login(page, ADMIN_USER, ADMIN_PASSWORD);
     await waitForHome(page);
-    await page.click('#sidebar a[data-component="schema"]');
+    await clickConsole(page, '#sidebar a[data-component="schema"]');
     await page.waitForURL(`${BASE}/console/schema`);
     await page.reload();
     await page.waitForURL(`${BASE}/console/login?next=schema`);
@@ -286,7 +295,7 @@ await test('SQL Console: automatic sign-in, unsaved query survives switching pan
     await page.goto(`${BASE}/console`);
     await login(page, ADMIN_USER, ADMIN_PASSWORD);
     await waitForHome(page);
-    await page.click('#sidebar a[data-component="sql"]');
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
     await waitForSQLConsole(page);
     const sql = frameOf(page, '/ui');
     const user_in_console = await sql.evaluate(() => document.body.innerText);
@@ -305,7 +314,7 @@ await test('SQL Console: automatic sign-in, unsaved query survives switching pan
     await screenshot(page, '05-sql-console');
 
     const iframe_before = await page.$('.frame-host[data-component="sql"] iframe');
-    await page.click('#sidebar a[data-component="dashboard"]');
+    await clickConsole(page, '#sidebar a[data-component="dashboard"]');
     await page.waitForURL(`${BASE}/console/dashboard`);
     await page.waitForSelector('.frame-host[data-component="dashboard"] iframe');
     check(await page.isHidden('.frame-host[data-component="sql"]'), 'SQL Console still visible');
@@ -334,7 +343,7 @@ await test('SQL Console: a failed automatic sign-in is reported and leaves its f
         }
         return route.continue();
     });
-    await page.click('#sidebar a[data-component="sql"]');
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
     await page.waitForSelector('#panel-notice:not([hidden])', {timeout: 60000});
     const notice = await page.textContent('#panel-notice');
     check(notice.includes('did not succeed') && notice.includes('Authentication failed'), `notice: ${notice}`);
@@ -352,32 +361,39 @@ await test('Theme: the toggle applies to the console and to panels opened after 
     await waitForHome(page);
     const before = await page.getAttribute('html', 'data-theme');
     const label = await page.getAttribute('#shell-theme', 'aria-label');
-    await page.click('#shell-theme');
+    await clickConsole(page, '#shell-theme');
     const after = await page.getAttribute('html', 'data-theme');
     check(before !== after && label === `Switch to ${after} theme`, `${before} -> ${after}, label ${label}`);
     check(await page.evaluate(() => localStorage.getItem('theme')) === after, 'theme not remembered');
-    await page.click('#sidebar a[data-component="schema"]');
+    await clickConsole(page, '#sidebar a[data-component="schema"]');
     await page.waitForSelector('.frame-host[data-component="schema"] iframe');
     await waitUntil(page, () => !document.querySelector('.frame-host[data-component="schema"] .frame-overlay'));
     const panel_theme = await frameOf(page, '/schema').evaluate(() => document.documentElement.getAttribute('data-theme'));
     check(panel_theme === after, `schema theme ${panel_theme}`);
-    await page.click('#sidebar a[data-component="home"]');
+    await clickConsole(page, '#sidebar a[data-component="home"]');
     await screenshot(page, `15-home-${after}`);
-    await page.click('#shell-theme');
+    await clickConsole(page, '#shell-theme');
     await context.close();
 });
 
-await test('Restricted diagnostic panel: shown as restricted and the server still enforces permissions', async () => {
+await test('Restricted diagnostic panel: hidden from the user, and the server still enforces permissions', async () => {
     const {context, page} = await newContext();
     await page.goto(`${BASE}/console`);
     await login(page, LIMITED_USER, LIMITED_PASSWORD);
     await waitForHome(page);
-    await waitUntil(page, () => document.querySelector('.card[data-component="merges"] .badge')?.textContent === 'Restricted');
-    await waitUntil(page, () => document.querySelector('.card[data-component="binary"] .badge')?.textContent === 'Restricted');
-    await waitUntil(page, () => !document.querySelector('.card[data-component="schema"] .badge.bad'));
+    /// Components whose probe query the server denies are neither cards nor sidebar entries.
+    await waitUntil(page, () => !document.querySelector('.card[data-component="merges"]') && !document.querySelector('.card[data-component="binary"]'));
+    check(!(await page.$('#sidebar a[data-component="merges"]')) && !(await page.$('#sidebar a[data-component="binary"]')), 'restricted components in the sidebar');
+    await waitUntil(page, () => !!document.querySelector('.card[data-component="schema"]') && !document.querySelector('.card[data-component="schema"] .badge.bad'));
+    check(!!(await page.$('#sidebar a[data-component="schema"]')), 'an allowed component is missing from the sidebar');
+    check(!(await page.textContent('#home-view')).includes('Restricted'), 'a Restricted badge is shown');
     await screenshot(page, '06-restricted-home');
-    await page.click('.card[data-component="merges"] .card-foot a');
-    await page.waitForSelector('#panel-state:not([hidden])');
+    /// Its address still explains the restriction.
+    await page.goto(`${BASE}/console/merges`);
+    await login(page, LIMITED_USER, LIMITED_PASSWORD);
+    await page.waitForURL(`${BASE}/console/merges`);
+    /// The privileges are checked first ("Checking ..."), then the restriction is explained.
+    await waitUntil(page, () => document.getElementById('panel-state').textContent.includes('restricted'));
     const state = await page.textContent('#panel-state');
     check(state.includes('restricted') && state.includes('SELECT ON system.part_log'), `state: ${state}`);
     await page.click('text=Open anyway');
@@ -422,7 +438,7 @@ await test('Missing optional integrations show configuration and unavailable sta
     check(state.includes('<clickstack_url>') && state.includes('web_console'), `state: ${state}`);
     await screenshot(page, '08-configure-clickstack');
     /// Login, Home, and the SQL Console keep working.
-    await page.click('#sidebar a[data-component="sql"]');
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
     await waitForSQLConsole(page);
     await context.close();
 });
@@ -432,12 +448,12 @@ await test('Switch user: previous panels and credentials are discarded', async (
     await page.goto(`${BASE}/console`);
     await login(page, ADMIN_USER, ADMIN_PASSWORD);
     await waitForHome(page);
-    await page.click('#sidebar a[data-component="sql"]');
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
     await waitForSQLConsole(page);
-    await page.click('#sidebar a[data-component="dashboard"]');
+    await clickConsole(page, '#sidebar a[data-component="dashboard"]');
     await page.waitForSelector('.frame-host[data-component="dashboard"] iframe');
     await page.evaluate(() => sessionStorage.setItem('connections', '[{"password":"clickstack-secret"}]'));
-    await page.click('#switch-button');
+    await clickConsole(page, '#switch-button');
     await page.waitForSelector('#login-view:not([hidden])');
     check(await page.$$eval('#frames .frame-host', hosts => hosts.length) === 0, 'frames remain after switching');
     check(await page.inputValue('#login-password') === '', 'password field not cleared');
@@ -447,7 +463,7 @@ await test('Switch user: previous panels and credentials are discarded', async (
     await login(page, LIMITED_USER, LIMITED_PASSWORD);
     await waitForHome(page);
     check((await page.textContent('.overview')).includes(`Database user${LIMITED_USER}`), 'wrong user on Home');
-    await page.click('#sidebar a[data-component="sql"]');
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
     await waitForSQLConsole(page);
     const body = await frameOf(page, '/ui').evaluate(() => document.body.innerText);
     check(body.includes(LIMITED_USER), 'SQL Console not signed in as the new user');
@@ -459,9 +475,9 @@ await test('Logout, then browser Back: authenticated state is not restored', asy
     await page.goto(`${BASE}/console`);
     await login(page, ADMIN_USER, ADMIN_PASSWORD);
     await waitForHome(page);
-    await page.click('#sidebar a[data-component="processors-profile"]');
+    await clickConsole(page, '#sidebar a[data-component="processors-profile"]');
     await page.waitForSelector('.frame-host[data-component="processors-profile"] iframe');
-    await page.click('#logout-button');
+    await clickConsole(page, '#logout-button');
     await page.waitForSelector('#login-view:not([hidden])');
     check((await page.textContent('#login-notice')).includes('signed out'), 'no sign-out notice');
     await page.goBack();
@@ -504,19 +520,19 @@ await test('Without Internet access the core console works and makes no external
     await page.goto(`${BASE}/console`);
     await login(page, ADMIN_USER, ADMIN_PASSWORD);
     await waitForHome(page);
-    await page.click('#sidebar a[data-component="sql"]');
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
     await waitForSQLConsole(page);
     for (const id of ['dashboard', 'schema', 'reference', 'merges', 'processors-profile']) {
-        await page.click(`#sidebar a[data-component="${id}"]`);
+        await clickConsole(page, `#sidebar a[data-component="${id}"]`);
         await page.waitForSelector(`.frame-host[data-component="${id}"] iframe`);
         await waitUntil(page, id => !document.querySelector(`.frame-host[data-component="${id}"] .frame-overlay`), id);
     }
-    await page.click('#sidebar a[data-component="home"]');
+    await clickConsole(page, '#sidebar a[data-component="home"]');
     await screenshot(page, '09-offline-home');
     console.log(`      external requests attempted by core and local panels: ${log.blocked.length ? log.blocked.join(', ') : 'none'}`);
     check(log.blocked.length === 0, `blocked: ${log.blocked.join(', ')}`);
     /// The panels marked "Needs Internet" do try the public CDN.
-    await page.click('#sidebar a[data-component="jemalloc"]');
+    await clickConsole(page, '#sidebar a[data-component="jemalloc"]');
     await page.waitForSelector('.frame-host[data-component="jemalloc"] iframe');
     await page.waitForTimeout(2000);
     console.log(`      requests blocked for Jemalloc (marked "Needs Internet"): ${log.blocked.join(', ')}`);
@@ -554,6 +570,12 @@ await test('Keyboard navigation and visible focus', async () => {
     await page.focus('#sidebar a[data-component="merges"]');
     await page.keyboard.press('Enter');
     await page.waitForURL(`${BASE}/console/merges`);
+    /// The panel gets the whole window; the arrow in the panel bar brings the console navigation back.
+    await waitUntil(page, () => document.getElementById('shell').classList.contains('focus'));
+    await page.focus('#console-toggle');
+    await page.keyboard.press('Enter');
+    check(!(await page.evaluate(() => document.getElementById('shell').classList.contains('focus'))), 'console navigation not shown with the keyboard');
+    check(await page.evaluate(() => document.activeElement.id) === 'console-toggle', 'focus left the arrow');
     await page.focus('#collapse-button');
     await page.keyboard.press('Enter');
     check(await page.evaluate(() => document.getElementById('shell').classList.contains('collapsed')), 'sidebar not collapsed');
@@ -562,6 +584,103 @@ await test('Keyboard navigation and visible focus', async () => {
     check(await page.getAttribute('#sidebar a[data-component="merges"]', 'aria-current') === 'page', 'active link not highlighted');
     await screenshot(page, '10-collapsed');
     await page.keyboard.press('Enter');
+    await context.close();
+});
+
+await test('Focus mode: an open component hides the console navigation until the arrow is pressed', async () => {
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    const mode = () => page.evaluate(() => ({
+        focus: document.getElementById('shell').classList.contains('focus'),
+        header: getComputedStyle(document.getElementById('topbar')).display !== 'none',
+        sidebar: getComputedStyle(document.getElementById('sidebar')).display !== 'none',
+        arrow: !document.getElementById('console-toggle').hidden,
+        frame_width: document.querySelector('.frame-host:not([hidden]) iframe')?.getBoundingClientRect().width,
+    }));
+    let state = await mode();
+    check(!state.focus && state.header && state.sidebar && !state.arrow, `Home: ${JSON.stringify(state)}`);
+
+    await page.click('#sidebar a[data-component="schema"]');
+    await page.waitForSelector('.frame-host[data-component="schema"] iframe');
+    state = await mode();
+    check(state.focus && !state.header && !state.sidebar && state.arrow, `open component: ${JSON.stringify(state)}`);
+    check(state.frame_width === 1400, `the component does not have the whole width: ${state.frame_width}`);
+    check((await page.textContent('#console-toggle')).includes('Console'), 'the arrow is not labelled');
+    await screenshot(page, '11-focus');
+
+    await page.click('#console-toggle');
+    state = await mode();
+    check(!state.focus && state.header && state.sidebar && state.arrow, `after the arrow: ${JSON.stringify(state)}`);
+    check(state.frame_width < 1400, 'the component did not make room for the sidebar');
+    check(await page.getAttribute('#console-toggle', 'aria-expanded') === 'true', 'aria-expanded');
+    check(await page.getAttribute('#sidebar a[data-component="schema"]', 'aria-current') === 'page', 'the panel is not current');
+
+    /// Selecting another component hides the console navigation again.
+    await page.click('#sidebar a[data-component="dashboard"]');
+    await page.waitForSelector('.frame-host[data-component="dashboard"] iframe');
+    check((await mode()).focus, 'not in focus mode after selecting another component');
+    /// The arrow toggles both ways.
+    await page.click('#console-toggle');
+    check(!(await mode()).focus, 'the arrow did not show the console navigation');
+    await page.click('#console-toggle');
+    check((await mode()).focus, 'the arrow did not hide the console navigation');
+
+    /// Pages of the console itself keep the console navigation.
+    await page.click('#console-toggle');
+    await page.click('#sidebar a[data-component="home"]');
+    state = await mode();
+    check(!state.focus && state.sidebar && !state.arrow, `back on Home: ${JSON.stringify(state)}`);
+    await page.goBack();
+    await page.waitForURL(`${BASE}/console/dashboard`);
+    check((await mode()).focus, 'Back to a component does not hide the console navigation');
+    await context.close();
+});
+
+await test('ClickStack: its banner message is a popup on the first opening after sign-in', async () => {
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await waitUntil(page, () => !['Checking…'].includes(document.querySelector('.card[data-component="clickstack"] .badge')?.textContent));
+    if (await page.evaluate(() => document.querySelector('.card[data-component="clickstack"] .badge')?.textContent === 'Unavailable')) {
+        console.log('      skipped: this server build has no ClickStack bundle');
+        await context.close();
+        return;
+    }
+    await page.click('.card[data-component="clickstack"] .card-foot a');
+    await page.waitForSelector('#admin-dialog[open]');
+    const text = await page.textContent('#admin-dialog');
+    check(text.includes('not recommended for production use') && text.includes('ClickStack Docs'), `popup: ${text}`);
+    check(await page.getAttribute('#admin-dialog a', 'href') === 'https://clickhouse.com/docs/use-cases/observability/clickstack/getting-started', 'docs link');
+    check(await page.evaluate(() => document.activeElement.textContent) === 'OK', 'focus not on OK');
+    await screenshot(page, '12-clickstack-notice');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    check(await page.evaluate(() => localStorage.getItem('clickstack-banner-state')) === '"closed"', 'ClickStack banner not closed');
+    /// ClickStack itself no longer shows the banner.
+    await page.waitForSelector('.frame-host[data-component="clickstack"] .frame-overlay', {state: 'detached', timeout: 60000});
+    await waitUntil(frameOf(page, '/clickstack'), () => document.body && document.body.innerText.length > 0, null, {timeout: 60000});
+    check(!(await frameOf(page, '/clickstack').evaluate(() => document.body.innerText.includes('not recommended for production use'))), 'the banner is still in ClickStack');
+    /// Once per sign-in.
+    await clickConsole(page, '#sidebar a[data-component="home"]');
+    await page.click('.card[data-component="clickstack"] .card-foot a');
+    await page.waitForTimeout(500);
+    check(!(await page.evaluate(() => document.getElementById('admin-dialog').open)), 'shown again in the same sign-in');
+    /// After signing in again it is shown again, unless the user asked not to.
+    await clickConsole(page, '#logout-button');
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await page.click('.card[data-component="clickstack"] .card-foot a');
+    await page.waitForSelector('#admin-dialog[open]');
+    await page.check('#admin-dialog input[type="checkbox"]');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await clickConsole(page, '#logout-button');
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await page.click('.card[data-component="clickstack"] .card-foot a');
+    await page.waitForTimeout(500);
+    check(!(await page.evaluate(() => document.getElementById('admin-dialog').open)), 'shown although dismissed');
     await context.close();
 });
 
@@ -584,7 +703,7 @@ await test('Narrow viewport: navigation and essential actions remain usable', as
     await page.waitForSelector('#sidebar a[data-component="schema"]', {state: 'hidden'});
     check(await page.evaluate(() => document.activeElement.id) === 'menu-button', 'focus not returned to the menu button');
     await page.click('#menu-button');
-    await page.click('#sidebar a[data-component="schema"]');
+    await clickConsole(page, '#sidebar a[data-component="schema"]');
     await page.waitForURL(`${BASE}/console/schema`);
     await page.waitForSelector('#sidebar a[data-component="schema"]', {state: 'hidden'});
     await context.close();
@@ -596,7 +715,7 @@ await test('Web Terminal: signed in with the console credentials', async () => {
     await login(page, ADMIN_USER, ADMIN_PASSWORD);
     await waitForHome(page);
     await waitUntil(page, () => !document.querySelector('.card[data-component="terminal"] .badge'));
-    await page.click('#sidebar a[data-component="terminal"]');
+    await clickConsole(page, '#sidebar a[data-component="terminal"]');
     await page.waitForSelector('.frame-host[data-component="terminal"] iframe');
     const terminal = () => frameOf(page, '/webterminal');
     await waitUntil(page, () => {

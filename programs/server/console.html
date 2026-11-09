@@ -45,6 +45,14 @@
     --accent-text: #161517;
     --accent-border: #c7cc00;
     --selected: #ececec;
+    /* Buttons, as in the SQL Console (click-ui): the main action is the black `primary` button, the others
+       are outlined. Shared by the built-in web UI pages. */
+    --primary-bg: #302e32;
+    --primary-hover: #43464c;
+    --primary-active: #161517;
+    --primary-text: #ffffff;
+    --primary-border: #302e32;
+    --border-hover: #c3c6cc;
     --focus: #1d5fd6;
     --danger: #b3261e;
     --danger-bg: #fdecea;
@@ -54,6 +62,15 @@
     --warning-bg: #fff4e0;
     --info-bg: #eaf1fd;
     --shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+    /* Administration pages, in the colors of ClickStack. */
+    --hairline: #e6e7e9;
+    --input-bg: #fbfcff;
+    --input-border: #e6e7e9;
+    --row-hover: #f6f7fa;
+    --link: #2d6bd4;
+    --tab-active: #161517;
+    --control-accent: #302e32;
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23868e96' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m8 9 4-4 4 4M16 15l-4 4-4-4'/%3E%3C/svg%3E");
     --sidebar-width: 15rem;
     --header-height: 3.25rem;
     font-family: Inter, -apple-system, "Segoe UI", Roboto, "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
@@ -74,6 +91,8 @@
     --accent-text: #1f1f1c;
     --accent-border: #faff69;
     --selected: #3a3a36;
+    --primary-border: #53575f;
+    --border-hover: #53575f;
     --focus: #8ab4ff;
     --danger: #ff9b94;
     --danger-bg: #3d1f1d;
@@ -83,6 +102,14 @@
     --warning-bg: #3a2c17;
     --info-bg: #1f2c44;
     --shadow: none;
+    --hairline: #353532;
+    --input-bg: #2a2a27;
+    --input-border: #3b3b38;
+    --row-hover: #262623;
+    --link: #faff69;
+    --tab-active: #faff69;
+    --control-accent: #faff69;
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m8 9 4-4 4 4M16 15l-4 4-4-4'/%3E%3C/svg%3E");
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -105,7 +132,7 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 .skip-link
 {
     position: absolute; left: 0.5rem; top: -3rem; z-index: 100; padding: 0.5rem 1rem;
-    background: var(--accent); color: var(--accent-text); border-radius: 4px;
+    background: var(--primary-bg); color: var(--primary-text); border-radius: 4px;
 }
 .skip-link:focus { top: 0.5rem; }
 
@@ -118,16 +145,19 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
     min-height: 2.25rem; padding: 0.35rem 0.9rem; border-radius: 4px; cursor: pointer;
     border: 1px solid var(--border); background: var(--surface); text-decoration: none; white-space: nowrap;
 }
-.button:hover { background: var(--surface-hover); }
-.button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent-border); font-weight: 600; }
-.button.primary:hover { filter: brightness(0.95); }
+.button:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+.button:active { background: var(--selected); }
+.button.primary { background: var(--primary-bg); color: var(--primary-text); border-color: var(--primary-border); font-weight: 600; }
+.button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+.button.primary:active { background: var(--primary-active); border-color: var(--primary-active); }
 .button:disabled { cursor: not-allowed; opacity: 0.6; }
 .icon-button
 {
     display: inline-flex; align-items: center; justify-content: center; width: 2.25rem; height: 2.25rem;
     border: 1px solid transparent; border-radius: 4px; background: none; cursor: pointer; padding: 0;
 }
-.icon-button:hover { background: var(--surface-hover); border-color: var(--border); }
+.icon-button:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+.icon-button:active { background: var(--selected); }
 
 .message { padding: 0.65rem 0.8rem; border-radius: 4px; border: 1px solid; overflow-wrap: anywhere; }
 .message.error { color: var(--danger); background: var(--danger-bg); border-color: currentColor; }
@@ -271,6 +301,7 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 }
 #panel-title { font-size: 1rem; font-weight: 600; }
 #panel-bar .spacer { flex: 1; }
+#console-toggle { padding: 0.35rem 0.6rem; gap: 0.3rem; }
 #panel-notice { margin: 0.6rem 0.75rem 0; }
 #panel-state { overflow-y: auto; padding: 1.5rem; }
 #panel-state > div { max-width: 46rem; display: flex; flex-direction: column; gap: 0.9rem; }
@@ -336,6 +367,8 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .button.small { min-height: 1.9rem; padding: 0.15rem 0.6rem; font-size: 0.85rem; }
 .button.danger { color: var(--danger); border-color: currentColor; }
 .button.danger.primary { background: var(--danger); color: var(--bg); border-color: var(--danger); }
+.button.danger.primary:hover { background: var(--danger); border-color: var(--danger); filter: brightness(0.92); }
+.button.danger:hover:not(.primary) { background: var(--danger-bg); border-color: currentColor; }
 .actions-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 pre.code
 {
@@ -363,6 +396,92 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; }
 .matrix td:not(:first-child), .matrix th:not(:first-child) { text-align: center; }
 .matrix td.enforced { text-align: left; font-size: 0.82rem; color: var(--muted); min-width: 14rem; }
+
+/* Administration pages and their dialog follow the look of ClickStack (Mantine): 13px text, filled inputs
+   with hairline borders, a slim header bar with a breadcrumb, compact tables, and dialogs with the labels
+   beside the fields. Sizes are in px, as in ClickStack, because the root font size of the console is larger. */
+#admin-view, #admin-dialog { font-size: 13px; line-height: 1.5; }
+#admin-view { padding: 0; }
+#admin-view > .admin-page { max-width: none; padding: 0 16px 24px; gap: 14px; }
+#admin-view .admin-page .admin-page { padding: 0; }
+#admin-view .admin-head
+{
+    position: sticky; top: 0; z-index: 3; margin: 0 -16px; padding: 8px 16px; min-height: 52px; gap: 8px;
+    background: var(--bg); border-bottom: 1px solid var(--hairline);
+}
+#admin-view .admin-head .icon { width: 16px; height: 16px; color: var(--muted); }
+#admin-view .admin-head .page-title { font-size: 14px; font-weight: 600; }
+#admin-view .admin-head .crumbs { flex-basis: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+#admin-view .admin-head .crumbs a { text-decoration: none; }
+#admin-view .admin-head .crumbs a:hover { color: var(--text); text-decoration: underline; }
+#admin-view .admin-head .button { min-height: 30px; padding: 0 12px; }
+#admin-view .note, #admin-dialog .note { font-size: 12px; }
+#admin-view .admin-page h2 { font-size: 14px; font-weight: 600; }
+#admin-view .box h3, #admin-dialog .box h3 { font-size: 13px; }
+
+#admin-view .button, #admin-dialog .button { min-height: 34px; padding: 0 14px; font-size: 13px; font-weight: 500; }
+#admin-view .button.primary, #admin-dialog .button.primary { font-weight: 600; }
+#admin-view .button.small, #admin-dialog .button.small { min-height: 26px; padding: 0 10px; font-size: 12px; }
+
+#admin-view .field, #admin-dialog .field { gap: 4px; }
+#admin-view .field label, #admin-dialog .field label { font-size: 13px; font-weight: 500; }
+#admin-view .field .hint, #admin-dialog .field .hint { font-size: 12px; }
+:is(#admin-view, #admin-dialog) :is(input:not([type]), input[type="text"], input[type="search"], input[type="password"], input[type="number"],
+    input[type="date"], input[type="datetime-local"], input[type="time"], select, textarea)
+{
+    min-height: 36px; padding: 0 12px; font-size: 13px; color: var(--text);
+    background-color: var(--input-bg); border: 1px solid var(--input-border); border-radius: 4px;
+}
+:is(#admin-view, #admin-dialog) textarea { padding: 8px 12px; min-height: 72px; }
+:is(#admin-view, #admin-dialog) select:not([multiple])
+{
+    appearance: none; padding-right: 32px; cursor: pointer;
+    background-image: var(--select-chevron); background-repeat: no-repeat; background-position: right 10px center; background-size: 14px;
+}
+:is(#admin-view, #admin-dialog) :is(input, select, textarea):focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; border-color: var(--focus); }
+:is(#admin-view, #admin-dialog) :is(input, select, textarea)::placeholder { color: var(--muted); opacity: 0.8; }
+#admin-view .toolbar :is(input, select) { min-height: 30px; }
+:is(#admin-view, #admin-dialog) :is(.check input, input[type="checkbox"], input[type="radio"]) { accent-color: var(--control-accent); }
+#admin-view .check, #admin-dialog .check { font-size: 13px; }
+:is(#admin-view, #admin-dialog) fieldset.box { padding: 8px 12px 12px; gap: 8px; margin: 0; }
+:is(#admin-view, #admin-dialog) legend { padding: 0 4px; font-size: 13px; font-weight: 500; }
+
+#admin-view .box, #admin-dialog .box { border-color: var(--hairline); border-radius: 4px; padding: 12px 16px; gap: 10px; }
+#admin-view .box h2 { font-size: 14px; }
+/* A box that only holds a table (and its pager) shows the table's own border, without a frame around it. */
+#admin-view .box:is(:has(> .table-wrap:first-child), :has(> div:only-child > .table-wrap:first-child)) { border: 0; padding: 0; background: none; }
+#admin-view .kv, #admin-dialog .kv { gap: 6px 24px; }
+
+#admin-view .tablist { border-bottom-color: var(--hairline); gap: 2px; }
+#admin-view .tablist a { padding: 8px 12px; font-size: 13px; font-weight: 500; }
+#admin-view .tablist a[aria-current="page"] { border-bottom-color: var(--tab-active); font-weight: 600; }
+
+:is(#admin-view, #admin-dialog) .table-wrap { border-color: var(--hairline); border-radius: 4px; }
+:is(#admin-view, #admin-dialog) table.data { font-size: 13px; }
+:is(#admin-view, #admin-dialog) table.data :is(th, td) { padding: 8px 10px; border-bottom-color: var(--hairline); }
+:is(#admin-view, #admin-dialog) table.data th
+{
+    font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); background: var(--bg);
+}
+:is(#admin-view, #admin-dialog) table.data tbody tr:hover td { background: var(--row-hover); }
+:is(#admin-view, #admin-dialog) :is(td a:not(.button), .note a, .message a) { color: var(--link); text-decoration: none; }
+:is(#admin-view, #admin-dialog) :is(td a:not(.button), .note a, .message a):hover { text-decoration: underline; }
+
+:is(#admin-view, #admin-dialog) .badge { font-size: 11px; font-weight: 500; padding: 1px 8px; border-color: var(--hairline); }
+:is(#admin-view, #admin-dialog) .message { border-color: transparent; padding: 10px 12px; }
+:is(#admin-view, #admin-dialog) pre.code { font-size: 12px; border-color: var(--hairline); }
+
+dialog#admin-dialog { width: min(40rem, calc(100vw - 2rem)); border-color: var(--hairline); border-radius: 8px; box-shadow: 0 12px 40px rgb(0 0 0 / 0.22); }
+dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+#admin-dialog .dialog-body { padding: 18px 20px 20px; gap: 12px; }
+#admin-dialog .dialog-body h2 { font-size: 15px; font-weight: 500; margin-bottom: 4px; }
+#admin-dialog .dialog-actions { margin-top: 4px; gap: 8px; }
+@media (min-width: 40rem)
+{
+    /* Labels beside the fields, as in the settings forms of ClickStack; not inside multi-column grids. */
+    #admin-dialog .field:not(:is(.form-grid, .toolbar) *) { display: grid; grid-template-columns: 10.5rem minmax(0, 1fr); column-gap: 16px; row-gap: 4px; align-items: center; }
+    #admin-dialog .field:not(:is(.form-grid, .toolbar) *) > :not(label) { grid-column: 2; }
+}
 
 .spinner
 {
@@ -396,6 +515,12 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
     .kv { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
     .kv dd { margin-bottom: 0.4rem; }
 }
+
+/* Focus mode: an open component gets the whole window, with its own navigation. The console header and
+   sidebar come back with the arrow in the panel bar (`#console-toggle`). After the media query, so that it
+   also applies to narrow screens. */
+#shell.focus, #shell.focus.collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "main"; }
+#shell.focus #topbar, #shell.focus #sidebar, #shell.focus #sidebar-backdrop { display: none; }
 </style>
 </head>
 <body>
@@ -446,6 +571,7 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
         <div id="home-view" hidden></div>
         <div id="panel-view" hidden>
             <div id="panel-bar">
+                <button type="button" class="button" id="console-toggle" aria-controls="sidebar" hidden></button>
                 <span id="panel-icon"></span>
                 <h1 id="panel-title" tabindex="-1"></h1>
                 <span id="panel-badges"></span>
@@ -489,6 +615,7 @@ const ICONS = {
     external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
     collapse: '<path d="M15 6l-6 6 6 6"/>',
+    maximize: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
     moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
     switch: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
@@ -497,6 +624,7 @@ const ICONS = {
     access: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M15 17.5l2 2 4-4"/>',
     limits: '<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6M4 18h16"/>',
     audit: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v2h6V3M9 10h6M9 14h6M9 18h3"/>',
+    backup: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3 1.1 0 2.1-.1 3-.3"/><path d="M19 15v6M16 18l3 3 3-3"/>',
 };
 
 function icon(name, extra_class) {
@@ -520,6 +648,9 @@ let config = {
     clickstack_url: '/clickstack/',
     /// The database with the console's own tables (audit log, component access policy).
     admin_database: 'console_admin',
+    /// S3-compatible endpoints allowed as backup destinations (comma-separated origins, such as
+    /// `https://s3.eu-west-1.amazonaws.com`). Empty: no S3 destination can be configured in the console.
+    backup_s3_endpoints: '',
 };
 let config_error = null;
 
@@ -527,8 +658,9 @@ const CATEGORIES = [
     {id: 'home', title: 'Home'},
     {id: 'workspace', title: 'Workspace'},
     {id: 'diagnostics', title: 'Diagnostics'},
-    {id: 'resources', title: 'Resources'},
     {id: 'administration', title: 'Administration'},
+    /// Last: links to documentation and other sites, at the bottom of the sidebar.
+    {id: 'resources', title: 'Resources'},
 ];
 
 /// The navigation registry: the home page cards and the sidebar are generated from it.
@@ -613,6 +745,9 @@ const COMPONENTS = [
     {id: 'admin-audit', category: 'administration', kind: 'admin', title: 'Audit Activity', icon: 'audit', page: 'audit',
      admin_needs: ['read_audit', 'read_query_log'],
      description: 'Administrative actions from this console and access changes seen by the server.'},
+    {id: 'admin-backups', category: 'administration', kind: 'admin', title: 'Backup & Restore', icon: 'backup', page: 'backups',
+     admin_needs: ['read_backups', 'setup'],
+     description: 'Backup destinations, manual and scheduled backups, restores, and recovery verification.'},
 ];
 
 const COMPONENTS_BY_ID = new Map(COMPONENTS.map(c => [c.id, c]));
@@ -1055,6 +1190,8 @@ function endSession() {
     }
     session = null;
     admin_page = null;
+    console_navigation_for = null;
+    leaveFocusMode();
     closeDialog();
     $('admin-view').replaceChildren();
     $('login-password').value = '';
@@ -1224,10 +1361,11 @@ const STATUS_BADGES = {
 };
 
 /// Destinations not listed in the sidebar and on the home page: administration pages the user cannot
-/// use, and components the console policy does not allow. Their routes still explain why.
+/// use, components the console policy does not allow, and components the user has no privileges for
+/// (their probe query is denied). Their routes still explain why, and offer to open restricted ones.
 function isListed(c) {
     const state = componentState(c);
-    return state.status !== 'hidden' && state.status !== 'denied';
+    return state.status !== 'hidden' && state.status !== 'denied' && state.status !== 'restricted';
 }
 
 function statusBadge(state) {
@@ -1261,8 +1399,11 @@ function showShell(route) {
     $('skip-link').hidden = false;
     renderConnectionStatus();
     renderSidebar();
+    /// The console navigation shown with the arrow stays only for the component it was shown on.
+    if (route.name !== 'component' || route.id !== console_navigation_for) console_navigation_for = null;
 
     if (route.name === 'not-found') {
+        leaveFocusMode();
         hideAllFrames();
         $('home-view').hidden = true;
         $('admin-view').hidden = true;
@@ -1278,6 +1419,7 @@ function showShell(route) {
     document.title = `${route.sub ? route.sub + ' · ' : ''}${c.title} · ClickHouse Console`;
     if (c.kind !== 'admin') admin_page = null;
     if (c.kind === 'home') {
+        leaveFocusMode();
         hideAllFrames();
         $('panel-view').hidden = true;
         $('admin-view').hidden = true;
@@ -1285,6 +1427,7 @@ function showShell(route) {
         renderHome();
         focusHeading($('home-view').querySelector('h1'));
     } else if (c.kind === 'admin') {
+        leaveFocusMode();
         hideAllFrames();
         $('panel-view').hidden = true;
         $('home-view').hidden = true;
@@ -1632,6 +1775,45 @@ function renderCard(c) {
 
 /// --- Panels ---
 
+/// --- Focus mode ---
+
+/// While a component's page is shown, the console header and sidebar are hidden, so the component has
+/// the whole window and its own navigation. The arrow at the start of the panel bar brings the console
+/// navigation back; it then stays visible for that component until another component is selected.
+/// Pages of the console itself (Home, Administration, and the states of components that have no page)
+/// always show the console navigation.
+let console_navigation_for = null;
+
+function setFocusMode(on) {
+    const shell = $('shell');
+    if (on) closeMobileSidebar(false);
+    const changed = shell.classList.contains('focus') !== on;
+    shell.classList.toggle('focus', on);
+    const toggle = $('console-toggle');
+    toggle.replaceChildren(on ? icon('collapse') : icon('maximize'), on ? document.createTextNode('Console') : visuallyHidden('Hide the console navigation'));
+    toggle.title = on ? 'Show the console navigation (header and sidebar)' : 'Hide the console navigation: give the component the whole window';
+    toggle.setAttribute('aria-expanded', String(!on));
+    if (!changed) return;
+    /// The terminal sizes itself to its frame; tell it when the frame size changes.
+    const terminal = frames.get('terminal');
+    if (terminal && terminal.loaded && !terminal.host.hidden) postToTerminal(terminal, {type: 'webterminal-refit', focus: false});
+}
+
+/// Shows the console navigation, without the arrow: for the pages of the console itself.
+function leaveFocusMode() {
+    $('console-toggle').hidden = true;
+    setFocusMode(false);
+}
+
+$('console-toggle').addEventListener('click', () => {
+    const route = parseRoute();
+    const on = !$('shell').classList.contains('focus');
+    console_navigation_for = on ? null : route.id;
+    setFocusMode(on);
+    /// Keep the keyboard focus on the arrow, which stays in place in both modes.
+    $('console-toggle').focus();
+});
+
 function hideAllFrames() {
     for (const [id, entry] of frames) {
         if (entry.component.keep_alive) entry.host.hidden = true;
@@ -1655,7 +1837,10 @@ function renderPanelBar(c, title) {
     $('panel-standalone').hidden = true;
 }
 
+/// A page of the console in place of a component (checking, restricted, not configured, ...): the
+/// component has no navigation of its own, so the console navigation stays.
 function renderPanelState(title, body, actions) {
+    leaveFocusMode();
     const box = $('panel-state');
     const inner = document.createElement('div');
     const heading = document.createElement('h2');
@@ -1705,6 +1890,11 @@ function showPanel(c) {
     renderPanelBar(c, c.title);
     $('panel-state').hidden = true;
 
+    if (state.status === 'denied') {
+        renderUnavailableState(c, state);
+        renderPanelNotice();
+        return;
+    }
     if (c.kind === 'link' || state.external) {
         renderExternalState(c, state);
         renderPanelNotice();
@@ -1794,6 +1984,9 @@ function openFrame(c) {
     let entry = frames.get(c.id);
     if (!entry) entry = createFrame(c);
     entry.host.hidden = false;
+    $('console-toggle').hidden = false;
+    setFocusMode(console_navigation_for !== c.id);
+    if (c.integration === 'clickstack') showClickStackNotice();
     $('panel-reload').hidden = false;
     const standalone = $('panel-standalone');
     standalone.href = frameSource(c);
@@ -1818,6 +2011,7 @@ function createFrame(c) {
     host.append(iframe, overlay);
     const entry = {component: c, host, iframe, overlay, loaded: false, notice: null, session};
     frames.set(c.id, entry);
+    if (c.integration === 'clickstack') hideClickStackBanner();
     iframe.addEventListener('load', () => onFrameLoad(entry));
     iframe.src = frameSource(c);
     $('frames').append(host);
@@ -1927,8 +2121,9 @@ window.addEventListener('message', e => {
     const entry = frames.get('terminal');
     if (!entry || e.source !== entry.iframe.contentWindow) return;
     if (e.data.type === 'webterminal-escape') {
-        /// The terminal captures every key; Escape is how keyboard users leave it.
-        const link = $('sidebar').querySelector('[aria-current="page"]');
+        /// The terminal captures every key; Escape is how keyboard users leave it: to the sidebar, or to
+        /// the arrow that shows it in focus mode.
+        const link = $('shell').classList.contains('focus') ? $('console-toggle') : $('sidebar').querySelector('[aria-current="page"]');
         if (link) link.focus();
     } else if (e.data.type === 'webterminal-closed') {
         destroyFrame('terminal');
@@ -1937,6 +2132,55 @@ window.addEventListener('message', e => {
         }
     }
 });
+
+/// --- Integration: ClickStack ---
+
+/// ClickStack shows a banner across its pages ("This is not recommended for production use ...") until it
+/// is closed with its button, which stores `"closed"` (JSON) under this key of the local storage of the
+/// origin. The console closes it the same way, before ClickStack loads, and shows the message in a popup
+/// instead, so that the banner does not take space in the panel.
+const CLICKSTACK_BANNER_KEY = 'clickstack-banner-state';
+const CLICKSTACK_NOTICE_KEY = 'console.clickstack-notice';
+const CLICKSTACK_DOCS_URL = 'https://clickhouse.com/docs/use-cases/observability/clickstack/getting-started';
+
+function hideClickStackBanner() {
+    try {
+        localStorage.setItem(CLICKSTACK_BANNER_KEY, JSON.stringify('closed'));
+    } catch (e) {
+        /// Storage is disabled: ClickStack cannot store its own state either, and shows the banner.
+    }
+}
+
+/// Shows the message of the banner the first time ClickStack is opened after signing in, unless the user
+/// asked not to see it again.
+function showClickStackNotice() {
+    if (session.clickstack_notice_shown) return;
+    session.clickstack_notice_shown = true;
+    let dismissed = false;
+    try {
+        dismissed = localStorage.getItem(CLICKSTACK_NOTICE_KEY) === 'dismissed';
+    } catch (e) {
+        /// Storage is disabled: show the message on each sign-in.
+    }
+    if (dismissed) return;
+    const again = checkbox('Do not show this again', false);
+    const docs = h('a', {href: CLICKSTACK_DOCS_URL, target: '_blank', rel: 'noopener noreferrer'}, 'ClickStack Docs', visuallyHidden(' (opens in a new tab)'));
+    const ok = button('OK', closeDialog, {className: 'primary'});
+    ok.autofocus = true;
+    openDialog('About ClickStack in ClickHouse', [
+        paragraph('This is not recommended for production use and is lacking core ClickStack features such as alerts and saved searches.'),
+        h('p', {}, 'For a proper experience, visit the ', docs, '.'),
+        h('p', {className: 'note'}, 'ClickStack uses its own connection settings: enter them in ClickStack on first use.'),
+        again.element,
+    ], [ok], {onclose: () => {
+        if (!again.input.checked) return;
+        try {
+            localStorage.setItem(CLICKSTACK_NOTICE_KEY, 'dismissed');
+        } catch (e) {
+            /// Not remembered when storage is disabled.
+        }
+    }});
+}
 
 /// --- Integration: SQL Console ---
 
@@ -2204,6 +2448,16 @@ function adminChecks(db) {
         alter_quota: grant('ALTER QUOTA ON *.*'),
         drop_quota: grant('DROP QUOTA ON *.*'),
         kill_query: grant('KILL QUERY ON *.*'),
+        read_backups: db ? read(table('backup_operations'), table('backup_events'), table('backup_destinations'), table('backup_schedules')) : null,
+        write_backup_ops: db ? grant(`INSERT ON ${table('backup_operations')}`) : null,
+        write_backup_events: db ? grant(`INSERT ON ${table('backup_events')}`) : null,
+        write_destinations: db ? grant(`INSERT ON ${table('backup_destinations')}`) : null,
+        write_schedules: db ? grant(`INSERT ON ${table('backup_schedules')}`) : null,
+        read_system_backups: read('system.backups'),
+        read_backup_log: read('system.backup_log'),
+        create_named_collection: grant('CREATE NAMED COLLECTION ON *.*'),
+        read_disk: grant('READ ON DISK'),
+        write_disk: grant('WRITE ON DISK'),
     };
 }
 
@@ -2376,11 +2630,20 @@ const COMPONENT_NATIVE = {
     'processors-profile': {view_data: {privileges: [['SELECT', 'system', 'processors_profile_log'], ['SELECT', 'system', 'query_log']]}},
     reference: {view_data: {privileges: [['SELECT', 'system', 'documentation']]}},
 };
+for (const c of COMPONENTS.filter(c => c.kind === 'link')) {
+    COMPONENT_NATIVE[c.id] = {integration: 'An external website. The policy only lists or hides the link in the console: '
+        + 'anyone who knows the address can still visit it.'};
+}
 
-/// The components the policy governs: the panels. Home, the links, and the administration pages are not
-/// governed: the links are public, and the administration pages follow the privileges of the user, so a
-/// policy mistake cannot lock the platform administrators out of this page.
-const POLICY_COMPONENTS = COMPONENTS.filter(c => c.kind === 'panel');
+/// The components the policy governs: the panels and the links of Resources. Home and the administration
+/// pages are not governed: the administration pages follow the privileges of the user, so a policy mistake
+/// cannot lock the platform administrators out of this page.
+const POLICY_COMPONENTS = COMPONENTS.filter(c => c.kind === 'panel' || c.kind === 'link');
+
+/// The capabilities that apply to a component: a link can only be opened.
+function capabilitiesOf(c) {
+    return c.kind === 'link' ? CAPABILITIES.slice(0, 1) : CAPABILITIES;
+}
 
 async function loadPolicy(current) {
     const db = current.admin.db;
@@ -2396,12 +2659,17 @@ async function loadPolicy(current) {
 }
 
 /// The capabilities that the policy rows give to a user with the given roles: for each component and
-/// capability, whether it is allowed and which rows allow it. Rules only allow; no row means not allowed.
+/// capability, whether it is allowed and which rows allow it. Rules only allow: for a component that has
+/// rules, no rule for the user means not allowed. A component that no rule mentions yet, such as one added
+/// to the console after the policy was set up, is not governed and stays open to everyone.
 function effectivePolicy(rows, user, roles) {
+    const governed = new Set(rows.map(row => row.component));
     const result = {};
     for (const c of POLICY_COMPONENTS) {
         result[c.id] = {};
-        for (const capability of CAPABILITIES) result[c.id][capability.key] = {allowed: false, sources: []};
+        for (const capability of CAPABILITIES) {
+            result[c.id][capability.key] = governed.has(c.id) ? {allowed: false, sources: []} : {allowed: true, sources: ['no rules yet (open to everyone)']};
+        }
     }
     for (const row of rows) {
         const applies = row.subject_type === 'all' || (row.subject_type === 'user' && row.subject === user)
@@ -2421,10 +2689,12 @@ function effectivePolicy(rows, user, roles) {
 /// The policy decision for a panel of the signed-in user, or null when the panel is not restricted by it.
 /// When the policy exists but cannot be read, the governed panels are not listed (fail closed).
 function policyDecision(c) {
-    if (!session || c.kind !== 'panel') return null;
+    if (!session || (c.kind !== 'panel' && c.kind !== 'link')) return null;
     const policy = session.admin.policy;
     const href = componentPath(c.id);
-    if (policy.state === 'checking') return {status: 'checking', action: 'Open', href};
+    /// While the policy loads, panels wait; links to public sites stay usable, and disappear if the policy
+    /// turns out to hide them.
+    if (policy.state === 'checking') return c.kind === 'link' ? null : {status: 'checking', action: 'Open', href};
     if (policy.state === 'unreadable' || policy.state === 'error') {
         return {status: 'denied', action: 'Details', href,
             reason: `The console access policy could not be read (${policy.message}), so the components it governs are not shown.`};
@@ -2532,10 +2802,11 @@ function select(options, value, props = {}) {
     }));
 }
 
+/// The header bar of an administration page: `crumbs` are the parent pages, shown before the title as in ClickStack.
 function pageHeader(c, title, crumbs, actions) {
     return h('div', {className: 'admin-head'},
-        crumbs ? h('div', {className: 'crumbs'}, crumbs) : null,
-        icon(c.icon), h('h1', {className: 'page-title', tabIndex: -1}, title), h('span', {className: 'spacer'}), actions || null);
+        icon(c.icon), crumbs ? h('nav', {className: 'crumbs', 'aria-label': 'Breadcrumb'}, crumbs, h('span', {'aria-hidden': 'true'}, '›')) : null,
+        h('h1', {className: 'page-title', tabIndex: -1}, title), h('span', {className: 'spacer'}), actions || null);
 }
 
 function tabList(c, sub, tabs, active) {
@@ -3076,7 +3347,7 @@ function renderUserDetails(root, route, page) {
     const c = page.component;
     const name = route.sub;
     const tab = USER_TABS.some(([key]) => key === route.tab) ? route.tab : 'overview';
-    const crumbs = [adminLink('Users', 'admin-users'), ' / ', name];
+    const crumbs = adminLink('Users', 'admin-users');
     const body = h('div', {className: 'admin-page'});
     root.replaceWith(body);
     put(body, pageHeader(c, name, crumbs));
@@ -3885,6 +4156,7 @@ function renderUserComponents(panel, ctx) {
         return dataTable([
             {title: 'Component', render: c => c.title},
             ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
+                if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note'}, 'n/a');
                 const allowed = at_login[c.id][capability.key];
                 const with_set_role = all[c.id][capability.key];
                 if (allowed.allowed) return badge('Allowed', 'ok', `By ${allowed.sources.join(', ')}.`);
@@ -3999,6 +4271,54 @@ const ROLE_TEMPLATES = [
          ...(p.query_text ? [['SELECT', 'system.processes'], ['SELECT', 'system.query_log'], ['SELECT', 'system.processors_profile_log']] : []),
          ...(p.introspection ? [['INTROSPECTION', '*.*']] : []),
      ]},
+    {id: 'backup-viewer', title: 'Backup Viewer', suggested: 'backup_viewer',
+     purpose: 'Sees the backup destinations, schedules, inventory, operations, and restore tests, and the server backup records. Cannot start, change, or delete anything.',
+     params: [],
+     grants: (p, db) => backupViewerGrants(db)},
+    {id: 'backup-operator', title: 'Backup Operator', suggested: 'backup_operator',
+     purpose: 'Starts backups of the chosen databases to the configured destinations, checks backup artifacts, and requests the deletion of backups. '
+        + 'Cannot restore, change destinations or schedules, or back up other databases.',
+     params: [{key: 'databases', title: 'Databases it backs up'},
+         {key: 's3', title: 'Include S3 destinations (WRITE ON S3 allows writing to any S3 URL that the server can reach, not only the configured destinations)', flag: true},
+         {key: 'kill', title: 'Cancel running operations (KILL QUERY on all users)', flag: true}],
+     grants: (p, db) => [
+         ...backupViewerGrants(db),
+         ['INSERT', `${db}.backup_operations`], ['INSERT', `${db}.backup_events`], ['INSERT', `${db}.audit_log`],
+         ...p.databases.map(d => ['BACKUP, SELECT, SHOW', `${d}.*`]),
+         ['READ, WRITE ON DISK', null],
+         ...(p.s3 ? [['READ, WRITE ON S3', null], ['NAMED COLLECTION', 'console_backup_*']] : []),
+         ['CREATE DATABASE, DROP DATABASE', 'console_inspect_*.*'],
+         ...(p.kill ? [['KILL QUERY', '*.*']] : []),
+     ]},
+    {id: 'restore-operator', title: 'Restore Operator', suggested: 'restore_operator',
+     purpose: 'Restores backups into new databases whose names start with restore_, and runs restore tests. '
+        + 'Cannot restore over existing databases, drop databases other than its restore tests, or restore users and roles.',
+     params: [{key: 's3', title: 'Include S3 destinations (READ ON S3 allows reading any S3 URL that the server can reach)', flag: true}],
+     grants: (p, db) => [
+         ...backupViewerGrants(db),
+         ['INSERT', `${db}.backup_operations`], ['INSERT', `${db}.backup_events`], ['INSERT', `${db}.audit_log`],
+         ['READ ON DISK', null],
+         ...(p.s3 ? [['READ ON S3', null], ['NAMED COLLECTION', 'console_backup_*']] : []),
+         ['SHOW, SELECT, INSERT, CREATE DATABASE, CREATE TABLE, CREATE VIEW, CREATE DICTIONARY', 'restore_*.*'],
+         ['SHOW, SELECT, INSERT, CREATE DATABASE, CREATE TABLE, CREATE VIEW, CREATE DICTIONARY, DROP DATABASE', 'console_verify_*.*'],
+         ['CREATE DATABASE, DROP DATABASE', 'console_inspect_*.*'],
+     ]},
+    {id: 'backup-admin', title: 'Backup Administrator', suggested: 'backup_admin',
+     purpose: 'Everything of the backup and restore operators for the chosen databases, plus destinations (with their S3 credentials) and schedules, and cancelling operations. '
+        + 'Restoring users and roles additionally needs the access management privileges, which this template does not include.',
+     params: [{key: 'databases', title: 'Databases it backs up'}],
+     grants: (p, db) => [
+         ...backupViewerGrants(db),
+         ['INSERT', `${db}.backup_operations`], ['INSERT', `${db}.backup_events`], ['INSERT', `${db}.audit_log`],
+         ['INSERT', `${db}.backup_destinations`], ['INSERT', `${db}.backup_schedules`],
+         ...p.databases.map(d => ['BACKUP, SELECT, SHOW', `${d}.*`]),
+         ['READ, WRITE ON DISK', null], ['READ, WRITE ON S3', null],
+         ['NAMED COLLECTION, CREATE NAMED COLLECTION, ALTER NAMED COLLECTION, DROP NAMED COLLECTION', 'console_backup_*'],
+         ['SHOW, SELECT, INSERT, CREATE DATABASE, CREATE TABLE, CREATE VIEW, CREATE DICTIONARY', 'restore_*.*'],
+         ['SHOW, SELECT, INSERT, CREATE DATABASE, CREATE TABLE, CREATE VIEW, CREATE DICTIONARY, DROP DATABASE', 'console_verify_*.*'],
+         ['CREATE DATABASE, DROP DATABASE', 'console_inspect_*.*'],
+         ['KILL QUERY', '*.*'],
+     ]},
     {id: 'auditor', title: 'Auditor', suggested: 'auditor',
      purpose: 'Reads users, roles, profiles, quotas, row policies, and their grants, the console audit log and policy, and the server query and session logs. Cannot change anything.',
      params: [],
@@ -4008,6 +4328,11 @@ const ROLE_TEMPLATES = [
          ['SELECT', 'system.query_log'], ['SELECT', 'system.session_log'],
      ]},
 ];
+
+function backupViewerGrants(db) {
+    return [...['backup_destinations', 'backup_schedules', 'backup_operations', 'backup_events', 'audit_log'].map(t => ['SELECT', `${db}.${t}`]),
+        ['SELECT', 'system.backups'], ['SELECT', 'system.backup_log'], ['SELECT', 'system.disks'], ['SHOW DATABASES', '*.*']];
+}
 
 /// `GRANT` statements for a template. Targets are quoted here: `db.*`, `db.table`, `*.*`, or a user name
 /// pattern (`app_*`, written as is after validation).
@@ -4019,13 +4344,17 @@ function templateStatements(template, params, role) {
         const dot = target.indexOf('.');
         if (dot < 0) return target;
         const [database, table] = [target.slice(0, dot), target.slice(dot + 1)];
-        return `${quoteIdentifier(database)}.${table === '*' ? '*' : quoteIdentifier(table)}`;
+        /// A database prefix pattern (`restore_*`) is a wildcard only when it is not quoted.
+        const db_sql = /^[A-Za-z_][A-Za-z0-9_]*\*$/.test(database) ? database : quoteIdentifier(database);
+        return `${db_sql}.${table === '*' ? '*' : quoteIdentifier(table)}`;
     };
     return template.grants(params, db).map(item => {
         if (item.role) {
             return {description: `Grant role ${item.role} WITH ADMIN OPTION`, sql: `GRANT${onCluster()} ${quoteIdentifier(item.role)} TO ${quoteIdentifier(role)} WITH ADMIN OPTION`};
         }
         const [privileges, target] = item;
+        /// Source privileges carry their target: `READ ON S3` (granted without `ON db.table`).
+        if (target === null) return {description: `Grant ${privileges}`, sql: `GRANT${onCluster()} ${privileges} TO ${quoteIdentifier(role)}`};
         return {description: `Grant ${privileges} ON ${target}`, sql: `GRANT${onCluster()} ${privileges} ON ${quote_target(target)} TO ${quoteIdentifier(role)}`};
     });
 }
@@ -4083,9 +4412,9 @@ function renderTemplates() {
 }
 
 function templatePreview(template) {
-    const sample = {databases: ['<database>'], pattern: '<users>', roles: ['<role>'], kill: true, query_text: true, introspection: true,
+    const sample = {databases: ['<database>'], pattern: '<users>', roles: ['<role>'], kill: true, s3: true, query_text: true, introspection: true,
         reader: `${session.admin.db || 'console_admin'}_reader`};
-    return template.grants(sample, session.admin.db || 'console_admin').map(item => item.role ? `${item.role} WITH ADMIN OPTION` : `${item[0]} ON ${item[1]}`)
+    return template.grants(sample, session.admin.db || 'console_admin').map(item => item.role ? `${item.role} WITH ADMIN OPTION` : (item[1] === null ? item[0] : `${item[0]} ON ${item[1]}`))
         .join('\n') + (template.params.some(p => p.flag) ? '\n(some lines are optional)' : '');
 }
 
@@ -4143,7 +4472,7 @@ function renderRoleDetails(root, route, page) {
     const tab = ROLE_TABS.some(([key]) => key === route.tab) ? route.tab : 'privileges';
     const body = h('div', {className: 'admin-page'});
     root.replaceWith(body);
-    put(body, pageHeader(c, name, [adminLink('Roles & Permissions', 'admin-roles'), ' / ', name]));
+    put(body, pageHeader(c, name, adminLink('Roles & Permissions', 'admin-roles')));
     const content = h('div', {className: 'admin-page'});
     put(body, content);
     loadInto(page, content, async () => {
@@ -4267,6 +4596,7 @@ function renderRoleComponents(panel, ctx) {
     put(box, dataTable([
         {title: 'Component', render: c => c.title},
         ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
+            if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note'}, 'n/a');
             const row = rows.find(r => r.component === c.id);
             return row && row[capability.key] ? badge('Allowed', 'ok') : '—';
         }})),
@@ -4447,7 +4777,7 @@ async function setupDialog() {
         const quoted = quoteIdentifier(db);
         const correlation_id = crypto.randomUUID();
         const seed = POLICY_COMPONENTS.map(component => JSON.stringify({subject_type: 'all', subject: '', component: component.id,
-            open: true, view_data: true, run_queries: true, administer: false}));
+            open: true, view_data: component.kind === 'panel', run_queries: component.kind === 'panel', administer: false}));
         const steps = [
             {description: `Create the database ${db}`, sql: `CREATE DATABASE IF NOT EXISTS ${quoted}`},
             ...Object.entries(ADMIN_TABLES).map(([table, ddl]) => ({description: `Create the table ${db}.${table}`,
@@ -4504,13 +4834,21 @@ function renderPolicyMatrix(page, container, subject) {
     const rows = admin.policy.rows || [];
     const editable = admin.can.write_policy;
     const current = new Map(rows.filter(row => row.subject_type === subject.type && row.subject === subject.name).map(row => [row.component, row]));
+    /// Components that no rule mentions are open to everyone: for all users, show them allowed, so that
+    /// saving turns that into a rule. For a role or user, nothing is set for them yet.
+    const governed = new Set(rows.map(row => row.component));
+    const initially = (c, key) => {
+        const row = current.get(c.id);
+        if (row) return !!row[key];
+        return subject.type === 'all' && !governed.has(c.id) && (key === 'open' || (c.kind === 'panel' && key !== 'administer'));
+    };
     const boxes = new Map();
     const native_cells = new Map();
     const table = dataTable([
-        {title: 'Component', render: c => h('strong', {}, c.title)},
+        {title: 'Component', render: c => [h('strong', {}, c.title), h('div', {className: 'note'}, CATEGORIES.find(category => category.id === c.category).title)]},
         ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
-            const row = current.get(c.id);
-            const input = h('input', {type: 'checkbox', checked: !!(row && row[capability.key]), disabled: !editable,
+            if (!capabilitiesOf(c).includes(capability)) return h('span', {className: 'note', title: 'Does not apply: a link can only be opened.'}, '—');
+            const input = h('input', {type: 'checkbox', checked: initially(c, capability.key), disabled: !editable,
                 'aria-label': `${capability.title} ${c.title}`});
             input.addEventListener('change', () => {
                 /// The other capabilities need Open, and Open is cleared together with them.
@@ -4521,7 +4859,9 @@ function renderPolicyMatrix(page, container, subject) {
             boxes.set(c.id, {...boxes.get(c.id), [capability.key]: input});
             return input;
         }})),
-        {title: 'Enforced outside the console by', className: 'enforced', render: c => componentEnforcement(c)},
+        {title: 'Enforced outside the console by', className: 'enforced', render: c => [
+            governed.has(c.id) ? null : h('div', {}, badge('No rules yet: open to everyone', 'warn')),
+            componentEnforcement(c)]},
         ...(subject.type === 'all' ? [] : [{title: 'Native privileges', className: 'enforced', render: c => {
             const cell = h('div', {}, h('span', {className: 'note'}, '…'));
             native_cells.set(c.id, cell);
@@ -4533,10 +4873,10 @@ function renderPolicyMatrix(page, container, subject) {
         const changes = [];
         for (const c of POLICY_COMPONENTS) {
             const set = boxes.get(c.id);
-            const values = Object.fromEntries(CAPABILITIES.map(capability => [capability.key, set[capability.key].checked]));
-            const before = current.get(c.id);
-            const unchanged = before ? CAPABILITIES.every(capability => !!before[capability.key] === values[capability.key])
-                : CAPABILITIES.every(capability => !values[capability.key]);
+            const values = Object.fromEntries(CAPABILITIES.map(capability => [capability.key, !!(set[capability.key] && set[capability.key].checked)]));
+            /// Compared with what the matrix showed at first, which for a component without rules is the
+            /// default (open to everyone for all users).
+            const unchanged = CAPABILITIES.every(capability => (initially(c, capability.key) && capabilitiesOf(c).includes(capability)) === values[capability.key]);
             if (!unchanged) changes.push({component: c, values});
         }
         if (!changes.length) {
@@ -5081,7 +5421,8 @@ ADMIN_PAGES.audit = (root, route, page) => {
     const admin = session.admin;
     const tab = AUDIT_TABS.some(([key]) => key === route.tab) ? route.tab : (admin.can.read_audit ? 'console' : 'server');
     const results = h('div', {});
-    const q = h('input', {type: 'search', autocomplete: 'off', spellcheck: false, placeholder: tab === 'console' ? 'Actor, target, or correlation ID' : 'User or text'});
+    const q = h('input', {type: 'search', autocomplete: 'off', spellcheck: false, placeholder: tab === 'console' ? 'Actor, target, or correlation ID' : 'User or text',
+        value: new URLSearchParams(location.search).get('q') || ''});
     const days = select([['1', 'Last day'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['365', 'Last year']], tab === 'console' ? '30' : '7');
     const result = select([['', 'Any result'], ['success', 'Success'], ['partial', 'Partly applied'], ['failure', 'Failed']], '');
     const coverage = tab === 'console'
@@ -5109,6 +5450,1765 @@ ADMIN_PAGES.audit = (root, route, page) => {
             : 'Not available: your user cannot read system.query_log.')));
     if (available) load();
 };
+
+/// --- Administration: Backup & Restore ---
+
+/// Backup and restore run in the server (`BACKUP ... ASYNC`, `RESTORE ... ASYNC`): they continue when the
+/// browser closes, and `system.backups` shows them while the server runs. The console keeps its own records
+/// in the admin database, because `system.backups` is lost on restart and `system.backup_log` is a log of one
+/// server, kept only as long as its TTL:
+/// - `backup_destinations`: approved destinations. S3 credentials are in a named collection on the server;
+///   the row only names it.
+/// - `backup_schedules`: automated backups, run by the backup worker (`utils/web-console/backup_worker.mjs`).
+/// - `backup_operations`: one row per submitted operation, written once. The platform operation ID is also the
+///   native `id` of the BACKUP or RESTORE, so the two can always be matched.
+/// - `backup_events`: state changes and check results of operations, appended by the console and the worker.
+/// The server fills in who wrote each row, as for the audit log.
+const BACKUP_TABLES = {
+    backup_destinations: () => `(
+    id String,
+    name String,
+    description String,
+    type Enum8('disk' = 1, 's3' = 2),
+    disk String,
+    named_collection String,
+    endpoint String,
+    bucket String,
+    prefix String,
+    credential_ref String,
+    allow_http Bool DEFAULT false,
+    enabled Bool,
+    allowed_databases Array(String),
+    test_result String,
+    tested_at Nullable(DateTime64(3, 'UTC')),
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY id`,
+    backup_schedules: () => `(
+    id String,
+    name String,
+    enabled Bool,
+    destination_id String,
+    databases Array(String),
+    tables Array(String),
+    structure_only Bool,
+    strategy Enum8('full' = 1, 'incremental' = 2),
+    full_every UInt16,
+    frequency Enum8('hourly' = 1, 'daily' = 2, 'weekly' = 3),
+    minute UInt8,
+    hour UInt8,
+    weekday UInt8,
+    timezone String,
+    keep_chains UInt16,
+    on_missing_base Enum8('fail' = 1, 'full' = 2),
+    verify Bool,
+    notify_ref String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY id`,
+    backup_operations: () => `(
+    op_id String,
+    kind Enum8('backup' = 1, 'restore' = 2, 'verify' = 3, 'delete' = 4, 'test' = 5),
+    requested_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    requested_by String MATERIALIZED currentUser(),
+    server String,
+    destination_id String,
+    artifact String,
+    scope String,
+    strategy String,
+    base_op_id String,
+    schedule_id String,
+    scheduled_for Nullable(DateTime64(3, 'UTC')),
+    target String,
+    parameters String,
+    expected String,
+    CONSTRAINT requested_by_is_writer CHECK requested_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY op_id`,
+    backup_events: () => `(
+    op_id String,
+    at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    recorded_by String MATERIALIZED currentUser(),
+    kind Enum8('state' = 1, 'check' = 2),
+    state Enum8('queued' = 1, 'running' = 2, 'succeeded' = 3, 'failed' = 4, 'unknown' = 5, 'cancelled' = 6, 'deleted' = 7, 'passed' = 8),
+    name String,
+    native_id String,
+    query_id String,
+    error String,
+    num_files UInt64,
+    total_size UInt64,
+    details String,
+    CONSTRAINT recorded_by_is_writer CHECK recorded_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (op_id, at)`,
+};
+
+const BACKUP_TABS = [['overview', 'Overview'], ['backups', 'Backups'], ['restore', 'Restore'], ['schedules', 'Schedules'],
+    ['destinations', 'Destinations'], ['operations', 'Operations'], ['verification', 'Recovery verification']];
+
+const TERMINAL_STATES = ['succeeded', 'failed', 'cancelled', 'deleted'];
+
+const STATE_BADGES = {
+    queued: ['Queued', ''], running: ['Running', 'warn'], succeeded: ['Succeeded', 'ok'], failed: ['Failed', 'bad'],
+    unknown: ['Unknown', 'warn'], cancelled: ['Cancelled', ''], deleted: ['Deleted', ''], passed: ['Passed', 'ok'],
+};
+
+function stateBadge(state, title) {
+    const [text, className] = STATE_BADGES[state] || [state, ''];
+    return badge(text, className, title);
+}
+
+function formatBytes(bytes) {
+    if (bytes === null || bytes === undefined || bytes === '') return '—';
+    let value = Number(bytes);
+    for (const unit of ['B', 'KiB', 'MiB', 'GiB', 'TiB']) {
+        if (value < 1024 || unit === 'TiB') return `${unit === 'B' ? value : value.toFixed(1)} ${unit}`;
+        value /= 1024;
+    }
+    return `${bytes} B`;
+}
+
+function formatSeconds(seconds) {
+    if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '—';
+    if (seconds < 1) return '< 1 s';
+    if (seconds < 120) return `${Math.round(seconds)} s`;
+    if (seconds < 7200) return `${Math.round(seconds / 60)} min`;
+    return `${(seconds / 3600).toFixed(1)} h`;
+}
+
+function parseJSON(text, fallback) {
+    if (!text) return fallback;
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        /// Written by another tool or truncated: show what is known.
+        return fallback;
+    }
+}
+
+function shortId(id) {
+    return id.length > 13 ? id.slice(0, 8) : id;
+}
+
+function utcNowCompact() {
+    return new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z').replace('T', '-');
+}
+
+/// A path inside a destination: letters, digits, `._-/`, no empty or `..` segments.
+function backupPathError(path) {
+    if (!path) return 'Enter a path.';
+    if (!/^[A-Za-z0-9._\/-]+$/.test(path)) return 'Use only letters, digits, and . _ - / in paths.';
+    if (path.split('/').some(segment => !segment || segment === '.' || segment === '..')) return 'Paths cannot have empty, . or .. segments.';
+    return null;
+}
+
+/// The location expression of a backup: `Disk('disk', 'prefix/path')` or `S3(collection, 'path')`. The named
+/// collection of an S3 destination holds the endpoint, the bucket, the prefix, and the credentials.
+function backupLocationSQL(destination, artifact) {
+    if (destination.type === 'disk') {
+        return `Disk(${quoteString(destination.disk)}, ${quoteString(destination.prefix ? `${destination.prefix}/${artifact}` : artifact)})`;
+    }
+    return `S3(${quoteIdentifier(destination.named_collection)}, ${quoteString(artifact)})`;
+}
+
+function destinationLabel(destination) {
+    if (!destination) return 'unknown destination';
+    return destination.type === 'disk' ? `disk ${destination.disk}${destination.prefix ? `/${destination.prefix}` : ''}`
+        : `${destination.endpoint}/${destination.bucket}${destination.prefix ? `/${destination.prefix}` : ''}`;
+}
+
+/// The scope of a backup: `{databases: [...], tables: [[db, table], ...], partitions: [...], structure_only,
+/// access_entities}`. Whole databases, or tables of one database (optionally some partitions of one table).
+function backupScopeSQL(scope) {
+    const items = [];
+    for (const db of scope.databases || []) items.push(`DATABASE ${quoteIdentifier(db)}`);
+    for (const [db, table] of scope.tables || []) {
+        let item = `TABLE ${quoteIdentifier(db)}.${quoteIdentifier(table)}`;
+        if (scope.partitions && scope.partitions.length) item += ` PARTITIONS ${scope.partitions.map(quoteString).join(', ')}`;
+        items.push(item);
+    }
+    if (scope.access_entities) {
+        for (const table of ['users', 'roles', 'settings_profiles', 'row_policies', 'quotas']) items.push(`TABLE system.${table}`);
+    }
+    return items.join(', ');
+}
+
+function scopeText(scope) {
+    const parts = [];
+    if ((scope.databases || []).length) parts.push(`databases ${scope.databases.join(', ')}`);
+    if ((scope.tables || []).length) parts.push(`tables ${scope.tables.map(([db, table]) => `${db}.${table}`).join(', ')}`);
+    if ((scope.partitions || []).length) parts.push(`partitions ${scope.partitions.join(', ')}`);
+    if (scope.access_entities) parts.push('access entities');
+    if (scope.structure_only) parts.push('structure only');
+    return parts.join('; ') || '—';
+}
+
+/// The source databases a scope reads, which is also the set of `Backup` engine databases needed to open it.
+function scopeDatabases(scope) {
+    return [...new Set([...(scope.databases || []), ...(scope.tables || []).map(([db]) => db)])];
+}
+
+/// --- Backup & Restore: data ---
+
+async function loadBackupState() {
+    const db = quoteIdentifier(session.admin.db);
+    const [destinations, schedules, operations] = await Promise.all([
+        adminRows(`SELECT id, name, description, toString(type) AS type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled,
+                allowed_databases, test_result, if(tested_at IS NULL, '', formatDateTime(tested_at, '%Y-%m-%d %H:%i:%S')) AS tested_at, updated_by
+            FROM ${db}.backup_destinations FINAL WHERE NOT deleted ORDER BY name`),
+        adminRows(`SELECT id, name, enabled, destination_id, databases, tables, structure_only, toString(strategy) AS strategy, full_every,
+                toString(frequency) AS frequency, minute, hour, weekday, timezone, keep_chains, toString(on_missing_base) AS on_missing_base, verify, notify_ref, updated_by
+            FROM ${db}.backup_schedules FINAL WHERE NOT deleted ORDER BY name`),
+        adminRows(`SELECT op_id, toString(kind) AS kind, formatDateTime(o.requested_at, '%Y-%m-%d %H:%i:%S') AS requested_at,
+                toUnixTimestamp64Milli(o.requested_at) AS requested_ms, requested_by, server, destination_id, artifact, scope, strategy, base_op_id, schedule_id,
+                if(o.scheduled_for IS NULL, '', formatDateTime(o.scheduled_for, '%Y-%m-%d %H:%i:%S')) AS scheduled_for, target, parameters, expected
+            FROM ${db}.backup_operations AS o ORDER BY o.requested_at DESC LIMIT 1 BY op_id LIMIT 2000`),
+    ]);
+    const events = operations.length ? await adminRows(`SELECT op_id, formatDateTime(e.at, '%Y-%m-%d %H:%i:%S') AS at, toUnixTimestamp64Milli(e.at) AS at_ms, recorded_by,
+            toString(kind) AS kind, toString(state) AS state, name, native_id, query_id, error, num_files, total_size, details
+        FROM ${db}.backup_events AS e WHERE op_id IN {ops:Array(String)} ORDER BY e.at`, {ops: arrayParam(operations.map(op => op.op_id))}) : [];
+    const worker = await adminRows(`SELECT op_id, formatDateTime(max(e.at), '%Y-%m-%d %H:%i:%S') AS last_at, dateDiff('second', max(e.at), now64(3)) AS age
+        FROM ${db}.backup_events AS e WHERE op_id LIKE 'worker:%' AND e.at > now64(3) - INTERVAL 7 DAY GROUP BY op_id ORDER BY max(e.at) DESC`).catch(e => {
+        if (e instanceof AdminSessionChanged) throw e;
+        return [];
+    });
+    const by_op = new Map(operations.map(op => [op.op_id, {...op, scope: parseJSON(op.scope, {}), parameters: parseJSON(op.parameters, {}),
+        expected: parseJSON(op.expected, null), target: parseJSON(op.target, {}), events: [], checks: [], state: 'queued'}]));
+    for (const event of events) {
+        const op = by_op.get(event.op_id);
+        if (!op) continue;
+        op.events.push(event);
+        if (event.kind === 'state') {
+            op.state = event.state;
+            op.state_at = event.at;
+            op.state_at_ms = Number(event.at_ms);
+            if (event.native_id) op.native_id = event.native_id;
+            if (event.query_id) op.query_id = event.query_id;
+            if (event.error) op.error = event.error;
+            if (Number(event.total_size)) op.total_size = Number(event.total_size);
+            if (Number(event.num_files)) op.num_files = Number(event.num_files);
+            const details = parseJSON(event.details, {});
+            if (details.duration_s !== undefined) op.duration_s = details.duration_s;
+            if (event.state === 'running' && !op.started_ms) op.started_ms = Number(event.at_ms);
+            if (TERMINAL_STATES.includes(event.state) && event.state !== 'deleted') op.finished_ms = Number(event.at_ms);
+            if (event.state === 'deleted') op.deleted = true;
+        } else {
+            op.checks.push({...event, details: parseJSON(event.details, {})});
+        }
+    }
+    return {destinations, schedules, operations: [...by_op.values()], destinations_by_id: new Map(destinations.map(d => [d.id, d])), worker};
+}
+
+/// The incremental chain of a backup, from the backup itself to its full base: `{chain, missing}`.
+function backupChain(state, op) {
+    const ops = new Map(state.operations.map(o => [o.op_id, o]));
+    const chain = [op];
+    let current = op;
+    while (current.base_op_id) {
+        const base = ops.get(current.base_op_id);
+        if (!base) return {chain, missing: `the base ${current.base_op_id} has no record`};
+        if (base.deleted) return {chain, missing: `the base ${shortId(base.op_id)} was deleted`};
+        if (base.state !== 'succeeded') return {chain, missing: `the base ${shortId(base.op_id)} did not succeed`};
+        chain.push(base);
+        if (chain.length > 1000) return {chain, missing: 'the chain has a cycle'};
+        current = base;
+    }
+    return {chain, missing: null};
+}
+
+/// Backups that depend on `op` (directly or through other incremental backups) and are not deleted.
+function backupDescendants(state, op) {
+    const result = [];
+    const queue = [op.op_id];
+    while (queue.length) {
+        const id = queue.shift();
+        for (const child of state.operations.filter(o => o.kind === 'backup' && o.base_op_id === id && !o.deleted && o.state !== 'failed')) {
+            result.push(child);
+            queue.push(child.op_id);
+        }
+    }
+    return result;
+}
+
+/// Whether a backup can be deleted now, and why not.
+function retentionBlock(state, op) {
+    const descendants = backupDescendants(state, op);
+    if (descendants.length) return `Required as the base of ${descendants.map(d => shortId(d.op_id)).join(', ')}.`;
+    const in_use = state.operations.filter(o => ['restore', 'verify'].includes(o.kind) && o.base_op_id === op.op_id && !TERMINAL_STATES.includes(o.state));
+    if (in_use.length) return `Used by the running operation ${shortId(in_use[0].op_id)}.`;
+    if (!TERMINAL_STATES.includes(op.state)) return 'The backup operation has not finished.';
+    const deletion = state.operations.find(o => o.kind === 'delete' && o.base_op_id === op.op_id && !['failed', 'cancelled'].includes(o.state));
+    if (deletion) return `A deletion is already requested (${shortId(deletion.op_id)}).`;
+    return null;
+}
+
+/// --- Backup & Restore: reconciliation ---
+
+const NATIVE_STATES = {
+    CREATING_BACKUP: 'running', RESTORING: 'running', BACKUP_CREATED: 'succeeded', RESTORED: 'succeeded',
+    BACKUP_FAILED: 'failed', RESTORE_FAILED: 'failed', BACKUP_CANCELLED: 'cancelled', RESTORE_CANCELLED: 'cancelled',
+};
+
+/// Finds the actual state of an operation that is not finished in the console's records: in `system.backups`
+/// (operations since the server started), then `system.backup_log`, then, for a backup, the artifact itself.
+/// Returns an event to record, or null when nothing changed or nothing is known.
+async function reconcileOperation(state, op) {
+    if (TERMINAL_STATES.includes(op.state) || !['backup', 'restore', 'verify'].includes(op.kind)) return null;
+    const native_id = op.native_id || op.op_id;
+    const can = session.admin.can;
+    let row = null;
+    let source = null;
+    if (can.read_system_backups) {
+        const rows = await adminRows(`SELECT toString(status) AS status, error, query_id, num_files, total_size,
+                dateDiff('millisecond', start_time, if(end_time > start_time, end_time, now64(6))) / 1000 AS duration_s
+            FROM system.backups WHERE id = {id:String}`, {id: native_id});
+        if (rows.length) {
+            row = rows[0];
+            source = 'system.backups';
+        }
+    }
+    if (!row && can.read_backup_log) {
+        const rows = await adminRows(`SELECT toString(status) AS status, error, query_id, num_files, total_size,
+                dateDiff('millisecond', start_time, if(end_time > start_time, end_time, start_time)) / 1000 AS duration_s
+            FROM system.backup_log WHERE id = {id:String} ORDER BY event_time_microseconds DESC LIMIT 1`, {id: native_id});
+        if (rows.length) {
+            row = rows[0];
+            source = 'system.backup_log';
+        }
+        /// The log's last record says it is still running, but the server does not list it: the server stopped
+        /// before the operation finished (the log keeps only the start). Decide from the artifact below.
+        if (row && can.read_system_backups && NATIVE_STATES[row.status] === 'running') row = null;
+    }
+    if (row) {
+        const mapped = NATIVE_STATES[row.status] || 'unknown';
+        if (mapped === op.state && mapped !== 'running') return null;
+        if (mapped === 'running' && op.state === 'running') return null;
+        return {state: mapped, native_id, query_id: row.query_id, error: row.error ? maskSecrets(row.error.split('\n')[0]) : '',
+            num_files: Number(row.num_files), total_size: Number(row.total_size),
+            details: {source, duration_s: Number(row.duration_s), native_status: row.status}};
+    }
+    /// No record on this server. Give a fresh submission time to appear before concluding anything.
+    if (Date.now() - op.requested_ms < 60000) return null;
+    if (op.kind === 'backup') {
+        const destination = state.destinations_by_id.get(op.destination_id);
+        if (!destination) return null;
+        const probe = await probeBackupArtifact(destination, op);
+        if (probe.ok) {
+            return {state: 'succeeded', native_id, details: {source: 'artifact', note: 'The server has no record of the operation (it may have restarted), but the backup can be opened.'}};
+        }
+        if (probe.not_found) {
+            return {state: 'failed', native_id, error: 'The operation is not running on this server, it has no log record, and no complete backup exists at its location: it was interrupted, most likely by a server restart.',
+                details: {source: 'artifact'}};
+        }
+        return {state: 'unknown', native_id, error: `The state cannot be determined: ${probe.error}`, details: {source: 'artifact'}};
+    }
+    return {state: 'unknown', native_id, error: 'The server has no record of this operation (it may have restarted). Check the target before running it again.',
+        details: {source: 'none'}};
+}
+
+/// Reads rows that only add detail to a dialog: a failure is returned as `{error}` and shown there, instead
+/// of failing the dialog. Never substitute a value for what could not be read.
+/// For dialogs opened by a button: shows why the dialog could not be opened.
+function showFailure(title) {
+    return e => { if (!(e instanceof AdminSessionChanged)) openDialog(title, [errorBox(e)], [button('Close', closeDialog)]); };
+}
+
+function detailRows(sql, params) {
+    return adminRows(sql, params).then(rows => ({rows}), e => {
+        if (e instanceof AdminSessionChanged) throw e;
+        return {rows: null, error: e.message};
+    });
+}
+
+/// Settings for the console's own short reads and writes of a destination (its test and the artifact probes).
+/// The server retries S3 requests of backups `backup_restore_s3_retry_attempts` times (1000 by default, with
+/// backoff up to 5 seconds), so an unreachable endpoint would block them for about an hour: fail in seconds instead.
+function quickCheckSettings(destination) {
+    return destination.type === 's3' ? {backup_restore_s3_retry_attempts: 2} : {};
+}
+
+/// Opens a backup read-only with the `Backup` database engine, to check that it is complete and readable
+/// (incremental backups also need their base). This reads the backup's metadata and lists its tables; it is
+/// not a test restore. Returns `{ok, tables, not_found, error}`.
+async function probeBackupArtifact(destination, op, with_counts = false) {
+    const databases = scopeDatabases(op.scope);
+    if (!databases.length) return {ok: false, error: 'The backup has no database in its scope (access entities only cannot be opened this way).'};
+    const tables = [];
+    for (const source_db of databases) {
+        const name = `console_inspect_${op.op_id.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}_${Math.random().toString(36).slice(2, 8)}`;
+        const create = await runQuery(session, `CREATE DATABASE ${quoteIdentifier(name)} ENGINE = Backup(${quoteString(source_db)}, ${backupLocationSQL(destination, op.artifact)})`,
+            session.controller.signal, 60000, {raw: true, settings: quickCheckSettings(destination)});
+        if (!create.ok) {
+            const not_found = /BACKUP_NOT_FOUND|not found/i.test(create.detail || '');
+            let error = maskSecrets(create.detail || create.message);
+            /// After a timeout, the server may still create the database.
+            if (create.kind === 'timeout') {
+                const drop = await runQuery(session, `DROP DATABASE IF EXISTS ${quoteIdentifier(name)} SYNC`, session.controller.signal, 60000, {raw: true});
+                if (!drop.ok) error += ` The database ${name} may remain; drop it: ${drop.detail || drop.message}`;
+            }
+            return {ok: false, not_found, error};
+        }
+        try {
+            const rows = await adminRows(`SELECT name, engine, total_rows FROM system.tables WHERE database = {db:String} ORDER BY name`, {db: name});
+            for (const row of rows) {
+                const entry = {database: source_db, table: row.name, engine: row.engine, rows: row.total_rows === null ? null : Number(row.total_rows)};
+                if (with_counts && /MergeTree|Log|Memory/.test(row.engine)) {
+                    const count = await adminRows(`SELECT count() AS n FROM ${quoteIdentifier(name)}.${quoteIdentifier(row.name)}`);
+                    entry.read_rows = Number(count[0].n);
+                }
+                tables.push(entry);
+            }
+        } finally {
+            await runQuery(session, `DROP DATABASE IF EXISTS ${quoteIdentifier(name)}`, session.controller.signal, 60000, {raw: true});
+        }
+    }
+    return {ok: true, tables};
+}
+
+async function recordBackupEvent(op_id, event) {
+    const row = {op_id, kind: event.kind || 'state', state: event.state, name: event.name || '', native_id: event.native_id || '',
+        query_id: event.query_id || '', error: maskSecrets(event.error || ''), num_files: event.num_files || 0, total_size: event.total_size || 0,
+        details: JSON.stringify(event.details || {})};
+    const result = await runQuery(session, `INSERT INTO ${quoteIdentifier(session.admin.db)}.backup_events (op_id, kind, state, name, native_id, query_id, error, num_files, total_size, details) FORMAT JSONEachRow\n${JSON.stringify(row)}`,
+        session.controller.signal, 30000, {raw: true});
+    if (!result.ok) throw new AdminQueryError(result);
+}
+
+/// Reconciles the unfinished operations, records what changed (when the user may), and writes audit records
+/// for completions. Returns `{changed, errors}`: the number of operations whose state changed, and the
+/// operations that could not be checked.
+async function reconcileAll(state) {
+    let changed = 0;
+    const errors = [];
+    for (const op of state.operations.filter(o => !TERMINAL_STATES.includes(o.state) && ['backup', 'restore', 'verify'].includes(o.kind))) {
+        let event;
+        try {
+            event = await reconcileOperation(state, op);
+        } catch (e) {
+            if (e instanceof AdminSessionChanged) throw e;
+            errors.push(`${shortId(op.op_id)}: ${e.message}`);
+            continue;
+        }
+        if (!event) continue;
+        op.state = event.state;
+        op.error = event.error || op.error;
+        if (event.total_size) op.total_size = event.total_size;
+        if (event.details && event.details.duration_s !== undefined) op.duration_s = event.details.duration_s;
+        op.reconciled_from = event.details && event.details.source;
+        changed++;
+        if (!session.admin.can.write_backup_events) continue;
+        await recordBackupEvent(op.op_id, event);
+        if (TERMINAL_STATES.includes(event.state) && session.admin.can.write_audit) {
+            await writeAudit(session, {action: `${op.kind}_${event.state}`, target_type: 'backup', target_name: op.op_id,
+                summary: `${op.kind === 'backup' ? 'Backup' : op.kind === 'restore' ? 'Restore' : 'Restore test'} ${shortId(op.op_id)} ${event.state}`},
+            {correlation_id: op.op_id, scope: 'local', result: event.state === 'succeeded' ? 'success' : 'failure', steps: []}, event.error || '');
+        }
+    }
+    return {changed, errors};
+}
+
+/// Reconciles the unfinished operations after the page is shown (checking an artifact can take a minute),
+/// and says what changed, without re-rendering under an open dialog.
+function reconcileNotice(state, page) {
+    const unfinished = state.operations.filter(o => !TERMINAL_STATES.includes(o.state) && ['backup', 'restore', 'verify'].includes(o.kind));
+    if (!unfinished.length) return null;
+    const notice = h('div', {role: 'status', className: 'reconcile-notice'}, h('p', {className: 'note'}, h('span', {className: 'spinner'}), ` Checking ${unfinished.length} unfinished operations with the server…`));
+    reconcileAll(state).then(({changed, errors}) => {
+        if (!isCurrent(page)) return;
+        notice.replaceChildren(
+            changed ? h('div', {className: 'message'}, `The state of ${changed} operations was updated from the server. `, button('Refresh', reloadAdmin, {className: 'small'})) : null,
+            errors.length ? h('div', {className: 'message warning'}, `Could not check ${errors.length} operations: ${errors.join('; ')}`) : null);
+    }, e => {
+        if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+        notice.replaceChildren(errorBox(e, 'Checking the unfinished operations failed:'));
+    });
+    return notice;
+}
+
+/// --- Backup & Restore: page ---
+
+const backup_page_state = {data: null};
+
+ADMIN_PAGES.backups = (root, route, page) => {
+    const c = page.component;
+    const admin = session.admin;
+    const tab = BACKUP_TABS.some(([key]) => key === route.tab) ? route.tab : 'overview';
+    const panel = h('div', {className: 'admin-page'});
+    put(root, pageHeader(c, 'Backup & Restore', null, [button('Refresh', reloadAdmin)]),
+        h('p', {className: 'note'}, 'Backups of databases and tables with the server\'s native BACKUP and RESTORE. A database backup does not include the server '
+            + 'configuration, secrets, Keeper data, the data of tables that store it elsewhere (S3, URL, MySQL engines, ...), or other platform components.'),
+        tabList(c, null, BACKUP_TABS, tab), panel);
+    if (!admin.can.read_backups) {
+        put(panel, backupSetupBox());
+        return;
+    }
+    loadInto(page, panel, async () => {
+        const state = await loadBackupState();
+        backup_page_state.data = state;
+        return state;
+    }, state => [reconcileNotice(state, page), ...[].concat(BACKUP_VIEWS[tab](state, page))]);
+};
+
+function backupSetupBox() {
+    const admin = session.admin;
+    const box = h('div', {className: 'box'}, h('h2', {}, 'Set up Backup & Restore'),
+        paragraph(`The module keeps its destinations, schedules, and operation records in four tables of the ${admin.db} database. `
+            + 'Setting up creates them; it does not create any destination or backup.'));
+    put(box, h('div', {className: 'actions-row'}, button('Set up', () => {
+        const quoted = quoteIdentifier(admin.db);
+        reviewPlan({action: 'setup_backups', target_type: 'platform', target_name: admin.db, summary: `Set up Backup & Restore in ${admin.db}`, local_only: true,
+            steps: [{description: `Create the database ${admin.db}`, sql: `CREATE DATABASE IF NOT EXISTS ${quoted}`},
+                ...Object.entries(BACKUP_TABLES).map(([table, ddl]) => ({description: `Create the table ${admin.db}.${table}`,
+                    sql: `CREATE TABLE IF NOT EXISTS ${quoted}.${quoteIdentifier(table)}\n${ddl()}`}))],
+            recovery: 'The statements use IF NOT EXISTS: run the setup again after fixing the error.', onclose: reloadAdminContext});
+    }, {className: 'primary', disabled: !admin.can.setup, title: admin.can.setup ? null : `Needs CREATE TABLE on ${admin.db}.*.`})));
+    if (!admin.can.setup) box.append(paragraph('Your user cannot read the backup records, and cannot set them up.'));
+    return box;
+}
+
+const BACKUP_VIEWS = {
+    overview: renderBackupOverview,
+    backups: renderBackupInventory,
+    restore: renderRestoreStart,
+    schedules: renderSchedules,
+    destinations: renderDestinations,
+    operations: renderOperations,
+    verification: renderVerifications,
+};
+
+function renderBackupOverview(state) {
+    const week = Date.now() - 7 * 86400000;
+    const recent = state.operations.filter(op => op.requested_ms >= week && op.kind !== 'test');
+    const failures = recent.filter(op => op.state === 'failed' || op.state === 'unknown');
+    const running = state.operations.filter(op => !TERMINAL_STATES.includes(op.state) && op.kind !== 'test');
+    const backups = state.operations.filter(op => op.kind === 'backup' && op.state === 'succeeded' && !op.deleted);
+    const verified = backups.filter(op => lastVerification(state, op));
+    const worker = state.worker[0];
+    const parts = [
+        h('div', {className: 'box'}, h('h2', {}, 'Last 7 days'), kvList([
+            ['Operations', String(recent.length)],
+            ['Failed or unknown', failures.length ? badge(String(failures.length), 'bad') : '0'],
+            ['Running now', String(running.length)],
+            ['Backups available', String(backups.length)],
+            ['Backups with a passed restore test', `${verified.filter(op => lastVerification(state, op).state === 'passed').length} of ${backups.length}`],
+        ])),
+        h('div', {className: 'box'}, h('h2', {}, 'Scheduler worker'),
+            worker ? kvList([['Last seen', `${worker.last_at} UTC (${formatSeconds(Number(worker.age))} ago)`], ['Worker', worker.op_id.slice('worker:'.length)]])
+                : paragraph('No backup worker has reported in the last 7 days: schedules, retention, and deletions do not run. See "Backup worker" in the documentation.'),
+            worker && Number(worker.age) > 300 ? h('div', {className: 'message warning'}, 'The worker has not reported for more than 5 minutes.') : null),
+    ];
+    if (failures.length) {
+        parts.push(h('div', {className: 'box'}, h('h2', {}, 'Recent failures'), operationsTable(state, failures.slice(0, 10))));
+    }
+    parts.push(h('div', {className: 'box'}, h('h2', {}, 'Schedules'), schedulesTable(state, true)),
+        h('div', {className: 'box'}, h('h2', {}, 'Destinations'), destinationsTable(state, true)));
+    return parts;
+}
+
+function lastVerification(state, op) {
+    const runs = state.operations.filter(o => o.kind === 'verify' && o.base_op_id === op.op_id && TERMINAL_STATES.includes(o.state));
+    if (!runs.length) return null;
+    const last = runs.sort((a, b) => b.requested_ms - a.requested_ms)[0];
+    const failed = last.state !== 'succeeded' || last.checks.some(check => check.state === 'failed');
+    return {op: last, state: failed ? 'failed' : 'passed'};
+}
+
+function renderBackupInventory(state) {
+    const can = session.admin.can;
+    const q = h('input', {type: 'search', placeholder: 'ID, database, table, or destination', autocomplete: 'off', spellcheck: false});
+    const list = h('div', {});
+    const draw = () => {
+        const text = q.value.trim().toLowerCase();
+        const backups = state.operations.filter(op => op.kind === 'backup').filter(op => !text
+            || `${op.op_id} ${scopeText(op.scope)} ${destinationLabel(state.destinations_by_id.get(op.destination_id))} ${op.artifact}`.toLowerCase().includes(text));
+        list.replaceChildren(dataTable([
+            {title: 'Backup', render: op => [h('code', {}, shortId(op.op_id)), h('div', {className: 'note'}, op.requested_at + ' UTC'),
+                op.schedule_id ? h('div', {className: 'note'}, `schedule ${(state.schedules.find(s => s.id === op.schedule_id) || {name: op.schedule_id}).name}`) : null]},
+            {title: 'Scope', render: op => scopeText(op.scope)},
+            {title: 'Type', render: op => op.strategy === 'incremental'
+                ? [badge('incremental'), h('div', {className: 'note'}, `base ${shortId(op.base_op_id)}`), chainNote(state, op)] : badge('full')},
+            {title: 'Destination', render: op => [destinationLabel(state.destinations_by_id.get(op.destination_id)), h('div', {className: 'note'}, op.artifact)]},
+            {title: 'Status', render: op => backupStatusList(state, op)},
+            {title: 'Size / duration', className: 'num', render: op => [formatBytes(op.total_size), h('div', {className: 'note'}, formatSeconds(op.duration_s))]},
+            {title: 'Retention', render: op => {
+                if (op.deleted) return badge('Deleted');
+                const block = retentionBlock(state, op);
+                return block ? badge('Protected', 'warn', block) : badge('Can be deleted');
+            }},
+            {title: '', render: op => h('span', {className: 'actions-row'},
+                op.state === 'succeeded' && !op.deleted ? button('Restore', () => navigate(adminPath('admin-backups', null, 'restore') + `&backup=${encodeURIComponent(op.op_id)}`), {className: 'small'}) : null,
+                op.state === 'succeeded' && !op.deleted ? button('Check', () => checkArtifactDialog(state, op), {className: 'small'}) : null,
+                op.state === 'succeeded' && !op.deleted && can.write_backup_ops ? button('Test restore', () => verifyDialog(state, op), {className: 'small'}) : null,
+                !op.deleted && can.write_backup_ops ? button('Delete', () => deleteBackupDialog(state, op), {className: 'small danger'}) : null)},
+        ], backups, 'No backups yet.', 'Backups'));
+    };
+    q.addEventListener('input', draw);
+    draw();
+    return [h('div', {className: 'admin-head'}, h('span', {className: 'spacer'}),
+        button('New backup', () => backupWizard(state), {className: 'primary', disabled: !can.write_backup_ops || !state.destinations.some(d => d.enabled),
+            title: !can.write_backup_ops ? 'Your user cannot record backup operations.' : (!state.destinations.some(d => d.enabled) ? 'Add and enable a destination first.' : null)})),
+    h('div', {className: 'toolbar'}, adminField('Search', q)),
+    h('p', {className: 'note'}, 'Status levels: the operation finished; the artifact was opened (it exists and its metadata reads); a restore test passed. '
+        + 'Size is the size the server reported for the operation. Incremental backups are restored together with their base chain, which RESTORE reads automatically.'),
+    list];
+}
+
+function chainNote(state, op) {
+    const {chain, missing} = backupChain(state, op);
+    if (missing) return h('div', {}, badge('Broken chain', 'bad', missing));
+    return h('div', {className: 'note'}, `chain of ${chain.length}`);
+}
+
+function backupStatusList(state, op) {
+    const artifact = [...op.checks].reverse().find(check => check.name === 'artifact');
+    const verification = lastVerification(state, op);
+    return h('div', {className: 'chips'},
+        stateBadge(op.state, op.error || (op.reconciled_from ? `Reconciled from ${op.reconciled_from}.` : null)),
+        artifact ? badge(artifact.state === 'passed' ? 'Artifact opened' : 'Artifact unreadable', artifact.state === 'passed' ? 'ok' : 'bad', `Checked ${artifact.at} UTC`)
+            : badge('Artifact not checked'),
+        verification ? badge(verification.state === 'passed' ? 'Restore test passed' : 'Restore test failed', verification.state === 'passed' ? 'ok' : 'bad',
+            `${verification.op.requested_at} UTC`) : badge('Never test-restored'));
+}
+
+function operationsTable(state, ops) {
+    return dataTable([
+        {title: 'Operation', render: op => [h('code', {}, shortId(op.op_id)), h('div', {className: 'note'}, op.kind)]},
+        {title: 'Requested', render: op => [`${op.requested_at} UTC`, h('div', {className: 'note'}, op.requested_by + (op.schedule_id ? ' (schedule)' : ''))]},
+        {title: 'Scope', render: op => op.kind === 'delete' ? `backup ${shortId(op.base_op_id)}` : scopeText(op.scope)},
+        {title: 'Where', render: op => [destinationLabel(state.destinations_by_id.get(op.destination_id)),
+            op.kind === 'restore' || op.kind === 'verify' ? h('div', {className: 'note'}, `into ${Object.values(op.target || {}).join(', ')}`) : null]},
+        {title: 'State', render: op => [stateBadge(op.state), op.error ? h('div', {className: 'note'}, op.error.slice(0, 300)) : null,
+            op.reconciled_from ? h('div', {className: 'note'}, `from ${op.reconciled_from}`) : null]},
+        {title: 'Duration', className: 'num', render: op => formatSeconds(op.duration_s)},
+        {title: '', render: op => h('span', {className: 'actions-row'},
+            h('a', {href: `${adminPath('admin-audit', null, 'console')}&q=${encodeURIComponent(op.op_id)}`, dataset: {route: ''}}, 'Audit'),
+            op.state === 'running' && ['backup', 'restore', 'verify'].includes(op.kind) && session.admin.can.kill_query
+                ? button('Cancel', () => cancelOperationDialog(op), {className: 'small danger'}) : null)},
+    ], ops, 'No operations.', 'Operations');
+}
+
+function renderOperations(state) {
+    const kind = select([['', 'All kinds'], 'backup', 'restore', 'verify', 'delete', 'test'], '');
+    const st = select([['', 'Any state'], 'queued', 'running', 'succeeded', 'failed', 'unknown', 'cancelled', 'deleted'], '');
+    const list = h('div', {});
+    const draw = () => list.replaceChildren(operationsTable(state, state.operations.filter(op => (!kind.value || op.kind === kind.value) && (!st.value || op.state === st.value))));
+    kind.addEventListener('change', draw);
+    st.addEventListener('change', draw);
+    draw();
+    return [h('p', {className: 'note'}, 'States: queued (recorded, not yet started by the server), running, succeeded, failed, cancelled, and unknown (the console could not '
+        + 'determine the outcome: check the target before running the operation again). Closing the browser does not cancel anything; Cancel stops the server '
+        + 'operation with KILL QUERY. Each operation ID is also the correlation ID of its audit records and the id of the native operation in system.backups.'),
+    h('div', {className: 'toolbar'}, adminField('Kind', kind), adminField('State', st)), list];
+}
+
+function cancelOperationDialog(op) {
+    openDialog(`Cancel ${shortId(op.op_id)}`, [loadingBox('Finding the server operation…')], [button('Close', closeDialog)]);
+    adminRows('SELECT query_id, toString(status) AS status FROM system.backups WHERE id = {id:String}', {id: op.native_id || op.op_id}).then(rows => {
+        if (!rows.length || !['CREATING_BACKUP', 'RESTORING'].includes(rows[0].status)) {
+            openDialog(`Cancel ${shortId(op.op_id)}`, [paragraph('The operation is not running on this server any more. Refresh the page to see its state.')], [button('Close', closeDialog)]);
+            return;
+        }
+        reviewPlan({action: `cancel_${op.kind}`, target_type: 'backup', target_name: op.op_id, summary: `Cancel ${op.kind} ${shortId(op.op_id)}`, danger: true, confirm_text: 'Cancel operation', local_only: true,
+            steps: [{description: `Cancel the server operation (query ${rows[0].query_id})`, sql: `KILL QUERY WHERE query_id = ${quoteString(rows[0].query_id)} SYNC`}],
+            warning: op.kind === 'backup' ? 'The partial backup is removed by the server (remove_backup_files_after_failure).' : 'Tables restored so far stay in the target; review it before restoring again.'});
+    }, e => { if (!(e instanceof AdminSessionChanged)) openDialog('Cancel', [errorBox(e)], [button('Close', closeDialog)]); });
+}
+
+function renderVerifications(state) {
+    const runs = state.operations.filter(op => op.kind === 'verify');
+    return [h('p', {className: 'note'}, 'A restore test restores a backup into a new, isolated database on this server, compares it with the backup and with the values '
+        + 'captured from the source when the backup was made, and drops the test database. The measured restore duration is not a recovery-time objective: it depends '
+        + 'on the load, the size, and the target. Periodic backups recover to the time of a backup, not to an arbitrary point in time.'),
+    dataTable([
+        {title: 'Test', render: op => [h('code', {}, shortId(op.op_id)), h('div', {className: 'note'}, `${op.requested_at} UTC · ${op.requested_by}`)]},
+        {title: 'Backup', render: op => h('code', {}, shortId(op.base_op_id))},
+        {title: 'Target', render: op => [Object.values(op.target || {}).join(', '), h('div', {className: 'note'}, op.parameters.target_version ? `ClickHouse ${op.parameters.target_version}` : '')]},
+        {title: 'Result', render: op => {
+            const failed = op.checks.filter(check => check.state === 'failed');
+            if (op.state !== 'succeeded') return stateBadge(op.state, op.error);
+            return failed.length ? badge(`${failed.length} checks failed`, 'bad') : badge(`${op.checks.length} checks passed`, 'ok');
+        }},
+        {title: 'Restore duration', className: 'num', render: op => formatSeconds(op.duration_s)},
+        {title: 'Cleanup', render: op => {
+            const cleanup = op.checks.find(check => check.name === 'cleanup');
+            return cleanup ? stateBadge(cleanup.state, cleanup.error) : '—';
+        }},
+        {title: 'Checks', render: op => h('details', {}, h('summary', {}, 'Show'), checksTable(op.checks))},
+    ], runs, 'No restore tests yet. Run one from the Backups tab.', 'Restore tests')];
+}
+
+function checksTable(checks) {
+    return dataTable([
+        {title: 'Check', render: check => check.name},
+        {title: 'Result', render: check => stateBadge(check.state)},
+        {title: 'Details', render: check => h('span', {className: 'note'}, check.error || Object.entries(check.details || {}).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join('; '))},
+    ], checks, 'No checks recorded.', 'Checks');
+}
+
+/// --- Backup & Restore: destinations ---
+
+/// The S3 endpoints the server configuration allows (`web_console.backup_s3_endpoints`), as origins.
+function allowedS3Endpoints() {
+    return String(config.backup_s3_endpoints || '').split(',').map(s => s.trim()).filter(Boolean).map(value => {
+        try {
+            return new URL(value).origin;
+        } catch (e) {
+            return null;
+        }
+    }).filter(Boolean);
+}
+
+function destinationsTable(state, compact) {
+    const can = session.admin.can;
+    return dataTable([
+        {title: 'Destination', render: d => [h('strong', {}, d.name), h('div', {className: 'note'}, d.description || '')]},
+        {title: 'Type', render: d => d.type === 'disk' ? `disk ${d.disk}` : `S3-compatible (${d.named_collection})`},
+        {title: 'Location', render: d => h('code', {}, destinationLabel(d))},
+        {title: 'Enabled', render: d => d.enabled ? badge('Enabled', 'ok') : badge('Disabled')},
+        {title: 'Last test', render: d => {
+            const result = parseJSON(d.test_result, null);
+            if (!result) return badge('Never tested', 'warn');
+            const failed = Object.values(result).some(v => v && v.ok === false);
+            return [badge(failed ? 'Failed' : 'Passed', failed ? 'bad' : 'ok'), h('div', {className: 'note'}, `${d.tested_at} UTC`),
+                h('div', {className: 'note'}, Object.entries(result).map(([k, v]) => `${k}: ${v === null ? 'not tested' : v.ok ? 'ok' : 'failed'}`).join(', '))];
+        }},
+        ...(compact ? [] : [
+            {title: 'Restricted to', render: d => d.allowed_databases.length ? d.allowed_databases.join(', ') : 'any database'},
+            {title: '', render: d => h('span', {className: 'actions-row'},
+                can.write_destinations ? button('Edit', () => destinationDialog(state, d).catch(showFailure('Edit destination')), {className: 'small'}) : null,
+                can.write_destinations ? button('Test', () => testDestination(state, d), {className: 'small'}) : null,
+                can.write_destinations ? button(d.enabled ? 'Disable' : 'Enable', () => saveDestination({...d, enabled: !d.enabled}, `${d.enabled ? 'Disable' : 'Enable'} destination ${d.name}`), {className: 'small'}) : null,
+                can.write_destinations ? button('Remove', () => removeDestination(state, d), {className: 'small danger'}) : null)},
+        ]),
+    ], state.destinations, 'No destinations yet.', 'Destinations');
+}
+
+function renderDestinations(state) {
+    const can = session.admin.can;
+    const endpoints = allowedS3Endpoints();
+    return [h('div', {className: 'admin-head'}, h('span', {className: 'spacer'}),
+        button('Add destination', () => destinationDialog(state, null).catch(showFailure('Add destination')), {className: 'primary', disabled: !can.write_destinations,
+            title: can.write_destinations ? null : `Needs INSERT on ${session.admin.db}.backup_destinations.`})),
+    h('p', {className: 'note'}, 'A destination is a backup disk of the server configuration (allowed with backups.allowed_disk) or an S3-compatible bucket at an endpoint '
+        + `allowed by the server configuration (web_console.backup_s3_endpoints: ${endpoints.length ? endpoints.join(', ') : 'none'}). `
+        + 'S3 credentials are stored in a named collection on the server, never in the console tables or the browser. '
+        + 'The connection test runs on the server, which is the node that must reach the destination; deleting artifacts is done by the backup worker, '
+        + 'with the credentials of its credential reference.'),
+    destinationsTable(state, false)];
+}
+
+async function destinationDialog(state, existing) {
+    const disks = await adminRows('SELECT name, path FROM system.disks ORDER BY name');
+    const endpoints = allowedS3Endpoints();
+    const type = select([['disk', 'Server backup disk'], ['s3', 'S3-compatible bucket']], existing ? existing.type : 'disk', {disabled: !!existing});
+    const name = h('input', {type: 'text', value: existing ? existing.name : '', autocomplete: 'off'});
+    const description = h('input', {type: 'text', value: existing ? existing.description : '', autocomplete: 'off'});
+    const disk = select(disks.map(d => [d.name, `${d.name} (${d.path})`]), existing ? existing.disk : (disks.find(d => d.name === 'backups') || disks[0] || {}).name, {disabled: !!existing});
+    const prefix = h('input', {type: 'text', value: existing ? existing.prefix : 'console', autocomplete: 'off', spellcheck: false, disabled: !!existing});
+    const endpoint = select(endpoints.length ? endpoints : [['', 'No endpoint is allowed by the server configuration']], existing ? existing.endpoint : endpoints[0], {disabled: !!existing});
+    const bucket = h('input', {type: 'text', value: existing ? existing.bucket : '', autocomplete: 'off', spellcheck: false, disabled: !!existing});
+    const access_key = h('input', {type: 'text', autocomplete: 'off', spellcheck: false});
+    const secret_key = h('input', {type: 'password', autocomplete: 'new-password'});
+    const credential_ref = h('input', {type: 'text', value: existing ? existing.credential_ref : '', autocomplete: 'off', spellcheck: false, placeholder: 'BACKUP_S3_MAIN'});
+    const allowed = h('input', {type: 'text', value: existing ? existing.allowed_databases.join(', ') : '', autocomplete: 'off', spellcheck: false, placeholder: 'empty: any database'});
+    const s3_fields = h('div', {className: 'form-grid'},
+        adminField('Endpoint', endpoint, 'Only endpoints allowed by the server configuration. HTTPS endpoints are verified with the server\'s CA certificates.'),
+        adminField('Bucket', bucket), adminField('Access key ID', access_key, existing ? 'Leave empty to keep the stored credentials.' : null),
+        adminField('Secret access key', secret_key, 'Stored in a named collection on the server; never shown again.'),
+        adminField('Worker credential reference', credential_ref, 'The prefix of the environment variables with the credentials the backup worker uses to list and delete artifacts (PREFIX_ACCESS_KEY_ID, PREFIX_SECRET_ACCESS_KEY).'));
+    const disk_fields = h('div', {className: 'form-grid'}, adminField('Disk', disk, 'Disks listed in backups.allowed_disk of the server configuration can be used.'));
+    const sync = () => {
+        s3_fields.hidden = type.value !== 's3';
+        disk_fields.hidden = type.value !== 'disk';
+    };
+    type.addEventListener('change', sync);
+    sync();
+    formDialog(existing ? `Edit ${existing.name}` : 'Add destination', [
+        adminField('Type', type), adminField('Name', name), adminField('Description', description), disk_fields, s3_fields,
+        adminField('Prefix', prefix, 'All artifacts of this destination are stored under this path, and the worker deletes only under it.'),
+        adminField('Allowed databases', allowed, 'Comma-separated. Backups of other databases cannot use this destination in the console.'),
+    ], 'Review', () => {
+        if (!name.value.trim()) return 'Enter a name.';
+        if (state.destinations.some(d => d.name === name.value.trim() && (!existing || d.id !== existing.id))) return 'Another destination has this name.';
+        const prefix_error = backupPathError(prefix.value.trim());
+        if (prefix_error) return `Prefix: ${prefix_error}`;
+        const databases = allowed.value.split(',').map(s => s.trim()).filter(Boolean);
+        for (const db of databases) if (nameError(db, 'database')) return nameError(db, 'database');
+        const id = existing ? existing.id : crypto.randomUUID();
+        const row = {id, name: name.value.trim(), description: description.value.trim(), type: type.value, disk: '', named_collection: '', endpoint: '', bucket: '',
+            prefix: prefix.value.trim(), credential_ref: '', allow_http: false, enabled: existing ? existing.enabled : false, allowed_databases: databases,
+            test_result: existing ? existing.test_result : '', tested_at: existing && existing.tested_at ? existing.tested_at : null};
+        const steps = [];
+        const secrets = [];
+        if (type.value === 'disk') {
+            if (!disk.value) return 'Choose a disk.';
+            row.disk = disk.value;
+        } else {
+            if (!endpoint.value || !endpoints.includes(endpoint.value)) return 'Choose an endpoint allowed by the server configuration.';
+            if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket.value.trim())) return 'Enter a valid bucket name (lowercase letters, digits, dots, hyphens).';
+            if (credential_ref.value && !/^[A-Z][A-Z0-9_]{0,63}$/.test(credential_ref.value)) return 'The credential reference is an environment variable prefix: uppercase letters, digits, and underscores.';
+            row.endpoint = endpoint.value;
+            row.bucket = bucket.value.trim();
+            row.allow_http = row.endpoint.startsWith('http:');
+            row.credential_ref = credential_ref.value;
+            row.named_collection = existing ? existing.named_collection : `console_backup_${id.replace(/-/g, '').slice(0, 12)}`;
+            const url = `${row.endpoint}/${row.bucket}/${row.prefix}/`;
+            if (!existing || access_key.value || secret_key.value) {
+                if (!access_key.value || !secret_key.value) return 'Enter both the access key ID and the secret access key.';
+                secrets.push(secret_key.value, access_key.value);
+                steps.push({description: `${existing ? 'Replace' : 'Create'} the named collection ${row.named_collection} with the endpoint and the credentials`,
+                    sql: `CREATE ${existing ? 'OR REPLACE ' : ''}NAMED COLLECTION ${quoteIdentifier(row.named_collection)} AS url = ${quoteString(url)}, access_key_id = ${quoteString(access_key.value)}, secret_access_key = ${quoteString(secret_key.value)}`,
+                    secrets: [secret_key.value, access_key.value]});
+            }
+        }
+        steps.push(destinationRowStep(row, existing ? `Update destination ${row.name}` : `Record destination ${row.name} (disabled until tested)`));
+        return {action: existing ? 'edit_backup_destination' : 'create_backup_destination', target_type: 'backup_destination', target_name: row.name,
+            summary: `${existing ? 'Edit' : 'Add'} backup destination ${row.name}`, steps, local_only: true,
+            warning: row.allow_http ? 'This endpoint uses unencrypted HTTP: data and credentials travel in clear text. Use it only on a trusted network.' : null,
+            recovery: 'The named collection exists without a destination record: add the destination again with the same name, or drop the collection.'};
+    });
+}
+
+function destinationRowStep(row, description, removal = false) {
+    const data = {...row, tested_at: row.tested_at || null, deleted: removal};
+    delete data.updated_by;
+    return {description, sql: `INSERT INTO ${quoteIdentifier(session.admin.db)}.backup_destinations (id, name, description, type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled, allowed_databases, test_result, tested_at, deleted) FORMAT JSONEachRow\n${JSON.stringify(data)}`};
+}
+
+function saveDestination(row, summary) {
+    reviewPlan({action: 'edit_backup_destination', target_type: 'backup_destination', target_name: row.name, summary, local_only: true,
+        steps: [destinationRowStep(row, summary)]});
+}
+
+function removeDestination(state, destination) {
+    const used = state.operations.filter(op => op.kind === 'backup' && op.destination_id === destination.id && !op.deleted && op.state === 'succeeded');
+    const schedules = state.schedules.filter(s => s.destination_id === destination.id);
+    if (schedules.length) {
+        openDialog(`Remove ${destination.name}`, [h('div', {className: 'message error'}, `Used by the schedules ${schedules.map(s => s.name).join(', ')}. Change or remove them first.`)], [button('Close', closeDialog)]);
+        return;
+    }
+    const steps = [destinationRowStep(destination, `Remove the destination record ${destination.name}`, true)];
+    reviewPlan({action: 'remove_backup_destination', target_type: 'backup_destination', target_name: destination.name, summary: `Remove backup destination ${destination.name}`,
+        local_only: true, danger: true, confirm_text: 'Remove', steps,
+        warning: used.length ? `${used.length} backups are stored there. They are not deleted, but the console cannot restore them without the destination.` : null});
+}
+
+/// Tests a destination from the server: writes a small backup under `<prefix>/_console_test/<uuid>` (write),
+/// opens it (read). Listing and deleting are what the backup worker does with its own credentials: it
+/// reports them, and removes this test artifact, when it next runs. The result is stored with the destination.
+async function testDestination(state, destination) {
+    const admin = session.admin;
+    const test_id = crypto.randomUUID();
+    const artifact = `_console_test/${test_id}`;
+    const results = {write: null, read: null, list: null, delete: null};
+    openDialog(`Test ${destination.name}`, [loadingBox('Writing a test backup from the server…')], null);
+    const probe_table = `${quoteIdentifier(admin.db)}.backup_destinations`;
+    const op = {op_id: test_id, scope: {tables: [[admin.db, 'backup_destinations']]}, artifact};
+    const write = await runQuery(session, `BACKUP TABLE ${probe_table} TO ${backupLocationSQL(destination, artifact)} SETTINGS id = ${quoteString(test_id)}`,
+        session.controller.signal, 120000, {raw: true, settings: quickCheckSettings(destination)});
+    results.write = write.ok ? {ok: true} : {ok: false, error: maskSecrets(write.detail || write.message)};
+    if (write.ok) {
+        const read = await probeBackupArtifact(destination, op);
+        results.read = read.ok ? {ok: true} : {ok: false, error: read.error};
+    }
+    const failed = Object.values(results).some(v => v && v.ok === false);
+    const row = {...destination, test_result: JSON.stringify(results), tested_at: new Date().toISOString().replace('T', ' ').replace('Z', ''), enabled: destination.enabled && !failed};
+    const body = [kvList(Object.entries(results).map(([k, v]) => [k, v === null ? (['list', 'delete'].includes(k) ? 'tested by the backup worker' : 'not tested')
+        : v.ok ? badge('ok', 'ok') : h('span', {}, badge('failed', 'bad'), ' ', v.error)])),
+    h('p', {className: 'note'}, 'The test ran on the server the console is connected to. In a cluster, every node that runs backups needs the same access.')];
+    if (write.ok) {
+        /// The test artifact is removed by the worker: ask for it with a deletion operation.
+        body.push(h('p', {className: 'note'}, `Test artifact: ${artifact}. The backup worker deletes it.`));
+    }
+    const record_steps = [destinationRowStep(row, `Record the test result of ${destination.name}`)];
+    if (write.ok && admin.can.write_backup_ops) {
+        record_steps.push({description: 'Request deletion of the test artifact by the backup worker',
+            sql: `INSERT INTO ${quoteIdentifier(admin.db)}.backup_operations (op_id, kind, server, destination_id, artifact, scope, strategy, base_op_id, schedule_id, target, parameters, expected) FORMAT JSONEachRow\n`
+                + JSON.stringify({op_id: crypto.randomUUID(), kind: 'test', server: session.hostname, destination_id: destination.id, artifact, scope: JSON.stringify(op.scope),
+                    strategy: '', base_op_id: '', schedule_id: '', target: '{}', parameters: JSON.stringify({test_id}), expected: ''})});
+    }
+    openDialog(`Test ${destination.name}`, [...body, failed ? h('div', {className: 'message error'}, 'The test failed: the destination stays disabled.') : null],
+        [button('Close', closeDialog), button('Record result', () => reviewPlan({action: 'test_backup_destination', target_type: 'backup_destination', target_name: destination.name,
+            summary: `Test backup destination ${destination.name}: ${failed ? 'failed' : 'passed'}`, local_only: true, steps: record_steps}), {className: 'primary'})]);
+}
+
+/// --- Backup & Restore: schedules ---
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+const zone_formatters = new Map();
+
+/// The local date and time of an instant in a time zone.
+function zonedParts(ms, timezone) {
+    if (!zone_formatters.has(timezone)) {
+        zone_formatters.set(timezone, new Intl.DateTimeFormat('en-US', {timeZone: timezone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', weekday: 'short'}));
+    }
+    const parts = Object.fromEntries(zone_formatters.get(timezone).formatToParts(new Date(ms)).map(p => [p.type, p.value]));
+    return {date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour), minute: Number(parts.minute),
+        weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday)};
+}
+
+/// The runs of a schedule in (from, to], as `{key, at}`: `key` is the local date and time of the run, which
+/// names it, so each run happens once. For each local day (hour for hourly schedules) the run is the first
+/// minute at or after the scheduled local time: when that time occurs twice (daylight saving ends), the
+/// first occurrence; when it does not exist (daylight saving starts), the first minute after the gap.
+/// The same function is in the backup worker.
+function scheduleRuns(schedule, from_ms, to_ms) {
+    const runs = [];
+    const seen = new Set();
+    for (let t = Math.floor(from_ms / 60000) * 60000 + 60000; t <= to_ms; t += 60000) {
+        const p = zonedParts(t, schedule.timezone);
+        let key = null;
+        if (schedule.frequency === 'hourly') {
+            if (p.minute >= schedule.minute) key = `${p.date}T${String(p.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`;
+        } else if (schedule.frequency === 'daily' || (schedule.frequency === 'weekly' && p.weekday === Number(schedule.weekday))) {
+            if (p.hour * 60 + p.minute >= schedule.hour * 60 + schedule.minute) {
+                key = `${p.date}T${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`;
+            }
+        }
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        /// Only the first minute that reaches the key belongs to it; an earlier window already contains it if
+        /// the key was reached before `from`.
+        const previous = zonedParts(t - 60000, schedule.timezone);
+        const previous_key_reached = schedule.frequency === 'hourly'
+            ? previous.date === p.date && previous.hour === p.hour && previous.minute >= schedule.minute
+            : previous.date === p.date && previous.hour * 60 + previous.minute >= schedule.hour * 60 + schedule.minute;
+        if (previous_key_reached) continue;
+        runs.push({key, at: t});
+    }
+    return runs;
+}
+
+function nextRun(schedule) {
+    if (!schedule.enabled) return null;
+    const now = Date.now();
+    const runs = scheduleRuns(schedule, now, now + 8 * 86400000);
+    return runs.length ? runs[0] : null;
+}
+
+function scheduleText(schedule) {
+    const time = `${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`;
+    if (schedule.frequency === 'hourly') return `every hour at minute ${schedule.minute} (${schedule.timezone})`;
+    if (schedule.frequency === 'daily') return `daily at ${time} (${schedule.timezone})`;
+    return `every ${WEEKDAYS[schedule.weekday]} at ${time} (${schedule.timezone})`;
+}
+
+function schedulesTable(state, compact) {
+    const can = session.admin.can;
+    return dataTable([
+        {title: 'Schedule', render: s => [h('strong', {}, s.name), h('div', {className: 'note'}, s.enabled ? 'enabled' : 'disabled')]},
+        {title: 'Scope', render: s => scopeText({databases: s.databases, tables: s.tables.map(t => t.split('.')), structure_only: s.structure_only})},
+        {title: 'When', render: s => {
+            const next = nextRun(s);
+            return [scheduleText(s), h('div', {className: 'note'}, next ? `next ${new Date(next.at).toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'no next run')];
+        }},
+        {title: 'Strategy', render: s => s.strategy === 'incremental' ? `incremental, full every ${s.full_every} runs; missing base: ${s.on_missing_base === 'full' ? 'make a full backup' : 'fail'}` : 'full'},
+        {title: 'Destination', render: s => (state.destinations_by_id.get(s.destination_id) || {name: 'missing destination'}).name},
+        {title: 'Last run', render: s => {
+            const last = state.operations.filter(op => op.schedule_id === s.id && op.kind === 'backup').sort((a, b) => b.requested_ms - a.requested_ms)[0];
+            return last ? [stateBadge(last.state, last.error), h('div', {className: 'note'}, `${last.scheduled_for || last.requested_at} UTC`)] : h('span', {className: 'note'}, 'never');
+        }},
+        ...(compact ? [] : [
+            {title: 'Retention', render: s => `keep ${s.keep_chains} ${s.strategy === 'incremental' ? 'chains' : 'backups'}${s.verify ? '; test-restore each backup' : ''}`},
+            {title: '', render: s => h('span', {className: 'actions-row'},
+                can.write_schedules ? button('Edit', () => scheduleDialog(state, s).catch(showFailure('Edit schedule')), {className: 'small'}) : null,
+                can.write_schedules ? button(s.enabled ? 'Disable' : 'Enable', () => saveSchedule({...s, enabled: !s.enabled}, `${s.enabled ? 'Disable' : 'Enable'} schedule ${s.name}`), {className: 'small'}) : null,
+                can.write_schedules ? button('Retention preview', () => retentionPreview(state, s), {className: 'small'}) : null,
+                can.write_schedules ? button('Remove', () => saveSchedule({...s, deleted: true}, `Remove schedule ${s.name}`, true), {className: 'small danger'}) : null)},
+        ]),
+    ], state.schedules, 'No schedules.', 'Schedules');
+}
+
+function renderSchedules(state) {
+    const can = session.admin.can;
+    return [h('div', {className: 'admin-head'}, h('span', {className: 'spacer'}),
+        button('Add schedule', () => scheduleDialog(state, null).catch(showFailure('Add schedule')), {className: 'primary', disabled: !can.write_schedules || !state.destinations.length,
+            title: !can.write_schedules ? `Needs INSERT on ${session.admin.db}.backup_schedules.` : null})),
+    h('p', {className: 'note'}, 'Schedules are run by the backup worker, not by the browser. Each run has a name from its local date and time, used as the backup ID and in '
+        + 'the artifact path, so a run is submitted once even when several workers see it: the server rejects a second backup with the same ID or location. '
+        + 'A run is skipped while the previous run of the same schedule is still running. After the worker was stopped, it runs only the latest missed run. '
+        + 'When daylight saving ends, a repeated local time runs once; when it starts, a skipped local time runs at the first minute after the gap.'),
+    schedulesTable(state, false)];
+}
+
+async function scheduleDialog(state, existing) {
+    const databases = (await adminRows("SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') ORDER BY name")).map(r => r.name);
+    const name = h('input', {type: 'text', value: existing ? existing.name : '', autocomplete: 'off'});
+    const destination = select(state.destinations.map(d => [d.id, `${d.name}${d.enabled ? '' : ' (disabled)'}`]), existing ? existing.destination_id : (state.destinations[0] || {}).id);
+    const db_boxes = databases.map(db => checkbox(db, existing ? existing.databases.includes(db) : false));
+    const structure_only = checkbox('Structure only (no table data)', existing ? existing.structure_only : false);
+    const strategy = select([['full', 'Full backup each time'], ['incremental', 'Incremental, with a full backup every N runs']], existing ? existing.strategy : 'full');
+    const full_every = h('input', {type: 'number', min: 1, max: 1000, value: existing ? existing.full_every : 7});
+    const on_missing = select([['fail', 'Fail with an explanation'], ['full', 'Make a full backup instead']], existing ? existing.on_missing_base : 'fail');
+    const frequency = select([['hourly', 'Hourly'], ['daily', 'Daily'], ['weekly', 'Weekly']], existing ? existing.frequency : 'daily');
+    const hour = h('input', {type: 'number', min: 0, max: 23, value: existing ? existing.hour : 2});
+    const minute = h('input', {type: 'number', min: 0, max: 59, value: existing ? existing.minute : 0});
+    const weekday = select(WEEKDAYS.map((d, i) => [String(i), d]), existing ? String(existing.weekday) : '0');
+    const timezone = h('input', {type: 'text', value: existing ? existing.timezone : (Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'), list: 'backup-timezones', autocomplete: 'off'});
+    const keep = h('input', {type: 'number', min: 1, max: 10000, value: existing ? existing.keep_chains : 7});
+    const verify = checkbox('Test-restore each backup after it is made (isolated database on this server)', existing ? existing.verify : false);
+    const notify = h('input', {type: 'text', value: existing ? existing.notify_ref : '', autocomplete: 'off', spellcheck: false, placeholder: 'BACKUP_ALERT_WEBHOOK'});
+    const incremental_fields = h('div', {className: 'form-grid'}, adminField('Full backup every N runs', full_every), adminField('When the base is missing', on_missing));
+    const time_fields = h('div', {className: 'form-grid'}, adminField('Weekday', weekday), adminField('Hour', hour), adminField('Minute', minute), adminField('Time zone', timezone));
+    const sync = () => {
+        incremental_fields.hidden = strategy.value !== 'incremental';
+        weekday.parentElement.hidden = frequency.value !== 'weekly';
+        hour.parentElement.hidden = frequency.value === 'hourly';
+    };
+    strategy.addEventListener('change', sync);
+    frequency.addEventListener('change', sync);
+    sync();
+    formDialog(existing ? `Edit ${existing.name}` : 'Add schedule', [
+        adminField('Name', name), adminField('Destination', destination),
+        h('fieldset', {className: 'box'}, h('legend', {}, 'Databases'), db_boxes.map(b => b.element), structure_only.element),
+        adminField('Strategy', strategy), incremental_fields, adminField('Frequency', frequency), time_fields,
+        h('datalist', {id: 'backup-timezones'}, (Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : ['UTC']).map(z => h('option', {value: z}))),
+        adminField('Keep', keep, 'The number of most recent backups (full backups with their incremental chains, for an incremental schedule) the worker keeps. Older ones are deleted, except bases of kept backups.'),
+        verify.element,
+        adminField('Failure notification', notify, 'Optional: the environment variable of the backup worker with a webhook URL called when a run fails.'),
+    ], 'Review', () => {
+        if (!name.value.trim()) return 'Enter a name.';
+        if (state.schedules.some(sch => sch.name === name.value.trim() && (!existing || sch.id !== existing.id))) return 'Another schedule has this name.';
+        const chosen = databases.filter((db, i) => db_boxes[i].input.checked);
+        if (!chosen.length) return 'Choose at least one database.';
+        const dest = state.destinations_by_id.get(destination.value);
+        if (!dest) return 'Choose a destination.';
+        const outside = chosen.filter(db => dest.allowed_databases.length && !dest.allowed_databases.includes(db));
+        if (outside.length) return `The destination is restricted and does not allow ${outside.join(', ')}.`;
+        try {
+            new Intl.DateTimeFormat('en-US', {timeZone: timezone.value}).format();
+        } catch (e) {
+            return 'Enter a valid IANA time zone, such as Europe/Berlin or UTC.';
+        }
+        const numbers = [[full_every, 1, 1000], [hour, 0, 23], [minute, 0, 59], [keep, 1, 10000]];
+        for (const [input, min, max] of numbers) {
+            const v = Number(input.value);
+            if (!Number.isInteger(v) || v < min || v > max) return `Enter a whole number between ${min} and ${max}.`;
+        }
+        if (notify.value && !/^[A-Z][A-Z0-9_]{0,63}$/.test(notify.value)) return 'The notification reference is an environment variable name.';
+        const row = {id: existing ? existing.id : crypto.randomUUID(), name: name.value.trim(), enabled: existing ? existing.enabled : true, destination_id: dest.id,
+            databases: chosen, tables: [], structure_only: structure_only.input.checked, strategy: strategy.value, full_every: Number(full_every.value),
+            frequency: frequency.value, minute: Number(minute.value), hour: Number(hour.value), weekday: Number(weekday.value), timezone: timezone.value,
+            keep_chains: Number(keep.value), on_missing_base: on_missing.value, verify: verify.input.checked, notify_ref: notify.value};
+        return scheduleRowPlan(row, `${existing ? 'Edit' : 'Add'} schedule ${row.name}`);
+    });
+}
+
+function scheduleRowPlan(row, summary, removal) {
+    const data = {...row, deleted: !!removal};
+    delete data.updated_by;
+    return {action: removal ? 'remove_backup_schedule' : 'save_backup_schedule', target_type: 'backup_schedule', target_name: row.name, summary, local_only: true,
+        danger: !!removal, confirm_text: removal ? 'Remove' : null,
+        warning: removal ? 'Backups made by the schedule are kept; the worker no longer deletes them by retention.' : null,
+        steps: [{description: summary, sql: `INSERT INTO ${quoteIdentifier(session.admin.db)}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref, deleted) FORMAT JSONEachRow\n${JSON.stringify(data)}`}]};
+}
+
+function saveSchedule(row, summary, removal) {
+    reviewPlan(scheduleRowPlan(row, summary, removal));
+}
+
+/// The backups of a schedule that retention would delete now, and why the others are kept. The same rule
+/// is applied by the backup worker: keep the newest `keep_chains` full backups with everything that depends
+/// on them; delete older chains, except backups in use or required by kept ones.
+function retentionPlan(state, schedule) {
+    const backups = state.operations.filter(op => op.kind === 'backup' && op.schedule_id === schedule.id && op.state === 'succeeded' && !op.deleted)
+        .sort((a, b) => b.requested_ms - a.requested_ms);
+    const fulls = backups.filter(op => op.strategy !== 'incremental');
+    const kept_fulls = new Set(fulls.slice(0, schedule.keep_chains).map(op => op.op_id));
+    const keep = new Set();
+    for (const op of backups) {
+        const {chain} = backupChain(state, op);
+        if (kept_fulls.has(chain[chain.length - 1].op_id)) keep.add(op.op_id);
+    }
+    const plan = [];
+    for (const op of backups) {
+        if (keep.has(op.op_id)) {
+            plan.push({op, delete: false, reason: 'within the newest chains'});
+            continue;
+        }
+        const block = retentionBlock(state, op);
+        const kept_descendant = backupDescendants(state, op).find(d => keep.has(d.op_id));
+        if (kept_descendant) plan.push({op, delete: false, reason: `base of the kept backup ${shortId(kept_descendant.op_id)}`});
+        else if (block && !/Required as the base/.test(block)) plan.push({op, delete: false, reason: block});
+        else plan.push({op, delete: true, reason: 'older than the kept chains'});
+    }
+    return plan;
+}
+
+function retentionPreview(state, schedule) {
+    const plan = retentionPlan(state, schedule);
+    openDialog(`Retention of ${schedule.name}`, [
+        paragraph(`Keeps the ${schedule.keep_chains} newest ${schedule.strategy === 'incremental' ? 'full backups with their incremental chains' : 'backups'}. `
+            + 'The backup worker applies this after each run; deleting a base before its incremental backups is never done.'),
+        dataTable([
+            {title: 'Backup', render: item => [h('code', {}, shortId(item.op.op_id)), h('div', {className: 'note'}, `${item.op.requested_at} UTC · ${item.op.strategy || 'full'}`)]},
+            {title: 'Decision', render: item => item.delete ? badge('Delete', 'bad') : badge('Keep', 'ok')},
+            {title: 'Reason', render: item => item.reason},
+        ], plan, 'The schedule has no backups yet.', 'Retention preview'),
+    ], [button('Close', closeDialog, {className: 'primary'})]);
+}
+
+/// --- Backup & Restore: submitting operations ---
+
+/// Records an operation (written once), then its first state.
+async function recordOperation(row) {
+    const data = {op_id: row.op_id, kind: row.kind, server: session.hostname, destination_id: row.destination_id || '', artifact: row.artifact || '',
+        scope: JSON.stringify(row.scope || {}), strategy: row.strategy || '', base_op_id: row.base_op_id || '', schedule_id: row.schedule_id || '',
+        target: JSON.stringify(row.target || {}), parameters: JSON.stringify(row.parameters || {}), expected: row.expected ? JSON.stringify(row.expected) : ''};
+    const result = await runQuery(session, `INSERT INTO ${quoteIdentifier(session.admin.db)}.backup_operations (op_id, kind, server, destination_id, artifact, scope, strategy, base_op_id, schedule_id, target, parameters, expected) FORMAT JSONEachRow\n${JSON.stringify(data)}`,
+        session.controller.signal, 30000, {raw: true});
+    if (!result.ok) throw new AdminQueryError(result);
+}
+
+/// The tables of a scope that hold data in the server, with their columns, for the review and the checks.
+async function scopeObjects(scope) {
+    const databases = scopeDatabases(scope);
+    if (!databases.length) return [];
+    const tables = await adminRows(`SELECT database, name, engine, total_rows, total_bytes, dependencies_database, dependencies_table, as_select
+        FROM system.tables WHERE database IN {dbs:Array(String)} ORDER BY database, name`, {dbs: arrayParam(databases)});
+    const selected = (scope.tables || []).length ? tables.filter(t => scope.tables.some(([db, name]) => db === t.database && name === t.name)) : tables;
+    return selected;
+}
+
+/// Row count and an order-independent fingerprint of the content (`groupBitXor(cityHash64(*))` over the
+/// ordinary columns), per table with stored data.
+async function tableFingerprints(entries, database_of) {
+    const result = {};
+    for (const entry of entries) {
+        if (!/MergeTree|Log$|^Memory$|^Set$|^Join$/.test(entry.engine)) continue;
+        const db = database_of(entry);
+        const rows = await adminRows(`SELECT count() AS n, toString(groupBitXor(cityHash64(*))) AS fp FROM ${quoteIdentifier(db)}.${quoteIdentifier(entry.name)}`).catch(e => {
+            if (e instanceof AdminSessionChanged) throw e;
+            return [{n: null, fp: null, error: e.message}];
+        });
+        const columns = await adminRows(`SELECT name, type FROM system.columns WHERE database = {db:String} AND table = {t:String} ORDER BY position`, {db, t: entry.name});
+        result[`${entry.database}.${entry.name}`] = {rows: rows[0].n === null ? null : Number(rows[0].n), fingerprint: rows[0].fp, columns: columns.map(c => `${c.name} ${c.type}`)};
+    }
+    return result;
+}
+
+/// A progress dialog for an operation: polls `system.backups` until the operation finishes, records the
+/// final state, and runs `after(final)` (checks). Closing it only stops following the operation.
+function followOperation(title, op, after) {
+    const status = h('div', {role: 'status'}, h('span', {className: 'spinner'}), ' Submitted…');
+    const details = h('div', {});
+    let stopped = false;
+    openDialog(title, [status, details, h('p', {className: 'note'}, `Operation ${op.op_id}. Closing this window does not stop the operation: it runs in the server, `
+        + 'and the Operations tab shows its state.')], [button('Close', closeDialog)], {onclose: () => { stopped = true; reloadAdmin(); }});
+    const current = session;
+    const poll = async () => {
+        while (!stopped && session === current) {
+            const rows = await adminRows(`SELECT toString(status) AS status, error, query_id, num_files, total_size,
+                    dateDiff('millisecond', start_time, if(end_time > start_time, end_time, now64(6))) / 1000 AS duration_s
+                FROM system.backups WHERE id = {id:String}`, {id: op.op_id});
+            if (stopped) return;
+            const row = rows[0];
+            if (row) {
+                const mapped = NATIVE_STATES[row.status] || 'unknown';
+                status.replaceChildren(stateBadge(mapped), ` ${row.status.toLowerCase().replace(/_/g, ' ')} · ${formatSeconds(Number(row.duration_s))}`
+                    + (Number(row.num_files) ? ` · ${row.num_files} files, ${formatBytes(row.total_size)}` : ''));
+                if (TERMINAL_STATES.includes(mapped)) {
+                    const event = {state: mapped, native_id: op.op_id, query_id: row.query_id, error: row.error ? maskSecrets(row.error.split('\n')[0]) : '',
+                        num_files: Number(row.num_files), total_size: Number(row.total_size), details: {source: 'system.backups', duration_s: Number(row.duration_s)}};
+                    if (session.admin.can.write_backup_events) await recordBackupEvent(op.op_id, event);
+                    if (row.error) details.append(h('div', {className: 'message error'}, maskSecrets(row.error.split('\n')[0])));
+                    if (after) await after({...event, duration_s: Number(row.duration_s)}, details, status);
+                    return;
+                }
+            } else {
+                status.replaceChildren(stateBadge('unknown'), ' The server does not show this operation (yet).');
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    };
+    poll().catch(e => { if (!(e instanceof AdminSessionChanged)) details.append(errorBox(e)); });
+}
+
+/// Submits `sql` (a BACKUP or RESTORE with `async`) for a recorded operation, and records the outcome of the
+/// submission: running; failed when the server refused it; unknown when the answer was lost (the operation may
+/// or may not run: the console reconciles it later, and does not submit it again).
+async function submitOperation(op, sql, audit) {
+    await recordBackupEvent(op.op_id, {state: 'queued', native_id: op.op_id});
+    const result = await runQuery(session, sql, session.controller.signal, 120000, {raw: true, settings: {log_comment: `console-admin:${op.op_id}`}});
+    let event;
+    if (result.ok) {
+        event = {state: 'running', native_id: op.op_id, details: {submitted: true}};
+    } else if (result.kind === 'server' || result.kind === 'forbidden' || result.kind === 'missing' || result.kind === 'credentials') {
+        event = {state: 'failed', native_id: op.op_id, error: maskSecrets(result.detail || result.message), details: {submission: 'rejected by the server'}};
+    } else {
+        event = {state: 'unknown', native_id: op.op_id, error: `The submission answer was lost (${result.message}). The operation may be running; it is reconciled, not submitted again.`,
+            details: {submission: 'uncertain'}};
+    }
+    await recordBackupEvent(op.op_id, event);
+    if (session.admin.can.write_audit) {
+        await writeAudit(session, {action: audit.action, target_type: 'backup', target_name: op.op_id, summary: audit.summary,
+            audit_details: {scope: op.scope, destination_id: op.destination_id, artifact: op.artifact, target: op.target}},
+        {correlation_id: op.op_id, scope: 'local', result: event.state === 'running' ? 'success' : 'failure', steps: [{description: audit.summary, status: event.state === 'running' ? 'ok' : 'failed', error: event.error}]},
+        event.error || '');
+    }
+    return event;
+}
+
+/// Compares restored tables with the backup (opened read-only) and with the source values captured when the
+/// backup was made. Records one check per comparison and returns the checks.
+async function validateRestore(state, backup, mapping, restore_op) {
+    const destination = state.destinations_by_id.get(backup.destination_id);
+    const checks = [];
+    const probe = await probeBackupArtifact(destination, backup, false);
+    if (!probe.ok) {
+        checks.push({name: 'backup readable', state: 'failed', error: probe.error});
+        return checks;
+    }
+    const expected_check = [...backup.checks].reverse().find(check => check.name === 'expected_values');
+    const expected = expected_check && expected_check.details.stable ? expected_check.details.tables : null;
+    for (const entry of probe.tables) {
+        const target_db = mapping[entry.database];
+        if (!target_db) continue;
+        const key = `${entry.database}.${entry.table}`;
+        const exists = await adminRows('SELECT engine FROM system.tables WHERE database = {db:String} AND name = {t:String}', {db: target_db, t: entry.table});
+        if (!exists.length) {
+            checks.push({name: `${key}: restored`, state: 'failed', error: `${target_db}.${entry.table} does not exist`});
+            continue;
+        }
+        if (!/MergeTree|Log$|^Memory$/.test(entry.engine)) continue;
+        const restored = await tableFingerprints([{database: entry.database, name: entry.table, engine: entry.engine}], () => target_db);
+        const r = restored[key];
+        if (expected && expected[key]) {
+            const e = expected[key];
+            checks.push({name: `${key}: schema`, state: JSON.stringify(e.columns) === JSON.stringify(r.columns) ? 'passed' : 'failed',
+                details: {expected: e.columns.length + ' columns', restored: r.columns.length + ' columns'}});
+            checks.push({name: `${key}: row count`, state: e.rows === r.rows ? 'passed' : 'failed', details: {expected: e.rows, restored: r.rows}});
+            checks.push({name: `${key}: content fingerprint`, state: e.fingerprint === r.fingerprint ? 'passed' : 'failed', details: {expected: e.fingerprint, restored: r.fingerprint}});
+        } else {
+            checks.push({name: `${key}: row count`, state: r.rows !== null ? 'passed' : 'failed',
+                details: {restored: r.rows, note: 'No stable source values were captured with this backup: only restored and readable is checked.'}});
+        }
+    }
+    const views = (backup.parameters.objects || []).filter(o => /View/.test(o.engine));
+    for (const view of views) {
+        const target_db = mapping[view.database];
+        if (!target_db) continue;
+        const exists = await adminRows('SELECT engine FROM system.tables WHERE database = {db:String} AND name = {t:String}', {db: target_db, t: view.name});
+        checks.push({name: `${view.database}.${view.name}: ${view.engine}`, state: exists.length ? 'passed' : 'failed', details: {restored: exists.length ? exists[0].engine : 'missing'}});
+    }
+    if (session.admin.can.write_backup_events) {
+        for (const check of checks) await recordBackupEvent(restore_op.op_id, {kind: 'check', state: check.state, name: check.name, error: check.error || '', details: check.details || {}});
+    }
+    return checks;
+}
+
+function checksSummary(checks) {
+    const failed = checks.filter(c => c.state === 'failed');
+    return h('div', {className: failed.length ? 'message error' : 'message info'},
+        failed.length ? `${failed.length} of ${checks.length} checks failed.` : `All ${checks.length} checks passed.`, checksTable(checks));
+}
+
+/// --- Backup & Restore: backup wizard ---
+
+/// A dialog with steps: `steps` are `{title, render() -> nodes, validate() -> error | null}`; the last
+/// step's button runs `finish()`.
+function wizard(title, steps, finish_text, finish) {
+    let index = 0;
+    const show = async () => {
+        const step = steps[index];
+        const error = h('div', {className: 'message error', role: 'alert', hidden: true});
+        const content = await step.render();
+        const back = index > 0 ? button('Back', () => { index--; show(); }) : button('Cancel', closeDialog);
+        const next = button(index === steps.length - 1 ? finish_text : 'Next', async () => {
+            const problem = step.validate ? await step.validate() : null;
+            if (problem) {
+                error.textContent = problem;
+                error.hidden = false;
+                return;
+            }
+            if (index === steps.length - 1) finish();
+            else {
+                index++;
+                show();
+            }
+        }, {className: 'primary'});
+        openDialog(`${title}: ${index + 1}/${steps.length} ${step.title}`, [content, error], [back, next]);
+    };
+    show();
+}
+
+async function backupWizard(state) {
+    const admin = session.admin;
+    const databases = (await adminRows("SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') AND engine != 'Backup' ORDER BY name")).map(r => r.name);
+    const w = {databases: [], table_db: '', tables: [], partitions: '', structure_only: false, access_entities: false, destination_id: '', strategy: 'full', base_op_id: '', capture: true};
+    const enabled = state.destinations.filter(d => d.enabled);
+    let review = null;
+    const scope = () => {
+        const s = {databases: w.table_db ? [] : w.databases, tables: w.table_db ? w.tables.map(t => [w.table_db, t]) : [], structure_only: w.structure_only, access_entities: w.access_entities};
+        if (w.table_db && w.tables.length === 1 && w.partitions.trim()) s.partitions = w.partitions.split(',').map(p => p.trim()).filter(Boolean);
+        return s;
+    };
+    wizard('New backup', [
+        {title: 'Scope', render: async () => {
+            const mode = select([['databases', 'Whole databases'], ['tables', 'Tables of one database']], w.table_db ? 'tables' : 'databases');
+            const db_boxes = databases.map(db => checkbox(db, w.databases.includes(db), {onchange: e => {
+                w.databases = databases.filter((d, i) => db_boxes[i].input.checked);
+            }}));
+            const table_db = select(databases, w.table_db || databases[0]);
+            const table_list = h('div', {});
+            const partitions = h('input', {type: 'text', value: w.partitions, placeholder: 'partition IDs, comma-separated (one table only)', autocomplete: 'off'});
+            const load_tables = async () => {
+                const rows = await adminRows("SELECT name, engine FROM system.tables WHERE database = {db:String} ORDER BY name", {db: table_db.value});
+                const boxes = rows.map(r => checkbox(`${r.name} (${r.engine})`, w.tables.includes(r.name), {onchange: () => {
+                    w.tables = rows.filter((x, i) => boxes[i].input.checked).map(x => x.name);
+                }}));
+                table_list.replaceChildren(...boxes.map(b => b.element));
+            };
+            const db_part = h('fieldset', {className: 'box'}, h('legend', {}, 'Databases'), db_boxes.map(b => b.element));
+            const table_part = h('div', {className: 'box'}, adminField('Database', table_db), table_list, adminField('Partitions (optional)', partitions));
+            const sync = () => {
+                db_part.hidden = mode.value !== 'databases';
+                table_part.hidden = mode.value !== 'tables';
+                w.table_db = mode.value === 'tables' ? table_db.value : '';
+            };
+            mode.addEventListener('change', sync);
+            table_db.addEventListener('change', () => { w.tables = []; w.table_db = table_db.value; load_tables(); });
+            partitions.addEventListener('input', () => { w.partitions = partitions.value; });
+            sync();
+            if (mode.value === 'tables') await load_tables();
+            else table_db.addEventListener('focus', load_tables, {once: true});
+            mode.addEventListener('change', () => { if (mode.value === 'tables') load_tables(); });
+            const structure = checkbox('Structure only: CREATE statements without table data', w.structure_only, {onchange: e => { w.structure_only = e.target.checked; }});
+            const access = checkbox('Include users, roles, settings profiles, row policies, and quotas (needs SHOW ACCESS privileges)', w.access_entities,
+                {onchange: e => { w.access_entities = e.target.checked; }});
+            return [paragraph(`Server: ${session.hostname} (ClickHouse ${session.version}). The backup is made by this server; in a cluster, it contains this server's data only.`),
+                adminField('What to back up', mode), db_part, table_part, structure.element, access.element];
+        }, validate: () => {
+            const s = scope();
+            if (!scopeDatabases(s).length) return 'Choose at least one database or table.';
+            if (s.partitions && s.partitions.some(p => !/^[A-Za-z0-9_-]+$/.test(p))) return 'Partition IDs are letters, digits, _ and -, as in system.parts.partition_id.';
+            return null;
+        }},
+        {title: 'Destination', render: () => {
+            const dbs = scopeDatabases(scope());
+            const usable = enabled.filter(d => !d.allowed_databases.length || dbs.every(db => d.allowed_databases.includes(db)));
+            const dest = select(usable.map(d => [d.id, `${d.name} — ${destinationLabel(d)}`]), w.destination_id || (usable[0] || {}).id,
+                {onchange: e => { w.destination_id = e.target.value; }});
+            w.destination_id = dest.value;
+            return [usable.length ? adminField('Destination', dest) : h('div', {className: 'message error'}, 'No enabled destination allows these databases.'),
+                h('p', {className: 'note'}, 'Only enabled destinations whose database restriction allows the whole scope are listed.')];
+        }, validate: () => (w.destination_id ? null : 'Choose a destination.')},
+        {title: 'Type', render: () => {
+            const s = JSON.stringify({databases: scope().databases, tables: scope().tables});
+            const bases = state.operations.filter(op => op.kind === 'backup' && op.state === 'succeeded' && !op.deleted && op.destination_id === w.destination_id
+                && JSON.stringify({databases: op.scope.databases || [], tables: op.scope.tables || []}) === s && !op.scope.structure_only);
+            const strategy = select([['full', 'Full backup'], ['incremental', 'Incremental: only the data parts that are not in the base backup']], w.strategy,
+                {onchange: e => { w.strategy = e.target.value; sync(); }});
+            const base = select(bases.map(op => [op.op_id, `${shortId(op.op_id)} — ${op.requested_at} UTC (${op.strategy || 'full'})`]), w.base_op_id || (bases[0] || {}).op_id,
+                {onchange: e => { w.base_op_id = e.target.value; }});
+            const base_field = adminField('Base backup', base, 'Backups of exactly the same scope to the same destination. Restoring the new backup needs the whole chain.');
+            const sync = () => { base_field.hidden = w.strategy !== 'incremental'; w.base_op_id = w.strategy === 'incremental' ? base.value : ''; };
+            sync();
+            return [adminField('Backup type', strategy), bases.length ? base_field : h('p', {className: 'note'}, 'No backup of the same scope exists at this destination, so only a full backup is possible.'),
+                checkbox('Capture validation values: row count and content fingerprint of each table, before and after the backup (reads every table twice)',
+                    w.capture, {onchange: e => { w.capture = e.target.checked; }}).element];
+        }, validate: async () => {
+            if (w.strategy !== 'incremental') return null;
+            if (!w.base_op_id) return 'Choose a base backup, or make a full backup.';
+            const base = state.operations.find(op => op.op_id === w.base_op_id);
+            const {missing} = backupChain(state, base);
+            if (missing) return `The base chain is broken: ${missing}.`;
+            const probe = await probeBackupArtifact(state.destinations_by_id.get(base.destination_id), base);
+            return probe.ok ? null : `The base backup cannot be opened: ${probe.error}`;
+        }},
+        {title: 'Review', render: async () => {
+            const s = scope();
+            const objects = await scopeObjects(s);
+            const external = objects.filter(o => /^(S3|URL|MySQL|PostgreSQL|MongoDB|HDFS|Kafka|RabbitMQ|NATS|Redis|ODBC|JDBC|File|AzureBlobStorage|Iceberg|DeltaLake|Hudi|Distributed|Dictionary)/.test(o.engine));
+            const views = objects.filter(o => /View/.test(o.engine));
+            const outside = views.filter(v => (v.dependencies_database || []).some(db => !scopeDatabases(s).includes(db)));
+            const busy = await detailRows(`SELECT database, table, count() AS n FROM system.mutations WHERE NOT is_done AND database IN {dbs:Array(String)} GROUP BY database, table`,
+                {dbs: arrayParam(scopeDatabases(s))});
+            const ddl = await detailRows(`SELECT count() AS n FROM system.processes WHERE query_kind IN ('Create', 'Drop', 'Alter', 'Rename') AND hasAny(databases, {dbs:Array(String)})`,
+                {dbs: arrayParam(scopeDatabases(s))});
+            const destination = state.destinations_by_id.get(w.destination_id);
+            review = {scope: s, objects: objects.map(o => ({database: o.database, name: o.name, engine: o.engine})), destination};
+            return [kvList([
+                ['Scope', scopeText(s)], ['Destination', destinationLabel(destination)],
+                ['Type', w.strategy === 'incremental' ? `incremental on ${shortId(w.base_op_id)}` : 'full'],
+                ['Objects', `${objects.length} (${views.length} views)`],
+            ]),
+            dataTable([
+                {title: 'Object', render: o => `${o.database}.${o.name}`},
+                {title: 'Engine', render: o => o.engine},
+                {title: 'Rows', className: 'num', render: o => (o.total_rows === null ? '—' : String(o.total_rows))},
+                {title: 'Size', className: 'num', render: o => formatBytes(o.total_bytes)},
+            ], objects, 'No objects in the scope.', 'Objects in the backup'),
+            external.length ? h('div', {className: 'message warning'}, `Only the definitions of ${external.map(o => `${o.database}.${o.name} (${o.engine})`).join(', ')} are backed up: their data is stored elsewhere.`) : null,
+            outside.length ? h('div', {className: 'message warning'}, `These views read from databases outside the scope: ${outside.map(v => `${v.database}.${v.name}`).join(', ')}. Restoring them needs those databases.`) : null,
+            !busy.rows ? h('div', {className: 'message warning'}, `Unfinished mutations: unknown (${busy.error}).`)
+                : busy.rows.length ? h('div', {className: 'message warning'}, `Unfinished mutations: ${busy.rows.map(b => `${b.database}.${b.table} (${b.n})`).join(', ')}. The backup contains the parts as they are when each table is copied.`) : null,
+            !ddl.rows ? h('div', {className: 'message warning'}, `Running schema changes: unknown (${ddl.error}).`)
+                : Number(ddl.rows[0].n) ? h('div', {className: 'message warning'}, `${ddl.rows[0].n} schema changes are running on these databases now.`) : null,
+            h('p', {className: 'note'}, 'Consistency: each table is backed up from the data parts it has when its backup starts. Tables are not copied at the same instant, '
+                + 'so the backup is not a transactionally consistent snapshot of several tables; rows inserted during the backup may or may not be included. '
+                + 'Not included: the server configuration, named collections and other secrets, Keeper data, and data stored outside the server.')];
+        }},
+    ], 'Start backup', () => startBackup(state, w, review));
+}
+
+async function startBackup(state, w, review) {
+    const destination = review.destination;
+    const op = {op_id: crypto.randomUUID(), kind: 'backup', destination_id: destination.id, scope: review.scope, strategy: w.strategy, base_op_id: w.base_op_id,
+        parameters: {server_version: session.version, objects: review.objects, structure_only: review.scope.structure_only}};
+    const db_label = scopeDatabases(review.scope).join('_').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40);
+    op.artifact = `${db_label}/${utcNowCompact()}-${op.op_id.slice(0, 8)}`;
+    let before = null;
+    openDialog('Starting the backup', [loadingBox(w.capture ? 'Capturing validation values…' : 'Submitting…')], null);
+    try {
+        if (w.capture && !review.scope.structure_only) before = await tableFingerprints(review.objects, entry => entry.database);
+        await recordOperation(op);
+        const settings = [`id = ${quoteString(op.op_id)}`, 'async = 1'];
+        if (review.scope.structure_only) settings.push('structure_only = 1');
+        if (w.base_op_id) {
+            const base = state.operations.find(o => o.op_id === w.base_op_id);
+            settings.push(`base_backup = ${backupLocationSQL(state.destinations_by_id.get(base.destination_id), base.artifact)}`);
+        }
+        const sql = `BACKUP ${backupScopeSQL(review.scope)} TO ${backupLocationSQL(destination, op.artifact)} SETTINGS ${settings.join(', ')}`;
+        const event = await submitOperation(op, sql, {action: 'submit_backup', summary: `Back up ${scopeText(review.scope)} to ${destination.name}`});
+        if (event.state !== 'running') {
+            openDialog('Backup not started', [h('div', {className: event.state === 'failed' ? 'message error' : 'message warning'}, event.error),
+                h('p', {className: 'note'}, `Operation ${op.op_id} is recorded as ${event.state}.`)], [button('Close', closeDialog, {className: 'primary'})], {onclose: reloadAdmin});
+            return;
+        }
+    } catch (e) {
+        if (e instanceof AdminSessionChanged) return;
+        openDialog('Backup not started', [errorBox(e)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+        return;
+    }
+    followOperation('Backup', op, async (final, details) => {
+        if (final.state !== 'succeeded' || !before) return;
+        details.append(loadingBox('Comparing the validation values after the backup…'));
+        const after = await tableFingerprints(review.objects, entry => entry.database);
+        const stable = JSON.stringify(before) === JSON.stringify(after);
+        details.lastChild.remove();
+        details.append(h('div', {className: stable ? 'message info' : 'message warning'}, stable
+            ? 'The source did not change during the backup: its row counts and fingerprints are stored as the expected values of restore tests.'
+            : 'The source changed during the backup, so its values cannot serve as expected values: restore tests compare with the backup itself only.'));
+        if (session.admin.can.write_backup_events) {
+            await recordBackupEvent(op.op_id, {kind: 'check', state: stable ? 'passed' : 'unknown', name: 'expected_values', details: {stable, tables: stable ? before : {}}});
+        }
+    });
+}
+
+/// --- Backup & Restore: artifact check, restore test, deletion ---
+
+async function checkArtifactDialog(state, op) {
+    openDialog(`Check ${shortId(op.op_id)}`, [loadingBox('Opening the backup read-only and reading every table…')], null);
+    const probe = await probeBackupArtifact(state.destinations_by_id.get(op.destination_id), op, true);
+    if (session.admin.can.write_backup_events) {
+        await recordBackupEvent(op.op_id, {kind: 'check', state: probe.ok ? 'passed' : 'failed', name: 'artifact', error: probe.error || '',
+            details: probe.ok ? {tables: probe.tables.length, rows: probe.tables.reduce((s, t) => s + (t.read_rows || 0), 0)} : {}});
+    }
+    openDialog(`Check ${shortId(op.op_id)}`, probe.ok ? [
+        h('div', {className: 'message info'}, 'The backup opens, and every table was read completely. This shows the artifact and its base chain are complete and readable; a restore test also checks the content.'),
+        dataTable([
+            {title: 'Table', render: t => `${t.database}.${t.table}`}, {title: 'Engine', render: t => t.engine},
+            {title: 'Rows read', className: 'num', render: t => (t.read_rows === undefined ? '—' : String(t.read_rows))},
+        ], probe.tables, 'The backup has no tables.', 'Tables in the backup')]
+        : [h('div', {className: 'message error'}, `The backup cannot be opened: ${probe.error}`)], [button('Close', closeDialog, {className: 'primary'})], {onclose: reloadAdmin});
+}
+
+/// Restores a backup into new databases named `console_verify_<id>_<database>`, checks them, and drops them.
+async function verifyDialog(state, backup) {
+    const {missing} = backupChain(state, backup);
+    if (missing) {
+        openDialog('Restore test', [h('div', {className: 'message error'}, `The backup cannot be restored: ${missing}.`)], [button('Close', closeDialog)]);
+        return;
+    }
+    const mapping = Object.fromEntries(scopeDatabases(backup.scope).map(db => [db, `console_verify_${backup.op_id.slice(0, 8)}_${db}`.slice(0, 60)]));
+    const existing = await adminRows('SELECT name FROM system.databases WHERE name IN {dbs:Array(String)}', {dbs: arrayParam(Object.values(mapping))});
+    if (existing.length) {
+        openDialog('Restore test', [h('div', {className: 'message error'}, `The test databases ${existing.map(r => r.name).join(', ')} already exist (a previous test did not clean up). Drop them first.`)], [button('Close', closeDialog)]);
+        return;
+    }
+    openDialog('Restore test', [paragraph(`Restores backup ${shortId(backup.op_id)} into new databases on ${session.hostname}: ${Object.values(mapping).join(', ')}, `
+        + 'compares them with the backup and the captured source values, and drops them. Access entities are never restored by a test.'),
+    h('p', {className: 'note'}, 'This needs CREATE DATABASE, CREATE TABLE, INSERT, and DROP DATABASE on console_verify_*, and READ on the destination.')],
+    [button('Cancel', closeDialog), button('Run restore test', () => runVerification(state, backup, mapping), {className: 'primary'})]);
+}
+
+async function runVerification(state, backup, mapping) {
+    const destination = state.destinations_by_id.get(backup.destination_id);
+    const op = {op_id: crypto.randomUUID(), kind: 'verify', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: false},
+        base_op_id: backup.op_id, target: mapping, parameters: {target_version: session.version, target_host: session.hostname}};
+    try {
+        await recordOperation(op);
+        const created = await createTargetDatabases(op, backup, mapping);
+        if (created) {
+            openDialog('Restore test not started', [h('div', {className: 'message error'}, created)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+            return;
+        }
+        const event = await submitOperation(op, restoreSQL(backup, destination, mapping, {access_entities: false, op_id: op.op_id}),
+            {action: 'submit_restore_test', summary: `Restore test of backup ${shortId(backup.op_id)}`});
+        if (event.state !== 'running') {
+            openDialog('Restore test not started', [h('div', {className: 'message error'}, event.error)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+            return;
+        }
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('Restore test not started', [errorBox(e)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+        return;
+    }
+    followOperation('Restore test', op, async (final, details) => {
+        let checks = [];
+        if (final.state === 'succeeded') {
+            details.append(loadingBox('Checking the restored data…'));
+            checks = await validateRestore(state, backup, mapping, op);
+            details.lastChild.remove();
+            details.append(checksSummary(checks));
+        }
+        const dropped = [];
+        for (const db of Object.values(mapping)) {
+            const result = await runQuery(session, `DROP DATABASE IF EXISTS ${quoteIdentifier(db)}`, session.controller.signal, 120000, {raw: true});
+            dropped.push(result.ok ? null : `${db}: ${result.detail || result.message}`);
+        }
+        const cleanup_failed = dropped.filter(Boolean);
+        if (session.admin.can.write_backup_events) {
+            await recordBackupEvent(op.op_id, {kind: 'check', state: cleanup_failed.length ? 'failed' : 'passed', name: 'cleanup', error: cleanup_failed.join('; '),
+                details: {dropped: Object.values(mapping)}});
+        }
+        details.append(h('p', {className: cleanup_failed.length ? 'message error' : 'note'}, cleanup_failed.length ? `Cleanup failed: ${cleanup_failed.join('; ')}` : 'The test databases were dropped.'));
+        if (session.admin.can.write_audit) {
+            const failed = final.state !== 'succeeded' || checks.some(c => c.state === 'failed');
+            await writeAudit(session, {action: 'restore_test_result', target_type: 'backup', target_name: backup.op_id, summary: `Restore test of ${shortId(backup.op_id)}: ${failed ? 'failed' : 'passed'}`,
+                audit_details: {checks: checks.map(c => ({name: c.name, state: c.state}))}}, {correlation_id: op.op_id, scope: 'local', result: failed ? 'failure' : 'success', steps: []}, final.error || '');
+        }
+    });
+}
+
+async function deleteBackupDialog(state, backup) {
+    const block = retentionBlock(state, backup);
+    if (block) {
+        openDialog(`Delete ${shortId(backup.op_id)}`, [h('div', {className: 'message error'}, `Cannot be deleted: ${block}`)], [button('Close', closeDialog)]);
+        return;
+    }
+    const destination = state.destinations_by_id.get(backup.destination_id);
+    const confirm = h('input', {type: 'text', autocomplete: 'off', spellcheck: false});
+    const error = h('div', {className: 'message error', hidden: true});
+    openDialog(`Delete ${shortId(backup.op_id)}`, [
+        kvList([['Backup', backup.op_id], ['Scope', scopeText(backup.scope)], ['Location', `${destinationLabel(destination)}/${backup.artifact}`]]),
+        paragraph('The backup worker deletes the files of this backup, only under the destination prefix, and records the outcome. The deletion is requested now and '
+            + 'happens when the worker next runs. Object-lock or retention settings of the bucket can prevent it; the worker then reports the failure.'),
+        adminField(`Type ${shortId(backup.op_id)} to confirm`, confirm), error,
+    ], [button('Cancel', closeDialog), button('Request deletion', async () => {
+        if (confirm.value !== shortId(backup.op_id)) {
+            error.textContent = 'The ID does not match.';
+            error.hidden = false;
+            return;
+        }
+        const op = {op_id: crypto.randomUUID(), kind: 'delete', destination_id: backup.destination_id, artifact: backup.artifact, scope: backup.scope, base_op_id: backup.op_id};
+        try {
+            await recordOperation(op);
+            await recordBackupEvent(op.op_id, {state: 'queued'});
+            if (session.admin.can.write_audit) {
+                await writeAudit(session, {action: 'request_backup_deletion', target_type: 'backup', target_name: backup.op_id, summary: `Request deletion of backup ${shortId(backup.op_id)}`},
+                    {correlation_id: op.op_id, scope: 'local', result: 'success', steps: []}, '');
+            }
+            closeDialog();
+        } catch (e) {
+            if (!(e instanceof AdminSessionChanged)) openDialog('Deletion not requested', [errorBox(e)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+        }
+    }, {className: 'danger primary'})], {onclose: reloadAdmin});
+}
+
+/// --- Backup & Restore: restore wizard ---
+
+/// The RESTORE statement for a backup into `mapping` (source database -> target database). Tables of a
+/// table-level backup are restored into their mapped database, which must exist. Data is never added to
+/// existing tables: `allow_non_empty_tables` stays off, and existing tables make RESTORE fail.
+function restoreSQL(backup, destination, mapping, options) {
+    const items = [];
+    for (const db of backup.scope.databases || []) items.push(`DATABASE ${quoteIdentifier(db)} AS ${quoteIdentifier(mapping[db])}`);
+    for (const [db, table] of backup.scope.tables || []) {
+        let item = `TABLE ${quoteIdentifier(db)}.${quoteIdentifier(table)} AS ${quoteIdentifier(mapping[db])}.${quoteIdentifier(table)}`;
+        if (backup.scope.partitions && backup.scope.partitions.length) item += ` PARTITIONS ${backup.scope.partitions.map(quoteString).join(', ')}`;
+        items.push(item);
+    }
+    if (options.access_entities) for (const table of ['users', 'roles', 'settings_profiles', 'row_policies', 'quotas']) items.push(`TABLE system.${table}`);
+    const settings = [`id = ${quoteString(options.op_id)}`, 'async = 1', `restore_access_entities = ${options.access_entities ? 1 : 0}`];
+    if (options.structure_only) settings.push('structure_only = 1');
+    if (options.access_entities) settings.push("create_access = 'create'");
+    return `RESTORE ${items.join(', ')} FROM ${backupLocationSQL(destination, backup.artifact)} SETTINGS ${settings.join(', ')}`;
+}
+
+function renderRestoreStart(state) {
+    const preselected = new URLSearchParams(location.search).get('backup');
+    const backups = state.operations.filter(op => op.kind === 'backup' && op.state === 'succeeded' && !op.deleted);
+    const chosen = backups.find(op => op.op_id === preselected);
+    if (chosen) setTimeout(() => restoreWizard(state, chosen), 0);
+    return [paragraph('Restores go into new databases by default. The console never drops or adds data to existing objects as part of a restore: '
+        + 'conflicts stop the restore, and dropping a target is a separate, confirmed, and audited action.'),
+    dataTable([
+        {title: 'Backup', render: op => [h('code', {}, shortId(op.op_id)), h('div', {className: 'note'}, `${op.requested_at} UTC`)]},
+        {title: 'Scope', render: op => scopeText(op.scope)},
+        {title: 'Type', render: op => [op.strategy || 'full', op.strategy === 'incremental' ? chainNote(state, op) : null]},
+        {title: 'Status', render: op => backupStatusList(state, op)},
+        {title: '', render: op => button('Restore…', () => restoreWizard(state, op), {className: 'small primary', disabled: !session.admin.can.write_backup_ops})},
+    ], backups, 'No backups to restore.', 'Backups to restore')];
+}
+
+async function restoreWizard(state, backup) {
+    const destination = state.destinations_by_id.get(backup.destination_id);
+    const stamp = utcNowCompact().slice(0, 13).replace('-', '_');
+    const w = {mapping: Object.fromEntries(scopeDatabases(backup.scope).map(db => [db, `restore_${db}_${stamp}`.slice(0, 60)])), access_entities: false, structure_only: false,
+        probe: null, preflight: null, conflicts: null};
+    wizard(`Restore ${shortId(backup.op_id)}`, [
+        {title: 'Backup and chain', render: async () => {
+            const {chain, missing} = backupChain(state, backup);
+            w.probe = missing ? null : await probeBackupArtifact(destination, backup);
+            return [kvList([['Backup', backup.op_id], ['Made', `${backup.requested_at} UTC on ${backup.server}, ClickHouse ${backup.parameters.server_version || 'unknown version'}`],
+                ['Scope', scopeText(backup.scope)], ['Location', `${destinationLabel(destination)}/${backup.artifact}`],
+                ['Chain', chain.map(op => `${shortId(op.op_id)} (${op.strategy || 'full'})`).join(' → ')]]),
+            missing ? h('div', {className: 'message error'}, `The chain is broken: ${missing}.`)
+                : w.probe.ok ? h('div', {className: 'message info'}, `The backup and its chain open: ${w.probe.tables.length} tables. This is an inspection of the backup, not a dry run of the restore.`)
+                    : h('div', {className: 'message error'}, `The backup cannot be opened: ${w.probe.error}`)];
+        }, validate: () => (w.probe && w.probe.ok ? null : 'The backup must open before it can be restored.')},
+        {title: 'Target', render: async () => {
+            const can = session.admin.can;
+            const checks = [];
+            checks.push(['Server', `${session.hostname}, ClickHouse ${session.version}`]);
+            const same_version = backup.parameters.server_version === session.version;
+            checks.push(['Version', same_version ? badge('Same version as the backup', 'ok')
+                : badge(`Backup made with ${backup.parameters.server_version || 'an unknown version'}`, 'warn', 'RESTORE reads backups of older versions, but compatibility across versions and between custom and official builds is not guaranteed. A restore test on this server checks it.')]);
+            const target_names = Object.values(w.mapping);
+            const grants = [];
+            for (const db of target_names) {
+                grants.push([`CREATE DATABASE, CREATE TABLE, INSERT on ${db}`, await checkGrant(`CREATE DATABASE, CREATE TABLE, INSERT ON ${quoteIdentifier(db)}.*`)]);
+            }
+            grants.push([destination.type === 'disk' ? 'READ ON DISK' : `NAMED COLLECTION ${destination.named_collection}, READ ON S3`,
+                destination.type === 'disk' ? can.read_disk : await checkGrant(`NAMED COLLECTION ON ${quoteIdentifier(destination.named_collection)}`) && await checkGrant('READ ON S3')]);
+            const disks = await detailRows('SELECT name, free_space FROM system.disks');
+            const default_disk = disks.rows && disks.rows.find(d => d.name === 'default');
+            w.preflight = {grants};
+            return [kvList(checks), dataTable([
+                {title: 'Privilege', render: g => g[0]}, {title: 'Granted', render: g => (g[1] ? badge('Yes', 'ok') : badge('No', 'bad'))},
+            ], grants, null, 'Privileges'),
+            kvList([['Free space on the default disk', default_disk ? formatBytes(default_disk.free_space) : `unknown${disks.error ? ` (${disks.error})` : ''}`],
+                ['Size of the backup', backup.total_size ? `${formatBytes(backup.total_size)} (as reported by the backup; the restored size can differ)` : 'unknown']]),
+            default_disk && backup.total_size && Number(default_disk.free_space) < backup.total_size * 1.2
+                ? h('div', {className: 'message error'}, 'The free space looks insufficient for this backup.') : null];
+        }, validate: () => (w.preflight.grants.every(g => g[1]) ? null : 'Your user lacks privileges for this restore: see the list.')},
+        {title: 'Names and options', render: () => {
+            const inputs = Object.keys(w.mapping).map(db => {
+                const input = h('input', {type: 'text', value: w.mapping[db], autocomplete: 'off', spellcheck: false, oninput: e => { w.mapping[db] = e.target.value.trim(); }});
+                return adminField(`${db} → target database`, input);
+            });
+            const fields = [paragraph('Each database of the backup is restored into a new database. Keep the suggested names for an isolated copy.'), ...inputs,
+                checkbox('Structure only: create the tables without restoring data', w.structure_only, {onchange: e => { w.structure_only = e.target.checked; }}).element];
+            if (backup.scope.access_entities) {
+                fields.push(h('div', {className: 'box'}, h('h3', {}, 'Access entities'),
+                    paragraph('This backup contains users, roles, settings profiles, row policies, and quotas. Restoring them can replace privileges and lock administrators out, '
+                        + 'so it is a separate choice. Existing entities with the same names make the restore fail (create_access = create).'),
+                    checkbox('Also restore the access entities', w.access_entities, {onchange: e => { w.access_entities = e.target.checked; }}).element));
+            }
+            return fields;
+        }, validate: () => {
+            for (const db of Object.values(w.mapping)) if (nameError(db, 'database')) return nameError(db, 'database');
+            if (new Set(Object.values(w.mapping)).size !== Object.values(w.mapping).length) return 'Each target database must be different.';
+            return null;
+        }},
+        {title: 'Conflicts', render: async () => {
+            const targets = Object.values(w.mapping);
+            const dbs = await adminRows('SELECT name, engine FROM system.databases WHERE name IN {dbs:Array(String)}', {dbs: arrayParam(targets)});
+            const tables = await adminRows('SELECT database, name, total_rows FROM system.tables WHERE database IN {dbs:Array(String)}', {dbs: arrayParam(targets)});
+            w.conflicts = {dbs, tables};
+            const table_level = (backup.scope.tables || []).length > 0;
+            const parts = [];
+            if (!dbs.length) {
+                parts.push(h('div', {className: 'message info'}, `No conflicts: ${targets.join(', ')} do not exist and are created by the restore.`));
+            } else {
+                parts.push(h('div', {className: 'message error'}, `Existing targets: ${dbs.map(d => d.name).join(', ')}${tables.length ? ` with ${tables.length} tables` : ''}. `
+                    + 'RESTORE fails on existing tables and never adds data to them. Choose other names, or drop the targets with the separate action below.'));
+                for (const db of dbs) {
+                    parts.push(h('div', {className: 'actions-row'}, button(`Drop ${db.name}…`, () => dropTargetDialog(db.name, backup), {className: 'small danger'})));
+                }
+            }
+            if (table_level) parts.push(h('p', {className: 'note'}, 'This backup has tables of one database: the target database is created first (an empty database), then the tables are restored into it.'));
+            return parts;
+        }, validate: () => (w.conflicts.dbs.length ? 'The target databases exist. Choose other names or drop them first.' : null)},
+        {title: 'Confirm', render: () => {
+            const confirm = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, oninput: e => { w.confirm = e.target.value; }});
+            w.confirm = '';
+            return [kvList([['Backup', `${shortId(backup.op_id)} (${scopeText(backup.scope)})`], ['Into', Object.entries(w.mapping).map(([s, t]) => `${s} → ${t}`).join(', ')],
+                ['Server', session.hostname], ['Access entities', w.access_entities ? badge('Restored', 'warn') : 'not restored'], ['Data', w.structure_only ? 'structure only' : 'tables with data']]),
+            adminField(`Type ${Object.values(w.mapping)[0]} to confirm the target`, confirm)];
+        }, validate: () => (w.confirm === Object.values(w.mapping)[0] ? null : 'The name does not match.')},
+    ], 'Start restore', () => startRestore(state, backup, destination, w));
+}
+
+/// A backup of tables (not whole databases) is restored into existing databases: create the empty targets
+/// first. Returns an error message, recorded as the failure of the operation, or null.
+async function createTargetDatabases(op, backup, mapping) {
+    if (!(backup.scope.tables || []).length) return null;
+    for (const db of new Set((backup.scope.tables || []).map(([source]) => mapping[source]))) {
+        const created = await runQuery(session, `CREATE DATABASE ${quoteIdentifier(db)}`, session.controller.signal, 60000, {raw: true, settings: {log_comment: `console-admin:${op.op_id}`}});
+        if (!created.ok) {
+            const error = `The target database ${db} could not be created: ${maskSecrets(created.detail || created.message)}`;
+            await recordBackupEvent(op.op_id, {state: 'failed', error, details: {step: 'create target database'}});
+            return error;
+        }
+    }
+    return null;
+}
+
+/// Dropping a restore target is its own action: reviewed, typed, and audited, never part of a restore.
+function dropTargetDialog(db, backup) {
+    const confirm = h('input', {type: 'text', autocomplete: 'off', spellcheck: false});
+    const error = h('div', {className: 'message error', hidden: true});
+    openDialog(`Drop ${db}`, [paragraph(`Drops the database ${db} with all its tables and data. This is not part of the restore and cannot be undone.`),
+        adminField(`Type ${db} to confirm`, confirm), error], [button('Cancel', closeDialog), button('Review', () => {
+        if (confirm.value !== db) {
+            error.textContent = 'The name does not match.';
+            error.hidden = false;
+            return;
+        }
+        reviewPlan({action: 'drop_restore_target', target_type: 'database', target_name: db, summary: `Drop database ${db} before restoring backup ${shortId(backup.op_id)}`,
+            danger: true, confirm_text: 'Drop', local_only: true, steps: [{description: `Drop database ${db}`, sql: `DROP DATABASE ${quoteIdentifier(db)} SYNC`}]});
+    }, {className: 'danger primary'})]);
+}
+
+async function startRestore(state, backup, destination, w) {
+    const op = {op_id: crypto.randomUUID(), kind: 'restore', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: w.access_entities},
+        base_op_id: backup.op_id, target: w.mapping, parameters: {target_version: session.version, structure_only: w.structure_only, access_entities: w.access_entities}};
+    openDialog('Starting the restore', [loadingBox('Submitting…')], null);
+    try {
+        await recordOperation(op);
+        const created = await createTargetDatabases(op, backup, w.mapping);
+        if (created) {
+            openDialog('Restore not started', [h('div', {className: 'message error'}, created)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+            return;
+        }
+        const event = await submitOperation(op, restoreSQL(backup, destination, w.mapping, {access_entities: w.access_entities, structure_only: w.structure_only, op_id: op.op_id}),
+            {action: 'submit_restore', summary: `Restore backup ${shortId(backup.op_id)} into ${Object.values(w.mapping).join(', ')}`});
+        if (event.state !== 'running') {
+            openDialog('Restore not started', [h('div', {className: 'message error'}, event.error)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+            return;
+        }
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('Restore not started', [errorBox(e)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+        return;
+    }
+    followOperation('Restore', op, async (final, details) => {
+        if (final.state !== 'succeeded' || w.structure_only) return;
+        details.append(loadingBox('Validating the restored data…'));
+        const checks = await validateRestore(state, backup, w.mapping, op);
+        details.lastChild.remove();
+        details.append(checksSummary(checks));
+    });
+}
 
 /// --- Startup ---
 

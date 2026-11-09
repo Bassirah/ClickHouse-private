@@ -335,6 +335,29 @@ await test('Component access denied: hidden in the UI and on its route; native p
     await sql(`REVOKE SELECT ON system.part_log FROM e2e_user`);
 });
 
+await test('Resources links are governed too: an administrator hides one in the matrix, and the user no longer sees it', async () => {
+    const page = admin.page;
+    await go(page, '/console/admin-access');
+    await page.waitForTimeout(1500);
+    const row = await view(page).locator('tr', {hasText: 'Documentation'}).first().innerText();
+    check(row.includes('Resources') && row.includes('external website'), `the link is not in the matrix: ${row}`);
+    check((await view(page).locator('tr', {hasText: 'Documentation'}).first().locator('input[type=checkbox]').count()) === 1, 'a link has more than the Open capability');
+    await view(page).getByLabel('Open Documentation').uncheck();
+    await view(page).locator('button', {hasText: 'Save rules'}).click();
+    check((await apply(page)).includes('Applied.'), 'the rules were not saved');
+    await closeDialog(page);
+    check(await sql(`SELECT open FROM ${ADMIN_DB}.component_policy FINAL WHERE subject_type = 'all' AND component = 'documentation' AND NOT deleted`) === 'false', 'no rule for the link');
+
+    const user = await signIn('e2e_user', PASSWORD);
+    check(!(await user.page.locator('#sidebar').innerText()).includes('Documentation'), 'Documentation is listed for e2e_user');
+    check(!(await user.page.$('.card[data-component="documentation"]')), 'Documentation has a card for e2e_user');
+    check(!!(await user.page.$('#sidebar a[data-component="website"]')), 'another link disappeared');
+    await go(user.page, '/console/documentation');
+    check((await user.page.locator('#panel-state').innerText()).includes('is not allowed'), 'the route does not explain the policy');
+    await screenshot(user.page, 'a07-link-denied');
+    await user.context.close();
+});
+
 await test('Scoped access administrator: manages users in its scope only, and only with its roles', async () => {
     const page = admin.page;
     await go(page, '/console/admin-roles');
@@ -431,10 +454,21 @@ await sql(`DROP QUOTA IF EXISTS e2e_quota`);
 await sql('DROP DATABASE IF EXISTS e2e_sales');
 await sql('DROP DATABASE IF EXISTS e2e_hr');
 if (original_policy !== null) {
-    const merges = original_policy.split('\n').filter(line => line.includes('"merges"'));
-    await sql(`INSERT INTO ${ADMIN_DB}.component_policy (subject_type, subject, component, open, view_data, run_queries, administer, deleted) FORMAT JSONEachRow
-        {"subject_type": "user", "subject": "${ADMIN_USER}", "component": "merges", "open": false, "view_data": false, "run_queries": false, "administer": false, "deleted": true}
-        ${merges.join('\n')}`);
+    /// Remove the rules the checks added, then insert the original ones again. Two inserts: the version of
+    /// a row is the time of its insert, and rows of the same key and time have no defined order.
+    const removed = [];
+    for (const component of ['merges', 'documentation']) {
+        for (const [type, subject] of [['all', ''], ['user', ADMIN_USER]]) {
+            removed.push(JSON.stringify({subject_type: type, subject, component, open: false, view_data: false, run_queries: false, administer: false, deleted: true}));
+        }
+    }
+    const restored = original_policy.split('\n').filter(line => line.includes('"merges"') || line.includes('"documentation"'));
+    const columns = '(subject_type, subject, component, open, view_data, run_queries, administer, deleted)';
+    await sql(`INSERT INTO ${ADMIN_DB}.component_policy ${columns} FORMAT JSONEachRow\n${removed.join('\n')}`);
+    if (restored.length) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        await sql(`INSERT INTO ${ADMIN_DB}.component_policy ${columns} FORMAT JSONEachRow\n${restored.join('\n')}`);
+    }
 }
 
 await test('No script errors in the pages', async () => {
