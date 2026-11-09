@@ -7,7 +7,7 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 
 | File | Role |
 |---|---|
-| `programs/server/console.html` | The console: login, home page, sidebar, panel lifecycle, navigation registry (`COMPONENTS`), and the Administration pages (users, roles, component access, profiles and quotas, audit). |
+| `programs/server/console.html` | The console: login, home page, sidebar, panel lifecycle, navigation registry (`COMPONENTS`), and the Administration pages (users, roles, component access, profiles and quotas, audit, backup and restore). |
 | `src/Server/WebUIRequestHandler.{h,cpp}` | `ConsoleWebUIRequestHandler`: serves the page for `/console/*` and `/console/config.json`. |
 | `src/Server/HTTPHandlerFactory.cpp` | Registers `/console` and the `console` handler type of `http_handlers`. |
 | `src/Core/ServerSettings.cpp` | Accepts the `web_console` configuration section. |
@@ -15,9 +15,12 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `programs/server/index.html` | Link to the console on the landing page. |
 | `tests/queries/0_stateless/05293_web_console.sh` | Routes, headers, configuration defaults, integration contract. |
 | `tests/queries/0_stateless/05294_web_console_access_management.sh` | Server behavior the Administration pages rely on: suspension, scoped `CHECK GRANT`, delegation, the audit table, password masking. |
+| `tests/queries/0_stateless/05295_web_console_backup.sh` | Server behavior Backup & Restore relies on: operation IDs, refusal of duplicate IDs and locations, missing bases, restores that never write into existing tables, the `Backup` engine, privileges. |
 | `tests/integration/test_web_console` | `web_console` configuration, configuration reload, `console` handler type. |
 | `utils/web-console/console_e2e.mjs` | Browser end-to-end checks (Playwright; not part of the build). |
 | `utils/web-console/access_e2e.mjs` | Browser acceptance checks of the Administration pages (Playwright; not part of the build). |
+| `utils/web-console/backup_worker.mjs` | Backup worker: schedules, reconciliation, retention, deletions (Node.js 18, no packages). |
+| `utils/web-console/backup_e2e.mjs` | Browser acceptance checks of Backup & Restore, including a server restart and an unavailable destination (Playwright; not part of the build). |
 | `utils/web-console/Dockerfile` | Image with a locally built binary on top of the official image. |
 
 All HTML pages are embedded into the binary with `#embed`: **any change to an `.html` file needs a
@@ -131,6 +134,45 @@ embedded Keeper and a replica on a port where nothing listens):
 ```bash
 cp ~/src/ClickHouse-private/utils/web-console/access_e2e.mjs ~/console-e2e/
 node access_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass [--cluster console_test] --screenshots shots
+```
+
+Backup & Restore has its own checks. They need a `backups` disk allowed in `backups.allowed_disk`, an S3
+endpoint (a MinIO container) listed in `web_console.backup_s3_endpoints`, and a command that kills and starts
+the server. They create the database `e2e_bk_src`, the user `e2e_bk_reader`, destinations named `e2e disk` and
+`e2e s3` with new prefixes, and stop and start the MinIO container. For the development instance:
+
+```bash
+D=~/src/ClickHouse-private/tmp/console-dev
+cat > $D/config.d/dev-backups.xml <<EOF
+<clickhouse>
+    <storage_configuration><disks><backups><type>local</type><path>$D/backups/</path></backups></disks></storage_configuration>
+    <backups><allowed_disk>backups</allowed_disk></backups>
+    <web_console><backup_s3_endpoints>http://127.0.0.1:29900</backup_s3_endpoints></web_console>
+</clickhouse>
+EOF
+mkdir -p $D/e2e && cat > $D/e2e/restart.sh <<'EOF'
+#!/bin/bash
+# Simulates a server failure: kill -9 the server and its watchdog (a stop that waits would let the running
+# backup finish), then start again.
+cd ~/src/ClickHouse-private/tmp/console-dev
+pid=$(cat clickhouse-server.pid)
+watchdog=$(ps -o ppid= -p "$pid" | tr -d ' ')
+kill -9 "$watchdog" "$pid"
+while kill -0 "$pid" 2>/dev/null; do sleep 1; done
+while ss -ltn | grep -q ':28123 '; do sleep 1; done
+rm -f clickhouse-server.pid
+~/src/ClickHouse-private/build/programs/clickhouse server --config-file=$PWD/config.xml --daemon --pid-file=$PWD/clickhouse-server.pid
+EOF
+chmod +x $D/e2e/restart.sh
+docker run -d --name console-minio -p 29900:9000 -e MINIO_ROOT_USER=consoleminio -e MINIO_ROOT_PASSWORD=consoleminio-secret-1 \
+    minio/minio server /data
+docker exec console-minio mkdir -p /data/ch-backups
+cp ~/src/ClickHouse-private/utils/web-console/backup_e2e.mjs ~/console-e2e/
+node backup_e2e.mjs --url http://127.0.0.1:28123 --admin default:devpass \
+    --s3 http://127.0.0.1:29900/ch-backups:consoleminio:consoleminio-secret-1 --minio-container console-minio \
+    --worker ~/src/ClickHouse-private/utils/web-console/backup_worker.mjs \
+    --server-restart ~/src/ClickHouse-private/tmp/console-dev/e2e/restart.sh \
+    --server-log ~/src/ClickHouse-private/tmp/console-dev/log/clickhouse-server.log --screenshots shots
 ```
 
 Without root access for `playwright install-deps`, unpack the missing libraries locally and point the loader at them:

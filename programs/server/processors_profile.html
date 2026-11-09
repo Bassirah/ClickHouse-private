@@ -17,41 +17,61 @@
         document.write('<script src="' + viz_src + '"><\/script>');
     </script>
     <style>
+        /* The design of the other built-in web UIs: the dark theme has the colors of the SQL Console (`/ui`),
+           the light theme those of the web console (`/console`). The graph stays on white in both themes,
+           because its heat-map colors (white to orange) are made for it. */
         :root {
-            --color: black;
-            --background: #f5f5f5;
-            --card-background: white;
-            --border-color: #ddd;
-            --header-background: #FCFF74;
-            --header-text: black;
-            --shadow-color: rgba(0, 0, 0, 0.1);
-            --metric-value-color: black;
-            --error-color: #dc3545;
-            --success-color: #28a745;
-            --warning-color: #b58900;
-            --table-header-bg: #f8f9fa;
-            --table-hover-bg: #f1f1f1;
-            --btn-primary-bg: black;
-            --btn-primary-color: white;
+            color-scheme: light;
+            --color: #161517;
+            --muted: #53575f;
+            --background: #f6f7f9;
+            --card-background: #ffffff;
+            --surface-hover: #f0f1f3;
+            --border-color: #d9dbe0;
+            --header-background: #ffffff;
+            --header-text: #161517;
+            --shadow-color: rgba(0, 0, 0, 0.08);
+            --metric-value-color: #161517;
+            --error-color: #b3261e;
+            --success-color: #146c2e;
+            --warning-color: #8a4b00;
+            --table-header-bg: #f6f7f9;
+            --table-hover-bg: #f0f1f3;
+            /* Buttons, as in the SQL Console: the main action is black, the others are outlined. */
+            --btn-primary-bg: #302e32;
+            --btn-primary-color: #ffffff;
+            --btn-primary-hover: #43464c;
+            --btn-primary-active: #161517;
+            --btn-primary-border: #302e32;
+            --border-hover: #c3c6cc;
+            --pressed: #e6e7ea;
+            --accent-border: #c7cc00;
+            --focus: #1d5fd6;
             --graph-background: white;
             --graph-text: black;
         }
         [data-theme="dark"] {
-            --color: white;
-            --background: #151C2C;
-            --card-background: #1b2834;
-            --border-color: #444;
-            --header-background: #2a2a2a;
-            --header-text: #FCFF74;
+            color-scheme: dark;
+            --color: #f2f2f2;
+            --muted: #b3b6bd;
+            --background: #1f1f1c;
+            --card-background: #282828;
+            --surface-hover: #323232;
+            --border-color: #414141;
+            --header-background: #282828;
+            --header-text: #f2f2f2;
             --shadow-color: rgba(0, 0, 0, 0.3);
-            --metric-value-color: #FCFF74;
-            --error-color: #F66;
-            --success-color: #4ade80;
-            --warning-color: #facc15;
-            --table-header-bg: #2a3f5f;
-            --table-hover-bg: #2a3f5f;
-            --btn-primary-bg: #FCFF74;
-            --btn-primary-color: black;
+            --metric-value-color: #faff69;
+            --error-color: #ff9b94;
+            --success-color: #7ee39a;
+            --warning-color: #ffc078;
+            --table-header-bg: #232320;
+            --table-hover-bg: #323232;
+            --btn-primary-border: #53575f;
+            --border-hover: #53575f;
+            --pressed: #3a3a36;
+            --accent-border: #faff69;
+            --focus: #8ab4ff;
             --graph-background: #ffffff;
             --graph-text: black;
         }
@@ -59,7 +79,9 @@
             box-sizing: border-box;
         }
         body {
-            font-family: Liberation Sans, DejaVu Sans, sans-serif;
+            font-family: Inter, -apple-system, "Segoe UI", Roboto, "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.45;
             margin: 0;
             padding: 0;
             background: var(--background);
@@ -68,11 +90,11 @@
         .header {
             background: var(--header-background);
             color: var(--header-text);
-            padding: 1rem 2rem;
+            padding: 0.6rem 1rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            box-shadow: 0 2px 4px var(--shadow-color);
+            border-bottom: 1px solid var(--border-color);
             position: sticky;
             top: 0;
             z-index: 100;
@@ -81,11 +103,12 @@
         }
         .header h1 {
             margin: 0;
-            font-size: 1.5rem;
+            font-size: 1rem;
+            font-weight: 600;
         }
         .controls {
             display: flex;
-            gap: 1rem;
+            gap: 0.5rem;
             align-items: center;
             flex-wrap: wrap;
         }
@@ -107,7 +130,12 @@
         }
         .connection-params input:focus {
             outline: none;
-            border-color: var(--btn-primary-bg);
+            border-color: var(--focus);
+            box-shadow: 0 0 0 1px var(--focus);
+        }
+        :focus-visible {
+            outline: 2px solid var(--focus);
+            outline-offset: 1px;
         }
         #url {
             width: 350px;
@@ -116,29 +144,43 @@
             width: 120px;
         }
         .btn {
-            padding: 0.5rem 1rem;
-            border: none;
+            height: 2rem;
+            padding: 0 0.8rem;
+            border: 1px solid var(--border-color);
             border-radius: 4px;
             cursor: pointer;
-            font-size: 0.9rem;
-            transition: opacity 0.2s;
-            font-family: inherit;
-        }
-        .btn:hover {
-            opacity: 0.8;
+            font: inherit;
+            font-weight: 500;
         }
         .btn-primary {
             background: var(--btn-primary-bg);
             color: var(--btn-primary-color);
+            border-color: var(--btn-primary-border);
+            font-weight: 600;
+        }
+        .btn-primary:hover {
+            background: var(--btn-primary-hover);
+            border-color: var(--btn-primary-hover);
+        }
+        .btn-primary:active {
+            background: var(--btn-primary-active);
+            border-color: var(--btn-primary-active);
         }
         .btn-secondary {
-            background: var(--border-color);
+            background: var(--card-background);
             color: var(--color);
+        }
+        .btn-secondary:hover {
+            background: var(--surface-hover);
+            border-color: var(--border-hover);
+        }
+        .btn-secondary:active, .theme-toggle:active {
+            background: var(--pressed);
         }
         .container {
             max-width: 95vw;
             margin: 0 auto;
-            padding: 2rem;
+            padding: 1.25rem 1rem;
         }
         .error {
             background: var(--error-color);
@@ -160,17 +202,16 @@
         .section {
             background: var(--card-background);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            box-shadow: 0 2px 4px var(--shadow-color);
+            border-radius: 4px;
+            padding: 1.25rem;
+            margin-bottom: 1rem;
         }
         .section-title {
             font-size: 1.1rem;
             font-weight: 600;
             margin-bottom: 1rem;
             padding-bottom: 0.5rem;
-            border-bottom: 2px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -188,19 +229,18 @@
             min-width: 300px;
             min-height: 60px;
             padding: 0.6rem 0.75rem;
-            border: 2px solid var(--btn-primary-bg);
+            border: 1px solid var(--border-color);
             border-radius: 4px;
-            background: var(--card-background);
+            background: var(--background);
             color: var(--color);
-            font-family: Monaco, Consolas, monospace;
-            font-size: 0.85rem;
+            font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+            font-size: 13px;
             resize: vertical;
-            box-shadow: 0 0 0 3px var(--header-background), 0 2px 6px var(--shadow-color);
-            transition: box-shadow 0.15s ease;
         }
         .filter-row textarea:focus {
             outline: none;
-            box-shadow: 0 0 0 3px var(--header-background), 0 0 0 5px var(--btn-primary-bg);
+            border-color: var(--focus);
+            box-shadow: 0 0 0 1px var(--focus);
         }
         .filter-help {
             font-size: 0.8rem;
@@ -248,33 +288,60 @@
             font-style: italic;
         }
         .theme-toggle {
-            background: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2rem;
+            height: 2rem;
+            padding: 0;
+            background: var(--card-background);
             border: 1px solid var(--border-color);
             color: var(--header-text);
-            font-size: 1.2rem;
             cursor: pointer;
-            padding: 0.4rem 0.6rem;
             border-radius: 4px;
-            line-height: 1;
+        }
+        .theme-toggle:hover {
+            background: var(--surface-hover);
+            border-color: var(--border-hover);
+        }
+        #theme-icon, #theme-icon svg {
+            display: inline-flex;
+            width: 1.1rem;
+            height: 1.1rem;
+        }
+        #theme-icon svg {
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
         }
         .btn-toggle {
             background: var(--card-background);
             color: var(--color);
             border: 1px solid var(--border-color);
             border-radius: 4px;
-            padding: 0.4rem 0.7rem;
-            font-size: 0.85rem;
-            font-family: inherit;
+            height: 2rem;
+            padding: 0 0.8rem;
+            font: inherit;
+            font-weight: 500;
             cursor: pointer;
-            transition: background 0.15s, color 0.15s, border-color 0.15s;
+        }
+        .btn-toggle:hover {
+            background: var(--surface-hover);
+            border-color: var(--border-hover);
+        }
+        .btn-toggle:active {
+            background: var(--pressed);
         }
         .btn-toggle.active {
             background: var(--btn-primary-bg);
             color: var(--btn-primary-color);
-            border-color: var(--btn-primary-bg);
+            border-color: var(--btn-primary-border);
         }
-        .btn-toggle:hover {
-            opacity: 0.85;
+        .btn-toggle.active:hover {
+            background: var(--btn-primary-hover);
+            border-color: var(--btn-primary-hover);
         }
         .selected-info {
             font-family: Monaco, Consolas, monospace;
@@ -358,7 +425,7 @@
                     title="When on, wrap log tables in clusterAllReplicas('default', merge('system', '^...')) so the page sees every replica and any rotated *_log_N tables">
                 Cluster: <span id="cluster-state">off</span>
             </button>
-            <button class="theme-toggle" onclick="toggleTheme()"><span id="theme-icon">🌙</span></button>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme"><span id="theme-icon"></span></button>
         </div>
     </div>
     <div class="container">
@@ -373,7 +440,7 @@
                 </div>
             </div>
             <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-                <select id="query-picker" onchange="onPickerChange()" style="flex: 1; min-width: 300px; padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; background: var(--card-background); color: var(--color); font-family: Monaco, Consolas, monospace; font-size: 0.8rem;">
+                <select id="query-picker" onchange="onPickerChange()" style="flex: 1; min-width: 300px; height: 2rem; padding: 0 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; background: var(--background); color: var(--color); font-family: Monaco, Consolas, monospace; font-size: 0.8rem;">
                     <option value="">— click Apply to load matching queries —</option>
                 </select>
             </div>
@@ -486,12 +553,19 @@
             const currentTheme = html.getAttribute('data-theme');
             const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
             html.setAttribute('data-theme', newTheme);
-            document.getElementById('theme-icon').textContent = newTheme === 'dark' ? '☀️' : '🌙';
+            setThemeIcon(newTheme);
             localStorage.setItem('theme', newTheme);
         }
-        const savedTheme = localStorage.getItem('theme') || 'light';
+        /// The button offers the other theme, drawn as a line icon (emoji are missing on some systems).
+        function setThemeIcon(theme) {
+            document.getElementById('theme-icon').innerHTML = theme === 'dark'
+                ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'
+                : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>';
+        }
+        /// The theme chosen in the other web UI pages, otherwise the system preference (not stored).
+        const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
         document.documentElement.setAttribute('data-theme', savedTheme);
-        document.getElementById('theme-icon').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+        setThemeIcon(savedTheme);
 
         function escapeHtml(s) {
             return String(s)
@@ -764,7 +838,9 @@
 
             /// Make sure the digraph has a transparent background so dark mode works.
             if (/\bbgcolor\b/.test(enriched)) return enriched;
-            return enriched.replace(/\bdigraph(\s+\w+)?\s*\{/, m => `${m}\n  graph [bgcolor="transparent"];`);
+            /// A sans-serif font for the labels, like the rest of the page (Graphviz defaults to Times). A single
+            /// font name that Graphviz knows, so that it sizes the boxes for it.
+            return enriched.replace(/\bdigraph(\s+\w+)?\s*\{/, m => `${m}\n  graph [bgcolor="transparent"];\n  node [fontname="Helvetica"];\n  edge [fontname="Helvetica"];`);
         }
 
         function formatBytes(n) {
@@ -967,6 +1043,7 @@
             if (isStale()) return;
             graphEl.innerHTML = '';
             graphEl.appendChild(svg);
+            fitNodeLabels(svg);
             attachNodeTooltips(svg, profile);
 
             /// Show "no profile data" hint if the profile map is empty.
@@ -984,9 +1061,27 @@
                 info.style.marginTop = '0.5rem';
                 info.style.fontSize = '0.8rem';
                 info.style.opacity = '0.7';
-                info.style.color = 'var(--color)';
+                /// The graph area is white in both themes.
+                info.style.color = 'var(--graph-text)';
                 info.textContent = `Heatmap range: ${min_ms} ms (min) – ${max_ms} ms (max)`;
                 graphEl.appendChild(info);
+            }
+        }
+
+        /// Graphviz sizes each box for the metrics of its own font. Where the browser draws the label with a
+        /// wider font (Helvetica and Arial are missing on many systems), the label overflows its box, so
+        /// narrow such labels to the width of their box. Labels that fit are left as they are.
+        function fitNodeLabels(svg) {
+            for (const node of svg.querySelectorAll('g.node')) {
+                const shape = node.querySelector('polygon, ellipse, path, rect');
+                if (!shape) continue;
+                const available = shape.getBBox().width - 8;
+                for (const text of node.querySelectorAll('text')) {
+                    if (text.getComputedTextLength() > available) {
+                        text.setAttribute('textLength', available);
+                        text.setAttribute('lengthAdjust', 'spacingAndGlyphs');
+                    }
+                }
             }
         }
 
