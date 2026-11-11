@@ -402,6 +402,8 @@ await test('Rule assignment: a box in the header of each capability selects or c
     check(viewed.on === viewed.total && viewed.checked, 'View data is not set for every component');
     check(await page.evaluate(() => [...document.querySelectorAll('#admin-view tbody tr')].every(row =>
         !row.querySelector('input[aria-label^="View data "]') || row.querySelector('input[aria-label^="Open "]').checked)), 'Open did not follow View data');
+    /// A partial header counts as unchecked: a click selects the whole column, and the next one clears it.
+    await view(page).getByLabel('Select all: Open').check();
     await view(page).getByLabel('Select all: Open').uncheck();
     for (const title of ['Open', 'View data', 'Run queries', 'Administer']) {
         const c = await column(title);
