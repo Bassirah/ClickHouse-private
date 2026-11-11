@@ -357,6 +357,7 @@ table.data tr:last-child td { border-bottom: 0; }
 table.data th { font-weight: 600; color: var(--muted); font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.03em; background: var(--bg-subtle); white-space: nowrap; }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.data td.center, table.data th.center { text-align: center; }
+.select-all-head { display: inline-flex; flex-direction: column; align-items: center; gap: 0.25rem; }
 table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.35rem 1.25rem; margin: 0; }
@@ -4910,9 +4911,40 @@ function renderPolicyMatrix(page, container, subject) {
     };
     const boxes = new Map();
     const native_cells = new Map();
+    /// The other capabilities need Open, and Open is cleared together with them.
+    const follow = (id, key, checked) => {
+        const set = boxes.get(id);
+        if (key === 'open' && !checked) for (const other of Object.values(set)) other.checked = false;
+        if (key !== 'open' && checked) set.open.checked = true;
+    };
+    /// A box in the header of each capability selects or clears it for every component it applies to, and shows
+    /// whether all, some, or none of them have it.
+    const heads = Object.fromEntries(CAPABILITIES.map(capability => [capability.key, h('input', {type: 'checkbox', disabled: !editable,
+        'aria-label': `Select all: ${capability.title}`, title: `${capability.title} for every component`})]));
+    const column = key => POLICY_COMPONENTS.map(c => boxes.get(c.id)?.[key]).filter(Boolean);
+    const refreshHeads = () => {
+        for (const capability of CAPABILITIES) {
+            const inputs = column(capability.key);
+            const checked = inputs.filter(input => input.checked).length;
+            heads[capability.key].checked = inputs.length > 0 && checked === inputs.length;
+            heads[capability.key].indeterminate = checked > 0 && checked < inputs.length;
+        }
+    };
+    for (const capability of CAPABILITIES) {
+        heads[capability.key].addEventListener('change', () => {
+            const checked = heads[capability.key].checked;
+            for (const c of POLICY_COMPONENTS) {
+                const input = boxes.get(c.id)?.[capability.key];
+                if (!input) continue;
+                input.checked = checked;
+                follow(c.id, capability.key, checked);
+            }
+            refreshHeads();
+        });
+    }
     const table = dataTable([
         {title: 'Component', render: c => [h('strong', {}, c.title), h('div', {className: 'note'}, CATEGORIES.find(category => category.id === c.category).title)]},
-        ...CAPABILITIES.map(capability => ({title: capability.title, className: 'center', render: c => {
+        ...CAPABILITIES.map(capability => ({title: h('span', {className: 'select-all-head'}, capability.title, heads[capability.key]), className: 'center', render: c => {
             if (!capabilitiesOf(c).includes(capability)) {
                 return h('span', {className: 'note', title: c.kind === 'admin' ? 'Does not apply: native privileges decide what can be done on an administration page.'
                     : 'Does not apply: a link can only be opened.'}, '—');
@@ -4920,10 +4952,8 @@ function renderPolicyMatrix(page, container, subject) {
             const input = h('input', {type: 'checkbox', checked: initially(c, capability.key), disabled: !editable,
                 'aria-label': `${capability.title} ${c.title}`});
             input.addEventListener('change', () => {
-                /// The other capabilities need Open, and Open is cleared together with them.
-                const set = boxes.get(c.id);
-                if (capability.key === 'open' && !input.checked) for (const other of Object.values(set)) other.checked = false;
-                if (capability.key !== 'open' && input.checked) set.open.checked = true;
+                follow(c.id, capability.key, input.checked);
+                refreshHeads();
             });
             boxes.set(c.id, {...boxes.get(c.id), [capability.key]: input});
             return input;
@@ -4937,6 +4967,7 @@ function renderPolicyMatrix(page, container, subject) {
             return cell;
         }}]),
     ], POLICY_COMPONENTS, null, 'Component access rules');
+    refreshHeads();
     const error = h('div', {className: 'message error', role: 'alert', hidden: true});
     const save = button('Save rules', () => {
         const changes = [];

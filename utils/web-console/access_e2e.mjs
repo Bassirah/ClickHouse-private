@@ -381,6 +381,43 @@ await test('Resources links are governed too: an administrator hides one in the 
     }
 });
 
+await test('Rule assignment: a box in the header of each capability selects or clears it for every component', async () => {
+    const page = admin.page;
+    const policy = `SELECT groupArray((subject_type, subject, component, open, view_data, run_queries, administer)) FROM (SELECT * FROM ${ADMIN_DB}.component_policy FINAL WHERE NOT deleted ORDER BY subject_type, subject, component)`;
+    const before = await sql(policy);
+    await go(page, '/console/admin-access');
+    await page.waitForTimeout(1500);
+    const column = title => page.evaluate(t => {
+        const head = document.querySelector(`#admin-view input[aria-label="Select all: ${t}"]`);
+        const inputs = [...document.querySelectorAll(`#admin-view tbody input[aria-label^="${t} "]`)];
+        return {head: !!head, checked: !!head?.checked, partial: !!head?.indeterminate, total: inputs.length, on: inputs.filter(input => input.checked).length};
+    }, title);
+    for (const title of ['Open', 'View data', 'Run queries', 'Administer']) {
+        const c = await column(title);
+        check(c.head && c.total > 0, `no header box for ${title}`);
+        check(c.checked === (c.on === c.total) && c.partial === (c.on > 0 && c.on < c.total), `the ${title} header does not show ${c.on}/${c.total}`);
+    }
+    await view(page).getByLabel('Select all: View data').check();
+    const viewed = await column('View data');
+    check(viewed.on === viewed.total && viewed.checked, 'View data is not set for every component');
+    check(await page.evaluate(() => [...document.querySelectorAll('#admin-view tbody tr')].every(row =>
+        !row.querySelector('input[aria-label^="View data "]') || row.querySelector('input[aria-label^="Open "]').checked)), 'Open did not follow View data');
+    await view(page).getByLabel('Select all: Open').uncheck();
+    for (const title of ['Open', 'View data', 'Run queries', 'Administer']) {
+        const c = await column(title);
+        check(c.on === 0 && !c.checked && !c.partial, `${title} is not cleared with Open`);
+    }
+    await view(page).locator('tbody input[aria-label^="Open "]').first().check();
+    const open = await column('Open');
+    check(open.partial && !open.checked, 'the Open header is not partial with one component');
+    await view(page).locator('button', {hasText: 'Save rules'}).click();
+    check((await dialog(page).innerText()).includes('nothing allowed'), 'the review does not list the cleared components');
+    await dialog(page).locator('.dialog-actions button', {hasText: 'Back'}).click();
+    /// Nothing was applied: leaving the page discards the selection.
+    await go(page, '/console/admin-access');
+    check(await sql(policy) === before, 'the policy changed');
+});
+
 await test('Scoped access administrator: manages users in its scope only, and only with its roles', async () => {
     const page = admin.page;
     await go(page, '/console/admin-roles');
