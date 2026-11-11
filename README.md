@@ -15,7 +15,7 @@
 
 ## About this repository
 
-This is a private fork of ClickHouse 26.9 (upstream commit `b7bbb4e80c8`) that adds a **unified web console**, served by the ClickHouse server itself at `/console`. Everything below this section is the upstream README.
+This is a private fork of ClickHouse 26.10 (`v26.10.2.103-stable`, with the fixes of the 26.9 branch that 26.10.2 does not have yet) that adds a **unified web console**, served by the ClickHouse server itself at `/console`. Everything below this section is the upstream README.
 
 The console has no separate backend: every action is a SQL statement run with the credentials of the signed-in user, so ClickHouse authorizes it, and every change is reviewed before it runs and recorded in an audit log. Three optional processes do what a browser cannot: the backup worker, the cluster agent, and the access policy worker.
 
@@ -28,9 +28,14 @@ The console has no separate backend: every action is a SQL statement run with th
 | Unified design | The Dashboard and the diagnostic pages share the design of the SQL Console; the Administration pages follow the design of ClickStack. |
 | Users and access management | Users, Roles & Permissions (with role templates), Profiles & Quotas, and Audit Activity, on the native ClickHouse access model, including delegation and `ON CLUSTER` changes. |
 | Data Access Policies | Column permissions and row policies with their combined effect, effective access per user, access tests run as the user, and attribute-driven rules that provision native roles, grants, and row policies, deployed from the console and reconciled by the access policy worker. |
-| Component Access | A policy of which components, Resources links, and Administration pages each user or role can open, compared with the native privileges that govern them. |
-| Backup & Restore | Approved destinations (disks and S3, including external S3 servers allowed in the console), a backup wizard, durable operations, restores into new databases, restore tests, schedules with retention, and recovery verification. |
+| Component Access | A policy of which components, Resources links, and Administration pages each user or role can open, compared with the native privileges that govern them. A box in the header of each capability (Open, View data, Run queries, Administer) selects or clears it for every component. |
+| Backup & Restore | Approved destinations (disks and S3, including external S3 servers allowed in the console), a backup wizard, durable operations, restores into new databases, restore tests, schedules with retention, and recovery verification. A backup can include the access entities, SQL user-defined functions, workloads, and resources, and the console's own tables, and lists what it contains and what it leaves out. |
+| Server state | Encrypted server bundles, made by the backup worker, of what `BACKUP` cannot reach: the configuration files, the secrets in them, TLS keys, scripts, and a Keeper snapshot. Each bundle has its own AES-256-GCM key, wrapped by a master key in a key file, in HashiCorp Vault (Transit), or derived from a passphrase. Restores compare a bundle with the host or stage its files; they never write into the server. |
+| Backup protection and recovery | The protection of each destination (bucket default encryption, Object Lock, versioning, encrypted disks, off-site), a 3-2-1-1 summary, second copies of scheduled backups at another destination, recommended S3 permissions, and a recovery rehearsal that restores the latest backups, optionally with a staged configuration, on an isolated server and compares them with the values recorded at backup time. |
 | Cluster Management | The lifecycle of ClickHouse deployments: create (with an optional chproxy load balancer), register, monitor, configure, scale, upgrade, back up, decommission, and retire. Two providers are implemented: a Docker Compose lab, and Kubernetes with the ClickHouse operator (namespace, storage class, volume reclaim policy, volume sizes, and client Service chosen in the wizard; storage expansion). |
+| Docker images | A server image (the official image of the same release with this build's binary) and a tools image (the three helper processes), built from source and packaged as verified archives, with deployment examples for Docker Compose and Kubernetes. |
+
+The home page decides its panels as soon as the component policy and the session's roles arrive, without waiting for every administration check, which keeps it fast over a remote connection.
 
 ### Where to find it
 
@@ -53,8 +58,12 @@ Each feature was developed on its own branch, each based on the previous one. Th
 | `private/console-login-clusters-ui` | Simpler login, Cluster Inventory filters, cluster administrator credentials |
 | `private/console-data-access-policies` | Data Access Policies |
 | `private/console-cluster-kubernetes` | Kubernetes provider of Cluster Management |
+| `private/console-docker-images` | Docker images for distribution, and the script that builds them |
+| `upgrade/26.10` | The upgrade to ClickHouse 26.10 (`v26.10.2.103-stable`), and the browser checks made independent of the server state |
+| `private/console-access-select-all` | Select-all boxes in Component Access, the faster home page, two fixes found on a new server, and `run_e2e.sh` |
+| `private/console-backup-scope` | Backup & Restore: functions, workloads, resources, and the console's tables; server bundles; protection, second copies, and the recovery rehearsal |
 
-`private/main` is the unchanged upstream base.
+`private/main` is the default branch: it holds what has been merged into it through pull requests.
 
 ### Quick start
 
@@ -78,11 +87,20 @@ CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=<service account> CLICKHOUS
     node utils/web-console/access_policy_worker.mjs
 ```
 
+For server bundles, give the backup worker a master key: create a key file with
+`node utils/web-console/backup_worker.mjs bundle-key-init --key-file <path>` and keep a copy out of band, or use
+HashiCorp Vault or a passphrase (`BUNDLE_KEY_PROVIDER`; see "Server bundles" in `utils/web-console/deploy/README.md`).
+
+To distribute the console, `utils/web-console/build_images.sh` builds a Release binary and packages the server and tools
+images with their deployment examples.
+
 ### Documentation and tests
 
 * [`docs/concepts/features/interfaces/web-console.mdx`](docs/concepts/features/interfaces/web-console.mdx): the user and administrator documentation: configuration (the `web_console` section), security model, every page, the backup worker, the cluster agent, the access policy worker, runbooks, and limitations.
 * [`utils/web-console/README.md`](utils/web-console/README.md): building, running a development instance, testing, and packaging.
-* Tests: functional tests `05293_web_console`, `05294_web_console_access_management`, and `05295_web_console_backup`; the integration test `test_web_console`; and browser acceptance checks in `utils/web-console/` (`console_e2e.mjs`, `access_e2e.mjs`, `backup_e2e.mjs`, `cluster_e2e.mjs`, `cluster_k8s_e2e.mjs`, `data_access_e2e.mjs`).
+* [`utils/web-console/deploy/README.md`](utils/web-console/deploy/README.md): deploying the images, server bundles, protecting the backups, and recovering a whole server.
+* [`docs/custom_dev/`](docs/custom_dev/): the features and user guide (Word) and the solution overview (PowerPoint).
+* Tests: functional tests `05293_web_console`, `05294_web_console_access_management`, and `05295_web_console_backup`; the integration test `test_web_console`; the tests of the server bundles (`server_bundle_test.mjs`); and browser acceptance checks in `utils/web-console/` (`console_e2e.mjs`, `access_e2e.mjs`, `backup_e2e.mjs`, `cluster_e2e.mjs`, `cluster_k8s_e2e.mjs`, `data_access_e2e.mjs`). `utils/web-console/run_e2e.sh` runs the browser checks on a server of their own, with its own MinIO, cluster agent, and Vault, so that the results depend only on the code.
 
 ## How To Install (Linux, macOS, FreeBSD)
 
