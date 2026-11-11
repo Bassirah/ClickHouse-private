@@ -3,7 +3,7 @@
 #
 #   utils/web-console/run_e2e.sh [options]
 #
-#     --suites <list>       comma-separated, from: console, access, data_access, backup, cluster (default: all of them)
+#     --suites <list>       comma-separated, from: console, access, data_access, backup, cluster, ldap (default: all of them)
 #     --binary <path>       clickhouse binary (default: build/programs/clickhouse)
 #     --page-from-source    serve programs/server/console.html as it is in the working tree, instead of the page built
 #                           into the binary: try a change of the page without rebuilding
@@ -24,7 +24,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HERE="$ROOT/utils/web-console"
 BINARY="$ROOT/build/programs/clickhouse"
 E2E_DIR="$HOME/console-e2e"
-SUITES="console,access,data_access,backup,cluster"
+SUITES="console,access,data_access,backup,cluster,ldap"
 PAGE_FROM_SOURCE=0
 KEEP=0
 
@@ -57,6 +57,10 @@ MINIO_IMAGE=minio/minio:RELEASE.2025-07-23T15-54-02Z
 VAULT_CONTAINER=console-e2e-vault
 VAULT_IMAGE=hashicorp/vault:1.17.6
 VAULT_PORT=39200
+LDAP_CONTAINER=console-e2e-ldap
+LDAP_IMAGE=bitnamilegacy/openldap:2.6.8
+LDAP_PORT=39636
+LDAP_ADMIN_PASSWORD=e2e-ldap-admin
 MINIO_USER=e2eminio
 MINIO_SECRET=e2eminio-secret-1
 BUCKET=ch-backups
@@ -65,18 +69,21 @@ BASE="http://127.0.0.1:$HTTP_PORT"
 # --- Checks
 
 for suite in ${SUITES//,/ }; do
-    case "$suite" in console|access|data_access|backup|cluster) ;; *) die "unknown suite: $suite" ;; esac
+    case "$suite" in console|access|data_access|backup|cluster|ldap) ;; *) die "unknown suite: $suite" ;; esac
 done
 [ -x "$BINARY" ] || die "no clickhouse binary at $BINARY"
 command -v node > /dev/null || die "node is not installed"
 [ -d "$E2E_DIR/node_modules/playwright" ] || die "no Playwright in $E2E_DIR (see \"Browser checks\" in $HERE/README.md)"
-if has_suite backup || has_suite cluster; then
+if has_suite backup || has_suite cluster || has_suite ldap; then
     docker info > /dev/null 2>&1 || die "Docker is not running, or this user cannot use it"
+fi
+if has_suite ldap; then
+    docker image inspect "$LDAP_IMAGE" > /dev/null 2>&1 || die "the image $LDAP_IMAGE is not on this host (docker pull $LDAP_IMAGE)"
 fi
 if has_suite backup; then
     docker image inspect "$MINIO_IMAGE" > /dev/null 2>&1 || die "the image $MINIO_IMAGE is not on this host"
 fi
-for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT; do
+for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT $LDAP_PORT; do
     ! ss -ltn | grep -q ":$port " || die "port $port is in use: is another run still going? (stop it, or remove what --keep left)"
 done
 
@@ -228,13 +235,13 @@ AGENT_PID=""
 cleanup() {
     [ "$KEEP" = 1 ] && return
     [ -n "$AGENT_PID" ] && kill "$AGENT_PID" 2> /dev/null || true
-    docker rm -f "$MINIO_CONTAINER" "$VAULT_CONTAINER" > /dev/null 2>&1 || true
+    docker rm -f "$MINIO_CONTAINER" "$VAULT_CONTAINER" "$LDAP_CONTAINER" > /dev/null 2>&1 || true
     if [ -f "$SERVER/server.pid" ]; then
         pid=$(cat "$SERVER/server.pid")
         kill "$pid" 2> /dev/null || true
         while kill -0 "$pid" 2> /dev/null; do sleep 1; done
     fi
-    rm -rf "$SERVER" "$RUN/agent" "$RUN/suites" "$RUN/keys" "$RUN/staging"
+    rm -rf "$SERVER" "$RUN/agent" "$RUN/suites" "$RUN/keys" "$RUN/staging" "$RUN/ldap"
 }
 trap cleanup EXIT
 
@@ -256,6 +263,64 @@ if has_suite backup; then
     done
     curl -sf -X PUT --user "$MINIO_USER:$MINIO_SECRET" --aws-sigv4 "aws:amz:us-east-1:s3" "http://127.0.0.1:$MINIO_PORT/$BUCKET" > /dev/null \
         || die "cannot create the bucket $BUCKET in MinIO"
+fi
+
+if has_suite ldap; then
+    # An OpenLDAP directory with LDAPS, signed by a certificate authority of this run, as a production directory would be:
+    # the server checks its certificate (tls_require_cert demand). Users dana (in console-analysts) and eli (in no group); the
+    # group also lists the directory administrator, because groupOfNames requires a member when dana is removed.
+    mkdir -p "$RUN/ldap/tls" "$RUN/ldap/ldif"
+    (cd "$RUN/ldap/tls"
+        openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 2 -subj "/CN=e2e LDAP CA" 2> /dev/null
+        openssl req -newkey rsa:2048 -nodes -keyout ldap.key -out ldap.csr -subj "/CN=localhost" 2> /dev/null
+        printf 'subjectAltName=IP:127.0.0.1,DNS:localhost\n' > san.ext
+        openssl x509 -req -in ldap.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out ldap.crt -days 2 -extfile san.ext 2> /dev/null)
+    cat > "$RUN/ldap/ldif/tree.ldif" <<'END_OF_LDIF'
+dn: dc=example,dc=org
+objectClass: dcObject
+objectClass: organization
+dc: example
+o: example
+
+dn: ou=users,dc=example,dc=org
+objectClass: organizationalUnit
+ou: users
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=dana,ou=users,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: dana
+cn: Dana
+sn: Analyst
+userPassword: Dana-Ldap-Pw-1
+
+dn: uid=eli,ou=users,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: eli
+cn: Eli
+sn: Engineer
+userPassword: Eli-Ldap-Pw-1
+
+dn: cn=console-analysts,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: console-analysts
+member: uid=dana,ou=users,dc=example,dc=org
+member: cn=admin,dc=example,dc=org
+END_OF_LDIF
+    # The image runs as the user 1001: it must read the tree and the certificates (throwaway test material only).
+    chmod -R a+rX "$RUN/ldap"
+    docker rm -f "$LDAP_CONTAINER" > /dev/null 2>&1 || true
+    docker run -d --name "$LDAP_CONTAINER" -p "127.0.0.1:$LDAP_PORT:1636" -e LDAP_ROOT=dc=example,dc=org -e LDAP_ADMIN_USERNAME=admin \
+        -e LDAP_ADMIN_PASSWORD="$LDAP_ADMIN_PASSWORD" -e LDAP_CUSTOM_LDIF_DIR=/ldifs -e LDAP_ENABLE_TLS=yes -e LDAP_TLS_CERT_FILE=/tls/ldap.crt \
+        -e LDAP_TLS_KEY_FILE=/tls/ldap.key -e LDAP_TLS_CA_FILE=/tls/ca.crt -v "$RUN/ldap/ldif:/ldifs:ro" -v "$RUN/ldap/tls:/tls:ro" "$LDAP_IMAGE" > /dev/null
+    for _ in $(seq 60); do
+        docker exec "$LDAP_CONTAINER" ldapsearch -x -H ldap://localhost:1389 -D cn=admin,dc=example,dc=org -w "$LDAP_ADMIN_PASSWORD" \
+            -b ou=groups,dc=example,dc=org cn 2> /dev/null | grep -q console-analysts && break
+        sleep 2
+    done
 fi
 
 if has_suite cluster; then
@@ -324,6 +389,9 @@ run_suite backup backup_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" 
     --s3 "http://127.0.0.1:$MINIO_PORT/$BUCKET:$MINIO_USER:$MINIO_SECRET" --minio-container "$MINIO_CONTAINER" \
     --worker "$HERE/backup_worker.mjs" --server-restart "$RUN/restart-server.sh" --server-log "$LOGS/clickhouse-server.log"
 run_suite cluster cluster_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD"
+# Last: it installs an LDAP directory and restarts the server, and removes the directory again at the end.
+run_suite ldap ldap_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --config-dir "$SERVER/config.d" --server-restart "$RUN/restart-server.sh" \
+    --ldap-port "$LDAP_PORT" --ldap-ca "$RUN/ldap/tls/ca.crt" --ldap-container "$LDAP_CONTAINER" --ldap-admin-password "$LDAP_ADMIN_PASSWORD"
 
 if [ "$KEEP" = 1 ]; then
     echo "Kept: the server at $BASE (default:$ADMIN_PASSWORD), MinIO $MINIO_CONTAINER, agent pid ${AGENT_PID:-none}. Stop them before the next run."

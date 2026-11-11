@@ -30,6 +30,7 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/cluster_k8s_e2e.mjs` | Browser acceptance checks of the Kubernetes provider of Cluster Management: the wizard's choices, provisioning, configuration and drift, storage expansion, replicas, backup, retirement, and deletion (Playwright; not part of the build). |
 | `utils/web-console/k8s_lab.sh` | Creates and deletes the Kubernetes lab: a k3d cluster with cert-manager, the ClickHouse operator, and an expandable storage class. |
 | `utils/web-console/cluster_e2e.mjs` | Browser acceptance checks of Cluster Management against a running agent: provisioning, registration, drift, scaling, failures, and retirement (Playwright; not part of the build). |
+| `utils/web-console/ldap_e2e.mjs` | Browser acceptance checks of directory sign-in: the generated LDAP configuration installed on a server without one, sign-in with the directory password and roles from groups, directory changes after the cooldown, and the users managed with SQL next to the directory (Playwright; not part of the build). |
 | `utils/web-console/run_e2e.sh` | Runs the browser suites against a server of their own, with its own MinIO and cluster agent, started and removed for each run. |
 | `utils/web-console/Dockerfile` | Server image: a locally built binary on top of the official image. |
 | `utils/web-console/Dockerfile.tools`, `tools-entrypoint.sh` | Tools image: the backup worker, the cluster agent (with `docker`, Compose, and `kubectl`), and the access policy worker. |
@@ -148,7 +149,7 @@ not on what a person or an earlier run left on a server, and the development ins
 cd ~/src/ClickHouse-private
 utils/web-console/run_e2e.sh                                    # all suites, with the page built into the binary
 utils/web-console/run_e2e.sh --page-from-source                 # with programs/server/console.html as it is now
-utils/web-console/run_e2e.sh --suites console,access            # only some: console, access, data_access, backup, cluster
+utils/web-console/run_e2e.sh --suites console,access            # only some: console, access, data_access, backup, cluster, ldap
 ```
 
 | Option | Meaning |
