@@ -39,7 +39,10 @@ The home page decides its panels as soon as the component policy and the session
 
 ### Where to find it
 
-Each feature was developed on its own branch, each based on the previous one. The newest branch contains all of them:
+All features are merged into `private/main`, the default branch. Each was developed on its own branch, each based on the
+previous one. The branches up to `private/console-docker-images` were removed from GitHub after the merge; the last
+commit of each is kept as the tag `archive/2026-11-09/<branch>` (`git switch -c <branch> archive/2026-11-09/<branch>`
+recreates one).
 
 | Branch | Adds |
 |---|---|
@@ -63,7 +66,7 @@ Each feature was developed on its own branch, each based on the previous one. Th
 | `private/console-access-select-all` | Select-all boxes in Component Access, the faster home page, two fixes found on a new server, and `run_e2e.sh` |
 | `private/console-backup-scope` | Backup & Restore: functions, workloads, resources, and the console's tables; server bundles; protection, second copies, and the recovery rehearsal |
 
-`private/main` is the default branch: it holds what has been merged into it through pull requests.
+`private/main` holds everything above; new work starts from it.
 
 ### Quick start
 
