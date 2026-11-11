@@ -1245,11 +1245,8 @@ async function runProbes(current) {
     for (const c of probing) current.probes.set(c.id, {state: 'checking'});
     const route_checks = [probeRoute('/webterminal'), probeRoute(clickstackRoute())];
     await Promise.all([...route_checks, ...probing.map(async c => {
-        let result = {ok: true};
-        for (const sql of c.probes) {
-            result = await runQuery(current, sql, current.controller.signal);
-            if (!result.ok) break;
-        }
+        /// One query for all the probes of a panel: it fails when any of them does.
+        const result = await runQuery(current, c.probes.join(' UNION ALL '), current.controller.signal);
         if (session !== current || result.kind === 'aborted') return;
         current.probes.set(c.id, result.ok ? {state: 'ok'} : {state: result.kind, message: result.message, detail: result.detail});
         refreshComponentStates();
@@ -2487,12 +2484,31 @@ function adminDatabase() {
 
 async function loadAdminContext(current) {
     const db = adminDatabase();
+    /// Which panels the home page and the sidebar list depends only on the component policy and the roles of the
+    /// session. They are read first, next to the checks below, so that the panels do not wait for every check.
+    const early = (async () => {
+        const [enabled_roles, policy] = await Promise.all([
+            adminRows('SELECT role_name, with_admin_option FROM system.enabled_roles ORDER BY role_name', {}, current).catch(e => {
+                if (e instanceof AdminSessionChanged) throw e;
+                return [];
+            }),
+            db === null ? {state: 'off', message: `The admin_database setting "${config.admin_database}" is not a valid database name.`} : fetchPolicy(current, db),
+        ]);
+        if (session !== current || !policy) return false;
+        current.admin = {...current.admin, enabled_roles, policy};
+        refreshComponentStates();
+        return true;
+    })().catch(e => {
+        if (e instanceof AdminSessionChanged) return false;
+        throw e;
+    });
     const can = {};
     const checks = Object.entries(adminChecks(db)).filter(([, check]) => check);
     await Promise.all(checks.map(async ([key, check]) => {
         try {
             if (check.read) {
-                for (const name of check.read) await adminText(`SELECT 1 FROM ${name} LIMIT 0`, current);
+                /// One query for all the tables of a check: it fails when any of them cannot be read.
+                await adminText(check.read.map(name => `SELECT 1 FROM ${name} LIMIT 0`).join(' UNION ALL '), current);
                 can[key] = true;
             } else {
                 can[key] = (await adminText(`CHECK GRANT ${check.grant}`, current)).trim() === '1';
@@ -2514,7 +2530,6 @@ async function loadAdminContext(current) {
     };
     try {
         await Promise.all([
-            optional('enabled_roles', () => adminRows('SELECT role_name, with_admin_option FROM system.enabled_roles ORDER BY role_name', {}, current)),
             optional('directories', () => can.read_directories
                 ? adminRows('SELECT name, type, precedence FROM system.user_directories ORDER BY precedence', {}, current) : []),
             optional('clusters', async () => can.read_clusters
@@ -2524,12 +2539,11 @@ async function loadAdminContext(current) {
     } catch (e) {
         return;
     }
-    if (db === null) {
-        context.policy = {state: 'off', message: `The admin_database setting "${config.admin_database}" is not a valid database name.`};
-    }
+    if (!(await early) || session !== current) return;
+    /// The latest policy and roles: a reload of the policy may have replaced the ones read first.
+    context.enabled_roles = current.admin.enabled_roles;
+    context.policy = current.admin.policy;
     current.admin = context;
-    if (db !== null) await loadPolicy(current);
-    if (session !== current) return;
     refreshComponentStates();
 }
 
@@ -2687,15 +2701,20 @@ function capabilitiesOf(c) {
 }
 
 async function loadPolicy(current) {
-    const db = current.admin.db;
+    const policy = await fetchPolicy(current, current.admin.db);
+    if (policy) current.admin.policy = policy;
+}
+
+/// The policy of the admin database, or null when the session changed while it was read.
+async function fetchPolicy(current, db) {
     try {
         const rows = await adminRows(`SELECT toString(subject_type) AS subject_type, subject, component, open, view_data, run_queries, administer
             FROM ${quoteIdentifier(db)}.component_policy FINAL WHERE NOT deleted ORDER BY subject_type, subject, component`, {}, current);
-        current.admin.policy = {state: rows.length ? 'active' : 'empty', rows};
+        return {state: rows.length ? 'active' : 'empty', rows};
     } catch (e) {
-        if (e instanceof AdminSessionChanged) return;
-        if (e.kind === 'missing') current.admin.policy = {state: 'not-installed'};
-        else current.admin.policy = {state: e.kind === 'forbidden' ? 'unreadable' : 'error', message: e.summary, detail: e.message};
+        if (e instanceof AdminSessionChanged) return null;
+        if (e.kind === 'missing') return {state: 'not-installed'};
+        return {state: e.kind === 'forbidden' ? 'unreadable' : 'error', message: e.summary, detail: e.message};
     }
 }
 
