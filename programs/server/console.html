@@ -756,7 +756,7 @@ const COMPONENTS = [
      admin_needs: ['read_audit', 'read_query_log'],
      description: 'Administrative actions from this console and access changes seen by the server.'},
     {id: 'admin-clusters', category: 'administration', kind: 'admin', title: 'Clusters', icon: 'cluster', page: 'clusters',
-     admin_needs: ['read_clusters', 'setup'],
+     admin_needs: ['read_cluster_tables', 'setup'],
      description: 'Cluster lifecycle: provisioning, registration, topology, Keeper, configuration, scaling, upgrades, recovery, and retirement.'},
     {id: 'admin-backups', category: 'administration', kind: 'admin', title: 'Backup & Restore', icon: 'backup', page: 'backups',
      admin_needs: ['read_backups', 'setup'],
@@ -2415,13 +2415,16 @@ function adminChecks(db) {
     const table = name => db ? `${quoteIdentifier(db)}.${quoteIdentifier(name)}` : null;
     const read = (...tables) => ({read: tables});
     const grant = statement => ({grant: statement});
+    /// A system log that the default configuration enables does not exist until the server first flushes it, a few
+    /// seconds after it starts: whether the user may read it is a question for the privileges, not the table.
+    const log = name => grant(`SELECT ON ${name}`);
     return {
         read_users: read('system.users'),
         read_roles: read('system.roles', 'system.role_grants', 'system.grants'),
         read_grants: read('system.grants', 'system.role_grants'),
         read_profiles: read('system.settings_profiles', 'system.settings_profile_elements'),
         read_quotas: read('system.quotas', 'system.quota_limits'),
-        read_query_log: read('system.query_log'),
+        read_query_log: log('system.query_log'),
         read_session_log: read('system.session_log'),
         read_tables: read('system.tables'),
         read_privileges: read('system.privileges'),
@@ -2464,13 +2467,13 @@ function adminChecks(db) {
         write_destinations: db ? grant(`INSERT ON ${table('backup_destinations')}`) : null,
         write_schedules: db ? grant(`INSERT ON ${table('backup_schedules')}`) : null,
         read_endpoints: db ? read(table('backup_endpoints')) : null,
-        read_clusters: db ? read(table('clusters'), table('cluster_revisions'), table('cluster_operations'), table('cluster_events'),
+        read_cluster_tables: db ? read(table('clusters'), table('cluster_revisions'), table('cluster_operations'), table('cluster_events'),
             table('cluster_observations'), table('cluster_resources')) : null,
         write_clusters: db ? grant(`INSERT ON ${table('cluster_operations')}`) : null,
         ...Object.fromEntries(CLUSTER_CAPABILITIES.map(([cap]) => [`cap_${cap}`, db ? grant(`INSERT(${cap}) ON ${table('cluster_capabilities')}`) : null])),
         write_endpoints: db ? grant(`INSERT ON ${table('backup_endpoints')}`) : null,
         read_system_backups: read('system.backups'),
-        read_backup_log: read('system.backup_log'),
+        read_backup_log: log('system.backup_log'),
         create_named_collection: grant('CREATE NAMED COLLECTION ON *.*'),
         read_disk: grant('READ ON DISK'),
         write_disk: grant('WRITE ON DISK'),
@@ -9645,7 +9648,7 @@ function healthSummary(c) {
 
 ADMIN_PAGES.clusters = (root, route, page) => {
     const c = page.component;
-    if (!session.admin.can.read_clusters) {
+    if (!session.admin.can.read_cluster_tables) {
         put(root, pageHeader(c, 'Clusters'), clusterSetupBox());
         return;
     }
