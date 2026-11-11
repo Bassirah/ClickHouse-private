@@ -9,7 +9,7 @@
 /console/admin-users/alice 200 1
 HEAD 200
 --- sibling paths are not taken over
-/consolex 404
+/consolex 4xx 0
 --- the page is not cached, not framed by other sites, and loads nothing external
 Cache-Control: no-store
 X-Frame-Options: DENY

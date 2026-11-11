@@ -335,27 +335,89 @@ await test('Component access denied: hidden in the UI and on its route; native p
     await sql(`REVOKE SELECT ON system.part_log FROM e2e_user`);
 });
 
-await test('Resources links are governed too: an administrator hides one in the matrix, and the user no longer sees it', async () => {
-    const page = admin.page;
+/// Sets Open of a link for all users in the matrix of Component Access, and saves the rules if that changed it.
+async function setLinkOpenForAll(page, label, open) {
     await go(page, '/console/admin-access');
     await page.waitForTimeout(1500);
-    const row = await view(page).locator('tr', {hasText: 'Documentation'}).first().innerText();
-    check(row.includes('Resources') && row.includes('external website'), `the link is not in the matrix: ${row}`);
-    check((await view(page).locator('tr', {hasText: 'Documentation'}).first().locator('input[type=checkbox]').count()) === 1, 'a link has more than the Open capability');
-    await view(page).getByLabel('Open Documentation').uncheck();
+    const box = view(page).getByLabel(`Open ${label}`);
+    if ((await box.isChecked()) === open) return;
+    await box.setChecked(open);
     await view(page).locator('button', {hasText: 'Save rules'}).click();
     check((await apply(page)).includes('Applied.'), 'the rules were not saved');
     await closeDialog(page);
-    check(await sql(`SELECT open FROM ${ADMIN_DB}.component_policy FINAL WHERE subject_type = 'all' AND component = 'documentation' AND NOT deleted`) === 'false', 'no rule for the link');
+}
 
-    const user = await signIn('e2e_user', PASSWORD);
-    check(!(await user.page.locator('#sidebar').innerText()).includes('Documentation'), 'Documentation is listed for e2e_user');
-    check(!(await user.page.$('.card[data-component="documentation"]')), 'Documentation has a card for e2e_user');
-    check(!!(await user.page.$('#sidebar a[data-component="website"]')), 'another link disappeared');
-    await go(user.page, '/console/documentation');
-    check((await user.page.locator('#panel-state').innerText()).includes('is not allowed'), 'the route does not explain the policy');
-    await screenshot(user.page, 'a07-link-denied');
-    await user.context.close();
+await test('Resources links are governed too: an administrator hides one in the matrix, and the user no longer sees it', async () => {
+    const page = admin.page;
+    const rule_of = component => `SELECT open FROM ${ADMIN_DB}.component_policy FINAL WHERE subject_type = 'all' AND component = '${component}' AND NOT deleted`;
+    const rule = rule_of('documentation');
+    /// The check hides Documentation itself and expects Website to stay listed, so it starts from both open, and puts
+    /// the policy back afterwards: a policy that already hides them would leave it nothing to change or to compare with.
+    const initial = {Documentation: await sql(rule), Website: await sql(rule_of('website'))};
+    await setLinkOpenForAll(page, 'Documentation', true);
+    await setLinkOpenForAll(page, 'Website', true);
+    try {
+        const row = await view(page).locator('tr', {hasText: 'Documentation'}).first().innerText();
+        check(row.includes('Resources') && row.includes('external website'), `the link is not in the matrix: ${row}`);
+        check((await view(page).locator('tr', {hasText: 'Documentation'}).first().locator('input[type=checkbox]').count()) === 1, 'a link has more than the Open capability');
+        await view(page).getByLabel('Open Documentation').uncheck();
+        await view(page).locator('button', {hasText: 'Save rules'}).click();
+        check((await apply(page)).includes('Applied.'), 'the rules were not saved');
+        await closeDialog(page);
+        check(await sql(rule) === 'false', 'no rule for the link');
+
+        const user = await signIn('e2e_user', PASSWORD);
+        check(!(await user.page.locator('#sidebar').innerText()).includes('Documentation'), 'Documentation is listed for e2e_user');
+        check(!(await user.page.$('.card[data-component="documentation"]')), 'Documentation has a card for e2e_user');
+        check(!!(await user.page.$('#sidebar a[data-component="website"]')), 'another link disappeared');
+        await go(user.page, '/console/documentation');
+        check((await user.page.locator('#panel-state').innerText()).includes('is not allowed'), 'the route does not explain the policy');
+        await screenshot(user.page, 'a07-link-denied');
+        await user.context.close();
+    } finally {
+        /// No rule before the check means open.
+        for (const [label, open] of Object.entries(initial))
+            await setLinkOpenForAll(page, label, open !== 'false');
+    }
+});
+
+await test('Rule assignment: a box in the header of each capability selects or clears it for every component', async () => {
+    const page = admin.page;
+    const policy = `SELECT groupArray((subject_type, subject, component, open, view_data, run_queries, administer)) FROM (SELECT * FROM ${ADMIN_DB}.component_policy FINAL WHERE NOT deleted ORDER BY subject_type, subject, component)`;
+    const before = await sql(policy);
+    await go(page, '/console/admin-access');
+    await page.waitForTimeout(1500);
+    const column = title => page.evaluate(t => {
+        const head = document.querySelector(`#admin-view input[aria-label="Select all: ${t}"]`);
+        const inputs = [...document.querySelectorAll(`#admin-view tbody input[aria-label^="${t} "]`)];
+        return {head: !!head, checked: !!head?.checked, partial: !!head?.indeterminate, total: inputs.length, on: inputs.filter(input => input.checked).length};
+    }, title);
+    for (const title of ['Open', 'View data', 'Run queries', 'Administer']) {
+        const c = await column(title);
+        check(c.head && c.total > 0, `no header box for ${title}`);
+        check(c.checked === (c.on === c.total) && c.partial === (c.on > 0 && c.on < c.total), `the ${title} header does not show ${c.on}/${c.total}`);
+    }
+    await view(page).getByLabel('Select all: View data').check();
+    const viewed = await column('View data');
+    check(viewed.on === viewed.total && viewed.checked, 'View data is not set for every component');
+    check(await page.evaluate(() => [...document.querySelectorAll('#admin-view tbody tr')].every(row =>
+        !row.querySelector('input[aria-label^="View data "]') || row.querySelector('input[aria-label^="Open "]').checked)), 'Open did not follow View data');
+    /// A partial header counts as unchecked: a click selects the whole column, and the next one clears it.
+    await view(page).getByLabel('Select all: Open').check();
+    await view(page).getByLabel('Select all: Open').uncheck();
+    for (const title of ['Open', 'View data', 'Run queries', 'Administer']) {
+        const c = await column(title);
+        check(c.on === 0 && !c.checked && !c.partial, `${title} is not cleared with Open`);
+    }
+    await view(page).locator('tbody input[aria-label^="Open "]').first().check();
+    const open = await column('Open');
+    check(open.partial && !open.checked, 'the Open header is not partial with one component');
+    await view(page).locator('button', {hasText: 'Save rules'}).click();
+    check((await dialog(page).innerText()).includes('nothing allowed'), 'the review does not list the cleared components');
+    await dialog(page).locator('.dialog-actions button', {hasText: 'Back'}).click();
+    /// Nothing was applied: leaving the page discards the selection.
+    await go(page, '/console/admin-access');
+    check(await sql(policy) === before, 'the policy changed');
 });
 
 await test('Scoped access administrator: manages users in its scope only, and only with its roles', async () => {

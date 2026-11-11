@@ -14,7 +14,9 @@
 
 import {chromium} from 'playwright';
 import {execFileSync, spawn} from 'node:child_process';
-import {existsSync, mkdirSync, readFileSync} from 'node:fs';
+import crypto from 'node:crypto';
+import {existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 
 function arg(name, fallback) {
@@ -148,13 +150,18 @@ async function latestOp(kind) {
     return sql(`SELECT op_id FROM ${DB}.backup_operations WHERE kind = {k:String} ORDER BY requested_at DESC LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {k: kind});
 }
 
-/// Runs the backup wizard: whole databases, a destination, full or incremental.
-async function backupThroughWizard(databases, destination_name, {incremental = false, capture = true, close_early = false} = {}) {
+/// Runs the backup wizard: whole databases, a destination, full or incremental. The server objects (functions, workloads,
+/// and resources; the console's own tables) are chosen explicitly, so that each check backs up what it names.
+async function backupThroughWizard(databases, destination_name,
+    {incremental = false, capture = true, close_early = false, sql_objects = false, console_tables = false} = {}) {
     const previous = await latestOp('backup');
     await go('/console/admin-backups?tab=backups');
     await page.locator('#admin-view button', {hasText: 'New backup'}).click();
     await dialog().locator('select').first().selectOption('databases');
     for (const db of databases) await dialog().locator('label', {hasText: new RegExp(`^${db}$`)}).locator('input').check();
+    await dialog().locator('label', {hasText: 'Include SQL user-defined functions'}).locator('input').setChecked(sql_objects);
+    const console_box = dialog().locator('label', {hasText: "Include the console's tables"}).locator('input');
+    if (console_tables || await console_box.isEnabled()) await console_box.setChecked(console_tables);
     check(!(await wizardNext()), 'scope step');
     const destination = dialog().locator('select').first();
     const value = await destination.evaluate((el, name) => [...el.options].find(o => o.textContent.startsWith(name))?.value, destination_name);
@@ -197,6 +204,27 @@ for (const statement of ['DROP DATABASE IF EXISTS e2e_bk_src', 'CREATE DATABASE 
     const result = await sql(statement);
     check(!code(result), `${statement}: ${result}`);
 }
+/// On a server without the console tables, such as a new one, they are created through the console's own setup: first
+/// those of the administration pages, which keep the audit log, then those of Backup & Restore.
+async function ensureSetUp() {
+    await signIn();
+    const exists = await sql(`SELECT count() FROM system.tables WHERE database = '${DB}' AND name IN ('audit_log', 'component_policy', 'protected_accounts')`);
+    if (exists !== '3') {
+        await go('/console/admin-access');
+        await page.locator('#admin-view button', {hasText: 'Set up'}).click();
+        check((await reviewAndApply()).includes('Applied.'), 'the setup of the administration pages failed');
+        await signIn();
+    }
+    await go('/console/admin-backups');
+    const setup = page.locator('#admin-view button', {hasText: 'Set up'});
+    if (await setup.count()) {
+        await setup.click();
+        check((await applyPlan()).includes('Applied.'), 'the setup of Backup & Restore failed');
+        await signIn();
+    }
+}
+await ensureSetUp();
+
 const STARTED = await sql('SELECT now()');
 
 await test('Unauthorized user calls the backup operations directly: the server rejects them', async () => {
@@ -454,6 +482,216 @@ await test('Isolated restore completes: schema and data checks match the capture
     if (SCREENSHOTS) await page.screenshot({path: `${SCREENSHOTS}/b02-restore.png`});
 });
 
+await test('Server objects: functions and the console tables are backed up, listed, and restored only when chosen', async () => {
+    const fn = `e2e_bk_fn_${Date.now() % 100000}`;
+    await sql(`CREATE FUNCTION ${fn} AS x -> x * 2`);
+    const run = await backupThroughWizard(['e2e_bk_src'], disk_destination, {capture: false, sql_objects: true, console_tables: true});
+    check(await opState(run.op_id) === 'succeeded', `state: ${await opState(run.op_id)}`);
+    const scope = JSON.parse(await sql(`SELECT scope FROM ${DB}.backup_operations WHERE op_id = {id:String} LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {id: run.op_id}));
+    check(scope.sql_objects === true && scope.databases.includes(DB), `recorded scope: ${JSON.stringify(scope)}`);
+    check(await sql(`SELECT count() FROM system.backups WHERE id = {id:String} AND num_files > 0`, ADMIN_USER, ADMIN_PASSWORD, {id: run.op_id}) === '1', 'no native backup');
+
+    /// The inventory says what the backup contains, and what no backup made here contains.
+    await go('/console/admin-backups?tab=backups');
+    const row = page.locator('#admin-view tr').filter({has: page.locator('td:first-child', {hasText: run.op_id.slice(0, 8)})});
+    await row.locator('details.contents summary').click();
+    const contents = await row.locator('details.contents').innerText();
+    check(contents.includes('SQL user-defined functions, workloads, and resources') && contents.includes(`The console's tables in ${DB}`), `contents: ${contents}`);
+    check(contents.includes('The server configuration') && contents.includes("Keeper's own state") && contents.includes('Users, roles'), `not included: ${contents}`);
+
+    /// Restored only when chosen, and never over an existing function.
+    await sql(`DROP FUNCTION ${fn}`);
+    const restoreTo = async choose => {
+        await go(`/console/admin-backups?tab=restore&backup=${run.op_id}`);
+        await dialog().locator('.dialog-actions button.primary').waitFor();
+        check((await dialog().innerText()).includes('Not in this backup'), 'the restore does not say what is missing');
+        check(!(await wizardNext()), 'chain step');
+        check(!(await wizardNext()), 'target step');
+        await dialog().locator('label', {hasText: 'Also restore the functions, workloads, and resources'}).locator('input').setChecked(choose);
+        /// The suggested names are per minute: earlier checks may have restored into them.
+        const suffix = Math.random().toString(36).slice(2, 7);
+        for (const input of await dialog().locator('input[type=text]').all()) await input.fill(`${(await input.inputValue()).slice(0, 50)}_${suffix}`);
+        check(!(await wizardNext()), 'names step');
+        check(!(await wizardNext()), 'conflicts step');
+        const targets = await dialog().innerText();
+        await dialog().locator('input[type=text]').first().fill(targets.match(/Type (\S+) to confirm/)[1]);
+        const previous = await latestOp('restore');
+        await dialog().locator('.dialog-actions button.primary', {hasText: 'Start restore'}).click();
+        const op = await until(async () => { const latest = await latestOp('restore'); return latest !== previous ? latest : null; }, 60000, 'the restore to be recorded');
+        await until(async () => ['succeeded', 'failed', 'cancelled', 'unknown'].includes(await opState(op)), 300000, 'the restore to finish');
+        const target = JSON.parse(await sql(`SELECT target FROM ${DB}.backup_operations WHERE op_id = {id:String} LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {id: op}));
+        for (const db of Object.values(target)) await sql(`DROP DATABASE IF EXISTS ${db} SYNC`);
+        return {op, state: await opState(op), target};
+    };
+    const without = await restoreTo(false);
+    check(without.state === 'succeeded', `restore without the functions: ${without.state}`);
+    check(Object.keys(without.target).includes(DB), "the console's tables are not restored into their own database");
+    check(await sql(`SELECT count() FROM system.functions WHERE name = {fn:String}`, ADMIN_USER, ADMIN_PASSWORD, {fn}) === '0', 'the function was restored without being chosen');
+    const chosen = await restoreTo(true);
+    check(chosen.state === 'succeeded', `restore with the functions: ${chosen.state}`);
+    check(await sql(`SELECT count() FROM system.functions WHERE name = {fn:String}`, ADMIN_USER, ADMIN_PASSWORD, {fn}) === '1', 'the function was not restored');
+    const again = await restoreTo(true);
+    check(again.state === 'failed', `a restore over an existing function did not fail: ${again.state}`);
+    await sql(`DROP FUNCTION IF EXISTS ${fn}`);
+});
+
+/// Every file under `dir`, recursively.
+function filesUnder(dir) {
+    return readdirSync(dir, {withFileTypes: true}).flatMap(e => e.isDirectory() ? filesUnder(path.join(dir, e.name)) : [path.join(dir, e.name)]);
+}
+
+/// A stand-in for the Transit secrets engine of HashiCorp Vault (`/v1/transit/encrypt|decrypt/<key>`).
+async function transitStandIn(token) {
+    const keys = new Map();
+    const server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', c => { body += c; });
+        req.on('end', () => {
+            const m = req.url.match(/^\/v1\/transit\/(encrypt|decrypt)\/([^/]+)$/);
+            if (!m || req.headers['x-vault-token'] !== token) return res.writeHead(403, {'Content-Type': 'application/json'}).end('{"errors":["permission denied"]}');
+            if (!keys.has(m[2])) keys.set(m[2], crypto.randomBytes(32));
+            const key = keys.get(m[2]);
+            const data = JSON.parse(body);
+            if (m[1] === 'encrypt') {
+                const iv = crypto.randomBytes(12);
+                const c = crypto.createCipheriv('aes-256-gcm', key, iv);
+                const ct = Buffer.concat([c.update(Buffer.from(data.plaintext, 'base64')), c.final()]);
+                return res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify({data: {ciphertext: `vault:v1:${Buffer.concat([iv, c.getAuthTag(), ct]).toString('base64')}`}}));
+            }
+            const raw = Buffer.from(data.ciphertext.slice(9), 'base64');
+            const d = crypto.createDecipheriv('aes-256-gcm', key, raw.subarray(0, 12));
+            d.setAuthTag(raw.subarray(12, 28));
+            res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify({data: {plaintext: Buffer.concat([d.update(raw.subarray(28)), d.final()]).toString('base64')}}));
+        });
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    return {server, addr: `http://127.0.0.1:${server.address().port}`};
+}
+
+await test('Server bundles: the configuration, a secret, and a Keeper snapshot are backed up encrypted, compared, and staged; another key is refused', async () => {
+    check(process.env.BUNDLE_KEY_PROVIDER === 'file' && process.env.BUNDLE_KEY_FILE, 'the worker of this run has no key file (BUNDLE_KEY_PROVIDER=file, BUNDLE_KEY_FILE): run_e2e.sh sets them');
+    const config_dir = process.env.BUNDLE_PATHS.split(',')[0];
+    const secret = `e2e-bundle-secret-${RUN}-${crypto.randomBytes(6).toString('hex')}`;
+    const secret_file = path.join(config_dir, `zz-e2e-bundle-${RUN}.xml`);
+    writeFileSync(secret_file, `<clickhouse><!-- ${secret} --></clickhouse>\n`, {mode: 0o600});
+    const result = async op_id => JSON.parse(JSON.parse(await sql(`SELECT argMax(details, at) AS details FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state' FORMAT JSONEachRow`,
+        ADMIN_USER, ADMIN_PASSWORD, {id: op_id})).details || '{}');
+    try {
+        await runWorker();
+        await signIn();
+        await go('/console/admin-backups?tab=server');
+        const fingerprint = execFileSync(process.execPath, ['-e', `import('${new URL('./server_bundle.mjs', `file://${WORKER}`).href}').then(m => console.log(m.keyFingerprint(m.readKeyFile(process.argv[1]))))`,
+            process.env.BUNDLE_KEY_FILE]).toString().trim();
+        check((await page.locator('#admin-view').innerText()).includes(fingerprint), `the worker's key ${fingerprint} is not shown`);
+
+        /// A bundle, made by the worker at the request of the console.
+        await page.locator('#admin-view button', {hasText: 'Back up the server state'}).click();
+        const destination = dialog().locator('select').first();
+        await destination.selectOption(await destination.evaluate((el, name) => [...el.options].find(o => o.textContent.startsWith(name))?.value, disk_destination));
+        const previous = await latestOp('bundle');
+        await dialog().locator('.dialog-actions button.primary').click();
+        const bundle = await until(async () => { const latest = await latestOp('bundle'); return latest !== previous ? latest : null; }, 30000, 'the bundle request');
+        check(await opState(bundle) === 'queued', 'the bundle is not queued');
+        await runWorker();
+        check(await opState(bundle) === 'succeeded', `bundle: ${await opState(bundle)} ${await sql(`SELECT argMax(error, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`, ADMIN_USER, ADMIN_PASSWORD, {id: bundle})}`);
+        const made = await result(bundle);
+        check(made.files > 0 && made.key_id === fingerprint && made.provider === 'file', `bundle result: ${JSON.stringify(made)}`);
+        check(!process.env.BUNDLE_KEEPER || (made.keeper && made.keeper.index > 0), 'no Keeper snapshot in the bundle');
+        const artifact = await sql(`SELECT concat(d.path, dest.prefix, '/', o.artifact) FROM ${DB}.backup_operations AS o, ${DB}.backup_destinations AS dest FINAL, system.disks AS d
+            WHERE o.op_id = {id:String} AND dest.id = o.destination_id AND d.name = dest.disk LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {id: bundle});
+        check(existsSync(path.join(artifact, '.backup')), `no backup of the bundle at ${artifact}`);
+        check(!filesUnder(artifact).some(f => readFileSync(f).includes(secret)), 'the secret is in clear in the stored bundle');
+        check(await sql(`SELECT count() FROM system.tables WHERE database = '${DB}' AND name LIKE 'server_bundle%'`) === '0', 'a bundle table was left on the server');
+
+        /// Compare: one file of the bundle is gone, one new file is not in it.
+        rmSync(secret_file);
+        const extra_file = path.join(config_dir, `zz-e2e-bundle-extra-${RUN}.xml`);
+        writeFileSync(extra_file, '<clickhouse/>\n');
+        const compare_op = await (async () => {
+            await go('/console/admin-backups?tab=server');
+            const previous_restore = await latestOp('bundle_restore');
+            await page.locator('#admin-view tr', {hasText: bundle.slice(0, 8)}).locator('button', {hasText: 'Compare'}).click();
+            await dialog().locator('.dialog-actions button.primary').click();
+            return until(async () => { const latest = await latestOp('bundle_restore'); return latest !== previous_restore ? latest : null; }, 30000, 'the comparison request');
+        })();
+        await runWorker();
+        rmSync(extra_file);
+        check(await opState(compare_op) === 'succeeded', `comparison: ${await opState(compare_op)}`);
+        const compared = await result(compare_op);
+        check(compared.missing === 1 && compared.extra === 1 && compared.changed === 0, `comparison: ${JSON.stringify(compared).slice(0, 400)}`);
+        check(compared.entries.some(e => e.path === secret_file && e.status === 'missing on this host'), 'the removed file is not reported');
+        check(!JSON.stringify(compared).includes(secret), 'a comparison recorded a secret');
+
+        /// Stage: the files come back, readable by their owner only, and nothing is written to the server.
+        await go('/console/admin-backups?tab=server');
+        const previous_stage = await latestOp('bundle_restore');
+        await page.locator('#admin-view tr', {hasText: bundle.slice(0, 8)}).locator('button', {hasText: 'Stage'}).click();
+        await dialog().locator('input[type=text]').fill(bundle.slice(0, 8));
+        await dialog().locator('.dialog-actions button.primary').click();
+        const stage_op = await until(async () => { const latest = await latestOp('bundle_restore'); return latest !== previous_stage ? latest : null; }, 30000, 'the staging request');
+        await runWorker();
+        check(await opState(stage_op) === 'succeeded', `staging: ${await opState(stage_op)}`);
+        const staged = await result(stage_op);
+        const staged_secret = path.join(staged.staging_dir, secret_file);
+        check(existsSync(staged_secret) && readFileSync(staged_secret, 'utf8').includes(secret), 'the secret file is not staged');
+        check((statSync(staged_secret).mode & 0o077) === 0, 'a staged file is readable by others');
+        check(existsSync(path.join(staged.staging_dir, 'RESTORE.txt')), 'no RESTORE.txt');
+        check(!existsSync(secret_file), 'the restore wrote into the server configuration');
+        rmSync(staged.staging_dir, {recursive: true, force: true});
+
+        /// Another key file: refused before anything is decrypted.
+        const other_key = path.join(path.dirname(process.env.BUNDLE_KEY_FILE), `other-${RUN}.key`);
+        execFileSync(process.execPath, [WORKER, 'bundle-key-init', '--key-file', other_key]);
+        const wrong = crypto.randomUUID();
+        await sql(`INSERT INTO ${DB}.backup_operations (op_id, kind, server, base_op_id, parameters) VALUES ({id:String}, 'bundle_restore', 'e2e', {b:String}, '{"mode":"compare"}')`,
+            ADMIN_USER, ADMIN_PASSWORD, {id: wrong, b: bundle});
+        await sql(`INSERT INTO ${DB}.backup_events (op_id, kind, state) VALUES ({id:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {id: wrong});
+        await runWorker({BUNDLE_KEY_FILE: other_key});
+        check(await opState(wrong) === 'failed', `with another key: ${await opState(wrong)}`);
+        check((await sql(`SELECT argMax(error, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`, ADMIN_USER, ADMIN_PASSWORD, {id: wrong})).includes('encrypted with the master key'),
+            'the refusal does not name the key');
+
+        /// A worker whose key is a passphrase does not act on requests from the console.
+        const by_console = crypto.randomUUID();
+        await sql(`INSERT INTO ${DB}.backup_operations (op_id, kind, server, base_op_id, parameters) VALUES ({id:String}, 'bundle_restore', 'e2e', {b:String}, '{"mode":"compare"}')`,
+            ADMIN_USER, ADMIN_PASSWORD, {id: by_console, b: bundle});
+        await sql(`INSERT INTO ${DB}.backup_events (op_id, kind, state) VALUES ({id:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {id: by_console});
+        await runWorker({BUNDLE_KEY_PROVIDER: 'passphrase'});
+        check((await sql(`SELECT argMax(error, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`, ADMIN_USER, ADMIN_PASSWORD, {id: by_console})).includes('passphrase'),
+            'a passphrase worker acted on a console request');
+
+        /// Vault Transit: the Vault of the run (E2E_VAULT_ADDR, E2E_VAULT_TOKEN, a Transit key clickhouse-bundles), or a stand-in of its API.
+        const vault = process.env.E2E_VAULT_ADDR ? {addr: process.env.E2E_VAULT_ADDR, token: process.env.E2E_VAULT_TOKEN, server: {close() {}}}
+            : {...await transitStandIn('e2e-vault-token'), token: 'e2e-vault-token'};
+        try {
+            const vault_env = {BUNDLE_KEY_PROVIDER: 'vault', VAULT_ADDR: vault.addr, VAULT_TOKEN: vault.token, VAULT_TRANSIT_KEY: 'clickhouse-bundles', BUNDLE_KEEPER: ''};
+            await runWorker(vault_env);
+            await go('/console/admin-backups?tab=server');
+            check((await page.locator('#admin-view').innerText()).includes('vault:transit/clickhouse-bundles'), 'the Vault key is not shown');
+            await page.locator('#admin-view button', {hasText: 'Back up the server state'}).click();
+            const vault_previous = await latestOp('bundle');
+            await dialog().locator('.dialog-actions button.primary').click();
+            const vault_bundle = await until(async () => { const latest = await latestOp('bundle'); return latest !== vault_previous ? latest : null; }, 30000, 'the bundle request');
+            await runWorker(vault_env);
+            check(await opState(vault_bundle) === 'succeeded', `Vault bundle: ${await opState(vault_bundle)}`);
+            check((await result(vault_bundle)).key_id === 'vault:transit/clickhouse-bundles', 'the bundle does not name the Vault key');
+            const vault_compare = crypto.randomUUID();
+            await sql(`INSERT INTO ${DB}.backup_operations (op_id, kind, server, base_op_id, parameters) VALUES ({id:String}, 'bundle_restore', 'e2e', {b:String}, '{"mode":"compare"}')`,
+                ADMIN_USER, ADMIN_PASSWORD, {id: vault_compare, b: vault_bundle});
+            await sql(`INSERT INTO ${DB}.backup_events (op_id, kind, state) VALUES ({id:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {id: vault_compare});
+            await runWorker(vault_env);
+            const vault_result = await result(vault_compare);
+            check(await opState(vault_compare) === 'succeeded' && vault_result.changed === 0 && vault_result.missing === 0, `Vault comparison: ${JSON.stringify(vault_result).slice(0, 300)}`);
+        } finally {
+            vault.server.close();
+        }
+        await runWorker();
+        if (SCREENSHOTS) await page.screenshot({path: `${SCREENSHOTS}/b10-server-state.png`, fullPage: true});
+    } finally {
+        rmSync(secret_file, {force: true});
+    }
+});
+
 await test('Existing target objects conflict: the restore is blocked', async () => {
     await go(`/console/admin-backups?tab=restore&backup=${full_backup}`);
     await dialog().locator('.dialog-actions button.primary').waitFor();
@@ -526,6 +764,150 @@ await test('Two scheduler workers see the same run: only one operation is submit
     check(submitted.length === 1, `submitted ${submitted.length} times:\n${a.output}\n${b.output}`);
     await sql(`INSERT INTO ${DB}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref, deleted)
         VALUES ({id:String}, 'e2e hourly', false, '', [], [], false, 'full', 1, 'hourly', 0, 0, 0, 'UTC', 2, 'fail', false, '', true)`, ADMIN_USER, ADMIN_PASSWORD, {id});
+});
+
+await test('Recovery rehearsal: a backup restores and matches on an isolated server, also with the staged configuration; a configuration that does not start fails', async () => {
+    check(process.env.REHEARSAL_BINARY && process.env.BUNDLE_PATHS, 'the run gives no clickhouse binary (REHEARSAL_BINARY) or server configuration (BUNDLE_PATHS): run_e2e.sh sets them');
+    const script = new URL('./recovery_rehearsal.mjs', `file://${WORKER}`).pathname;
+    const work = path.join(path.dirname(process.env.BUNDLE_STAGING_DIR), `rehearsal-${RUN}`);
+    /// Asynchronous: a blocked event loop would keep the HTTP client from seeing the server close its idle connections.
+    const rehearse = (...extra) => new Promise(resolve => {
+        const child = spawn(process.execPath, [script, '--url', BASE, '--user', ADMIN_USER, '--password', ADMIN_PASSWORD, '--binary', process.env.REHEARSAL_BINARY,
+            '--backup', full_backup, '--work-dir', work, ...extra], {env: process.env});
+        let output = '';
+        child.stdout.on('data', d => { output += d; });
+        child.stderr.on('data', d => { output += d; });
+        const timer = setTimeout(() => child.kill('SIGKILL'), 600000);
+        child.on('close', exit => {
+            clearTimeout(timer);
+            resolve({ok: exit === 0, output});
+        });
+    });
+    const last = async () => {
+        const row = JSON.parse(await sql(`SELECT toString(argMax(state, at)) AS state, argMax(details, at) AS details FROM ${DB}.backup_events
+            WHERE op_id = {id:String} AND name = 'rehearsal' FORMAT JSONEachRow`, ADMIN_USER, ADMIN_PASSWORD, {id: full_backup}));
+        return {state: row.state, details: JSON.parse(row.details || '{}')};
+    };
+
+    const plain = await rehearse();
+    check(plain.ok, `rehearsal: ${plain.output.slice(-800)}`);
+    const recorded = await last();
+    check(recorded.state === 'passed' && recorded.details.compared > 0 && recorded.details.tables.every(t => t.ok), `recorded: ${JSON.stringify(recorded).slice(0, 400)}`);
+    check(!existsSync(work), 'the rehearsal server was not removed');
+
+    /// The configuration of the test server, staged as a bundle stages it: its Keeper, clusters, disks, and ports are
+    /// replaced, so the rehearsal starts beside the running server without touching it.
+    const server_dir = path.dirname(process.env.BUNDLE_PATHS.split(',')[0]);
+    const staged = path.join(path.dirname(process.env.BUNDLE_STAGING_DIR), `staged-${RUN}`);
+    const staged_config = path.join(staged, 'etc', 'clickhouse-server');
+    mkdirSync(staged_config, {recursive: true});
+    for (const name of ['config.xml', 'users.xml', 'config.d', 'users.d']) execFileSync('cp', ['-r', path.join(server_dir, name), staged_config]);
+    const with_config = await rehearse('--staged', staged);
+    check(with_config.ok, `with the staged configuration: ${with_config.output.slice(-800)}`);
+    check((await last()).details.staged === staged, 'the rehearsal does not record the staged configuration');
+    check(await sql('SELECT 1') === '1', 'the running server was disturbed');
+
+    writeFileSync(path.join(staged_config, 'config.d', 'zz-broken.xml'), '<clickhouse><unclosed>\n');
+    const broken = await rehearse('--staged', staged);
+    check(!broken.ok && /did not start/.test(broken.output), `a broken configuration was not reported: ${broken.output.slice(-500)}`);
+    check((await last()).state === 'failed', 'the failed rehearsal is not recorded');
+    rmSync(staged, {recursive: true, force: true});
+
+    await go('/console/admin-backups?tab=backups');
+    check((await opRow(full_backup).first().innerText()).includes('Rehearsal failed'), 'the inventory does not show the last rehearsal');
+});
+
+/// An S3 request to the MinIO of the run, signed by curl (AWS Signature Version 4).
+function minio(method, url_path, {headers = {}, body = null} = {}) {
+    const args = ['-sS', '-X', method, '--user', `${S3_KEY}:${S3_SECRET}`, '--aws-sigv4', 'aws:amz:us-east-1:s3', '-w', '\n%{http_code}'];
+    for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
+    if (body !== null) {
+        args.push('-H', `Content-MD5: ${crypto.createHash('md5').update(body).digest('base64')}`, '--data-binary', body);
+    }
+    const out = execFileSync('curl', [...args, `${new URL(S3_URL).origin}${url_path}`]).toString();
+    const status = Number(out.slice(out.lastIndexOf('\n') + 1));
+    return {status, text: out.slice(0, out.lastIndexOf('\n'))};
+}
+
+await test('Protection and second copies: bucket encryption and Object Lock are reported, a schedule copies to the locked bucket, and its deletion keeps the data', async () => {
+    /// A bucket with Object Lock (GOVERNANCE, 1 day) and default encryption.
+    const bucket = `e2e-locked-${RUN}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 50);
+    check(minio('PUT', `/${bucket}`, {headers: {'x-amz-bucket-object-lock-enabled': 'true'}}).status === 200, 'the locked bucket was not created');
+    const lock = minio('PUT', `/${bucket}?object-lock=`, {body: '<ObjectLockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><ObjectLockEnabled>Enabled</ObjectLockEnabled>'
+        + '<Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days></DefaultRetention></Rule></ObjectLockConfiguration>'});
+    check(lock.status === 200, `Object Lock: ${lock.status} ${lock.text.slice(0, 200)}`);
+    const encryption = minio('PUT', `/${bucket}?encryption=`, {body: '<ServerSideEncryptionConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule>'
+        + '<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>'});
+    check(encryption.status === 200, `default encryption: ${encryption.status} ${encryption.text.slice(0, 200)}`);
+
+    /// Its destination, made like the console makes one.
+    const locked_name = `e2e locked ${RUN}`;
+    const locked_id = crypto.randomUUID();
+    const collection = `console_backup_e2elock${RUN.replace(/[^A-Za-z0-9]/g, '').slice(0, 10)}`;
+    const quote = v => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+    const created = await sql(`CREATE NAMED COLLECTION ${collection} AS url = ${quote(`${new URL(S3_URL).origin}/${bucket}/e2e/`)}, access_key_id = ${quote(S3_KEY)}, secret_access_key = ${quote(S3_SECRET)}`);
+    check(!code(created), `named collection: ${created}`);
+    await sql(`INSERT INTO ${DB}.backup_destinations (id, name, description, type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled, allowed_databases, test_result, deleted)
+        VALUES ({id:String}, {n:String}, 'Object Lock and default encryption', 's3', '', {c:String}, {e:String}, {b:String}, 'e2e', 'E2E_S3', true, true, [], '{}', false)`,
+    ADMIN_USER, ADMIN_PASSWORD, {id: locked_id, n: locked_name, c: collection, e: new URL(S3_URL).origin, b: bucket});
+
+    /// The worker reads what the buckets enforce.
+    await runWorker();
+    await signIn();
+    await go('/console/admin-backups?tab=destinations');
+    const row = name => page.locator('#admin-view table[aria-label="Destinations"] tr', {hasText: name}).first().innerText();
+    const locked_row = await row(locked_name);
+    check(locked_row.includes('Encrypted (AES256)') && locked_row.includes('Object Lock GOVERNANCE 1 d') && locked_row.includes('Same site'), `locked bucket: ${locked_row}`);
+    const plain_row = await row(s3_destination);
+    check(plain_row.includes('Not encrypted') && plain_row.includes('No Object Lock'), `plain bucket: ${plain_row}`);
+    const disk_row = await row(disk_destination);
+    check(disk_row.includes('Not encrypted') && disk_row.includes('Same site'), `disk: ${disk_row}`);
+    check((await page.locator('#admin-view').innerText()).includes('Recommended S3 permissions'), 'no permission guidance');
+
+    /// A schedule with a second copy at the locked bucket.
+    const id = `e2e-copy-${Date.now()}`;
+    const disk_id = await sql(`SELECT id FROM ${DB}.backup_destinations FINAL WHERE name = {n:String}`, ADMIN_USER, ADMIN_PASSWORD, {n: disk_destination});
+    await sql(`INSERT INTO ${DB}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref, copy_destination_id)
+        VALUES ({id:String}, 'e2e copied', true, {d:String}, ['e2e_bk_src'], [], false, 'full', 1, 'hourly', {m:UInt8}, 0, 0, 'UTC', 5, 'fail', false, '', {c:String})`,
+    ADMIN_USER, ADMIN_PASSWORD, {id, d: disk_id, m: String((new Date().getUTCMinutes() + 59) % 60), c: locked_id});
+    /// JSONEachRow: the default text format escapes quotes and backslashes, so JSON inside it cannot be parsed as is.
+    const ops = async () => (await sql(`SELECT op_id, destination_id, artifact, parameters FROM ${DB}.backup_operations WHERE schedule_id = {id:String} AND kind = 'backup'
+        ORDER BY requested_at LIMIT 1 BY op_id FORMAT JSONEachRow`, ADMIN_USER, ADMIN_PASSWORD, {id})).split('\n').filter(Boolean).map(line => {
+        const r = JSON.parse(line);
+        return [r.op_id, r.destination_id, r.artifact, r.parameters];
+    });
+    let copy = null;
+    await until(async () => {
+        await runWorker();
+        copy = (await ops()).find(o => o[1] === locked_id);
+        return copy && await opState(copy[0]) === 'succeeded';
+    }, 300000, 'the backup and its second copy');
+    const original = (await ops()).find(o => o[1] === disk_id);
+    check(original && await opState(original[0]) === 'succeeded', 'the backup at the first destination did not succeed');
+    check(JSON.parse(copy[3]).copy_of === original[0] && copy[2].includes('/copies/'), `copy record: ${JSON.stringify(copy)}`);
+    await go('/console/admin-backups?tab=schedules');
+    check((await page.locator('#admin-view').innerText()).includes(`second copy to ${locked_name}`), 'the schedule does not show its second copy');
+    await go('/console/admin-backups?tab=overview');
+    const overview = await page.locator('#admin-view').innerText();
+    check(overview.includes('Resilience (3-2-1-1)') && overview.includes('One immutable'), 'no resilience summary');
+
+    /// Deleting the copy hides it, but Object Lock keeps its data.
+    const deletion = crypto.randomUUID();
+    await sql(`INSERT INTO ${DB}.backup_operations (op_id, kind, server, destination_id, artifact, base_op_id) VALUES ({id:String}, 'delete', 'e2e', {d:String}, {a:String}, {b:String})`,
+        ADMIN_USER, ADMIN_PASSWORD, {id: deletion, d: locked_id, a: copy[2], b: copy[0]});
+    await sql(`INSERT INTO ${DB}.backup_events (op_id, kind, state) VALUES ({id:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {id: deletion});
+    await runWorker();
+    const deleted = JSON.parse(JSON.parse(await sql(`SELECT argMax(details, at) AS details FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state' FORMAT JSONEachRow`,
+        ADMIN_USER, ADMIN_PASSWORD, {id: deletion})).details || '{}');
+    check(await opState(deletion) === 'succeeded' && (deleted.note || '').includes('delete markers'), `deletion: ${await opState(deletion)} ${JSON.stringify(deleted)}`);
+    const versions = minio('GET', `/${bucket}?versions=&prefix=${encodeURIComponent(`e2e/${copy[2]}/`)}`);
+    check(/<Version>/.test(versions.text) && /<DeleteMarker>/.test(versions.text), 'the data of the copy is not kept under its delete markers');
+
+    await sql(`INSERT INTO ${DB}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref, copy_destination_id, deleted)
+        VALUES ({id:String}, 'e2e copied', false, '', [], [], false, 'full', 1, 'hourly', 0, 0, 0, 'UTC', 2, 'fail', false, '', '', true)`, ADMIN_USER, ADMIN_PASSWORD, {id});
+    await sql(`INSERT INTO ${DB}.backup_destinations (id, name, description, type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled, allowed_databases, test_result, deleted)
+        VALUES ({id:String}, {n:String}, '', 's3', '', {c:String}, '', '', '', '', true, false, [], '{}', true)`, ADMIN_USER, ADMIN_PASSWORD, {id: locked_id, n: locked_name, c: collection});
+    if (SCREENSHOTS) await page.screenshot({path: `${SCREENSHOTS}/b11-resilience.png`, fullPage: true});
 });
 
 await test('Restore verification fails: the failure stays visible and audited', async () => {
