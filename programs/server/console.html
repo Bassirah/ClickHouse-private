@@ -2536,7 +2536,7 @@ async function loadAdminContext(current) {
     try {
         await Promise.all([
             optional('directories', () => can.read_directories
-                ? adminRows('SELECT name, type, precedence FROM system.user_directories ORDER BY precedence', {}, current) : []),
+                ? adminRows('SELECT name, type, precedence, params FROM system.user_directories ORDER BY precedence', {}, current) : []),
             optional('clusters', async () => can.read_clusters
                 ? (await adminRows('SELECT DISTINCT cluster FROM system.clusters ORDER BY cluster', {}, current)).map(row => row.cluster) : []),
             optional('scoped', async () => scopedAccessManagement(await adminStatements('SHOW GRANTS FINAL', current))),
@@ -3309,7 +3309,7 @@ function renderUserList(root, page) {
         h('p', {className: 'note'}, 'Database users of this server. Signing in to the console uses these users. A user here is not an account '
             + 'in ClickStack or other separately deployed services, and creating one does not give access to them. '
             + 'ClickHouse does not store e-mail addresses, creation dates, or last logins of users, so they are not shown.'),
-        scopedNote('USER'), scopeControl(),
+        scopedNote('USER'), scopeControl(), directorySignInBox(page),
         h('div', {className: 'toolbar'}, adminField('Search', search)),
         results);
     let timer = null;
@@ -3703,6 +3703,204 @@ function secretResult(name, password) {
         h('div', {className: 'actions-row'}, copy),
         h('p', {className: 'note'}, 'Shown only now: it is not stored by the console or in the audit log, and the server keeps only a hash. '
             + 'Give it to the user through a secure channel.'));
+}
+
+/// --- Administration: directory sign-in (LDAP user directory) ---
+///
+/// Users are managed in the console with SQL. An LDAP user directory, configured on the server (`ldap_servers` and
+/// `user_directories.ldap`), lets the users of a directory sign in as well, with their directory password and the roles
+/// mapped from their LDAP groups. Such users are not created in ClickHouse and are read-only here.
+
+/// The LDAP user directories of the server, as `system.user_directories` reports them.
+function ldapDirectories() {
+    return (session.admin.directories || []).filter(d => d.type === 'ldap').map(d => ({...d, params: parseJSON(d.params, {})}));
+}
+
+function directorySignInBox(page) {
+    const directories = ldapDirectories();
+    const box = h('div', {className: 'box'}, h('div', {className: 'admin-head'}, h('h2', {}, 'Directory sign-in (LDAP)'), h('span', {className: 'spacer'}),
+        directories.length ? button('Test sign-in…', () => testDirectorySignIn(), {className: 'small'}) : null,
+        button(directories.length ? 'Configuration…' : 'Configure LDAP…', () => ldapConfigDialog(directories[0]), {className: 'small'})));
+    if (!session.admin.can.read_directories) {
+        box.append(paragraph('Your user cannot read system.user_directories, so the console cannot tell whether an LDAP directory is configured.'));
+        return box;
+    }
+    if (!directories.length) {
+        box.append(paragraph('Users are managed here, with SQL. To let the users of an LDAP directory (OpenLDAP, Active Directory) sign in as well, with their '
+            + 'directory password and roles mapped from their groups, configure an LDAP user directory on the server: the users and roles here keep working.'));
+        return box;
+    }
+    const content = h('div', {}, h('span', {className: 'spinner'}));
+    box.append(paragraph('Users of the LDAP directory sign in with their directory password. They are not created here: their roles come from the default roles '
+        + 'and from their LDAP groups, and they appear in the list below, read-only, once they have signed in. The users and roles managed here keep working.'),
+    content);
+    adminRows('SELECT name FROM system.roles ORDER BY name').then(rows => {
+        if (!isCurrent(page)) return;
+        const roles = new Set(rows.map(r => r.name));
+        const order = (session.admin.directories || []).map(d => d.name);
+        content.replaceChildren(...directories.map(d => {
+            const mappings = d.params.role_mappings || [];
+            const defaults = d.params.roles || [];
+            const missing = defaults.filter(r => !roles.has(r));
+            const before = order.slice(0, order.indexOf(d.name)).filter(Boolean);
+            return h('div', {}, kvList([
+                ['Directory', `${d.name} (precedence ${d.precedence})`],
+                ['LDAP server', h('code', {}, d.params.server || '—')],
+                ['Default roles', defaults.length ? chips(defaults, r => badge(r, roles.has(r) ? 'ok' : 'bad', roles.has(r) ? null : 'This role does not exist: create it, or the users get nothing from it.'))
+                    : h('span', {className: 'note'}, 'none')],
+                ['Roles from groups', mappings.length ? h('div', {}, mappings.map(m => h('div', {className: 'note'},
+                    `${m.attribute} of the entries under ${m.base_dn} (${m.scope}) that match ${m.search_filter}`, m.prefix ? `; values starting with "${m.prefix}" become the role named after the rest` : '; each value is a role name')))
+                    : h('span', {className: 'note'}, 'no group mapping: only the default roles')],
+                ['Precedence', before.length ? `A user name that also exists in ${before.join(', ')} signs in there, not in this directory.` : 'First of the user directories.'],
+            ]), missing.length ? h('div', {className: 'message error'}, `Default roles that do not exist: ${missing.join(', ')}.`) : null,
+            mappings.length && ![...roles].length ? h('div', {className: 'message warning'}, 'No role exists yet: groups map to roles by name, so create the roles the groups stand for.') : null);
+        }));
+    }, e => { if (!(e instanceof AdminSessionChanged)) content.replaceChildren(errorBox(e)); });
+    return box;
+}
+
+/// Tries the credentials of a directory user once, with a query that reads the user's own name and enabled roles. The
+/// password is used for this request only: it is not stored, shown again, or written to the audit log.
+function testDirectorySignIn() {
+    const user = h('input', {type: 'text', autocomplete: 'off', spellcheck: false});
+    const password = h('input', {type: 'password', autocomplete: 'new-password'});
+    const result = h('div', {});
+    const run = async () => {
+        result.replaceChildren(loadingBox('Signing in…'));
+        let outcome;
+        try {
+            const response = await fetch('/', {method: 'POST', cache: 'no-store', credentials: 'omit',
+                headers: {'X-ClickHouse-User': user.value, 'X-ClickHouse-Key': password.value},
+                body: "SELECT currentUser() AS user, (SELECT groupArray(role_name) FROM system.enabled_roles) AS roles FORMAT JSON"});
+            const text = await response.text();
+            outcome = response.ok ? {ok: true, ...JSON.parse(text).data[0]} : {ok: false, error: text.trim().split('\n')[0].slice(0, 300)};
+        } catch (e) {
+            outcome = {ok: false, error: e.message};
+        }
+        password.value = '';
+        let storage = null;
+        if (outcome.ok) storage = ((await adminRows('SELECT storage FROM system.users WHERE name = {n:String}', {n: user.value}).catch(() => []))[0] || {}).storage || null;
+        if (session.admin.can.write_audit) {
+            await writeAudit(session, {action: 'test_directory_sign_in', target_type: 'user', target_name: user.value,
+                summary: `Test the sign-in of ${user.value}: ${outcome.ok ? 'accepted' : 'refused'}`},
+            {correlation_id: crypto.randomUUID(), scope: 'local', result: outcome.ok ? 'success' : 'failure', steps: []}, outcome.ok ? '' : outcome.error).catch(() => {});
+        }
+        result.replaceChildren(outcome.ok
+            ? h('div', {className: 'message info'}, kvList([['Signed in as', outcome.user], ['Through', storage || 'unknown'],
+                ['Roles', outcome.roles.length ? chips(outcome.roles) : 'none: the user can sign in but has no privileges from roles']]))
+            : h('div', {className: 'message error'}, `Refused: ${outcome.error}`));
+    };
+    openDialog('Test a directory sign-in', [
+        paragraph('Signs in once with these credentials and shows the roles the user gets. The password is used for this request only: it is not stored or '
+            + 'recorded. With verification_cooldown, the server may reuse a successful check for that many seconds, so a change in the directory shows after it.'),
+        adminField('User name', user), adminField('Password', password), result,
+    ], [button('Close', closeDialog), button('Sign in', run, {className: 'primary'})]);
+}
+
+/// The XML of an LDAP server and an LDAP user directory, with secure defaults, for an administrator to deploy as a file
+/// in config.d. The console cannot write the server configuration, and does not.
+function ldapConfigXml(v) {
+    const x = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const tls = {ldaps: ['yes', v.port || 636], starttls: ['starttls', v.port || 389]}[v.tls];
+    return `<clickhouse>
+    <!-- Directory sign-in for the web console: users of the LDAP directory sign in with their directory password.
+         The users of users.xml and those created with SQL keep working. -->
+    <ldap_servers>
+        <${x(v.server)}>
+            <host>${x(v.host)}</host>
+            <port>${x(tls[1])}</port>
+            <enable_tls>${tls[0]}</enable_tls>
+            <tls_minimum_protocol_version>tls1.2</tls_minimum_protocol_version>
+            <tls_require_cert>demand</tls_require_cert>${v.ca_file ? `
+            <tls_ca_cert_file>${x(v.ca_file)}</tls_ca_cert_file>` : ''}
+            <bind_dn>${x(v.bind_dn)}</bind_dn>
+            <!-- Reuse a successful password check for this many seconds: the console sends a request for every action,
+                 and without it each one is a bind to the directory. A user disabled in the directory keeps access for at most this long. -->
+            <verification_cooldown>${x(v.cooldown)}</verification_cooldown>
+            <operation_timeout>40</operation_timeout>
+            <network_timeout>30</network_timeout>
+            <search_timeout>20</search_timeout>
+        </${x(v.server)}>
+    </ldap_servers>
+    <user_directories>
+        <ldap>
+            <server>${x(v.server)}</server>${v.roles.length ? `
+            <roles>${v.roles.map(r => `<${x(r)}/>`).join('')}</roles>` : ''}${v.base_dn ? `
+            <role_mapping>
+                <base_dn>${x(v.base_dn)}</base_dn>
+                <scope>subtree</scope>
+                <search_filter>${x(v.search_filter)}</search_filter>
+                <attribute>${x(v.attribute)}</attribute>
+                <prefix>${x(v.prefix)}</prefix>
+            </role_mapping>` : ''}
+        </ldap>
+    </user_directories>
+</clickhouse>
+`;
+}
+
+function ldapConfigDialog(existing) {
+    const field = (value, props = {}) => h('input', {type: 'text', value, autocomplete: 'off', spellcheck: false, ...props});
+    const p = existing ? existing.params : {};
+    const m = (p.role_mappings || [])[0] || {};
+    const f = {
+        server: field(p.server || 'corp'), host: field('ldap.example.com'), port: field('', {placeholder: '636 for LDAPS, 389 for StartTLS'}),
+        tls: select([['ldaps', 'LDAPS (TLS from the start)'], ['starttls', 'StartTLS (on the plain port)']], 'ldaps'),
+        ca_file: field('/etc/clickhouse-server/ldap-ca.crt'), bind_dn: field('uid={user_name},ou=users,dc=example,dc=org'), cooldown: field('300'),
+        roles: field((p.roles || []).join(', '), {placeholder: 'roles every directory user gets, comma-separated'}),
+        base_dn: field(m.base_dn || 'ou=groups,dc=example,dc=org'), search_filter: field(m.search_filter || '(&(objectClass=groupOfNames)(member={bind_dn}))'),
+        attribute: field(m.attribute || 'cn'), prefix: field(m.prefix === undefined ? 'clickhouse-' : m.prefix),
+    };
+    const output = h('pre', {className: 'code'});
+    const error = h('div', {className: 'message error', role: 'alert', hidden: true});
+    const values = () => ({server: f.server.value.trim(), host: f.host.value.trim(), port: f.port.value.trim(), tls: f.tls.value, ca_file: f.ca_file.value.trim(),
+        bind_dn: f.bind_dn.value.trim(), cooldown: f.cooldown.value.trim(), roles: f.roles.value.split(',').map(r => r.trim()).filter(Boolean),
+        base_dn: f.base_dn.value.trim(), search_filter: f.search_filter.value.trim(), attribute: f.attribute.value.trim(), prefix: f.prefix.value.trim()});
+    const check = v => {
+        if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(v.server)) return 'The server name is an XML element name: letters, digits, _ and -.';
+        if (!v.host) return 'Enter the host of the LDAP server.';
+        if (v.port && !/^\d{1,5}$/.test(v.port)) return 'Enter a port number, or leave it empty for the default.';
+        if (!v.bind_dn.includes('{user_name}')) return 'The bind DN must contain {user_name}, which the server replaces with the name of the user signing in.';
+        if (!/^\d{1,5}$/.test(v.cooldown)) return 'Enter the verification cooldown in seconds.';
+        if (v.roles.some(r => !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(r))) return 'Role names are letters, digits, _ and -.';
+        if (v.base_dn && !v.search_filter.includes('{bind_dn}') && !v.search_filter.includes('{user_name}')) return 'The search filter must contain {bind_dn} or {user_name}, so that it finds the groups of the user.';
+        return null;
+    };
+    const render = () => {
+        const v = values();
+        const problem = check(v);
+        error.textContent = problem || '';
+        error.hidden = !problem;
+        output.textContent = problem ? '' : ldapConfigXml(v);
+    };
+    for (const input of Object.values(f)) input.addEventListener(input.tagName === 'SELECT' ? 'change' : 'input', render);
+    render();
+    const copy = button('Copy', async () => {
+        try {
+            await navigator.clipboard.writeText(output.textContent);
+            copy.textContent = 'Copied';
+        } catch (e) {
+            copy.textContent = 'Copy failed: select the text';
+        }
+    }, {className: 'small'});
+    openDialog(existing ? 'LDAP user directory' : 'Configure an LDAP user directory', [
+        paragraph('Generates the server configuration of an LDAP user directory. The console does not change the server configuration: save the text as a file in '
+            + 'config.d of the server (for example /etc/clickhouse-server/config.d/ldap.xml), readable by the server, and restart the server: a new user '
+            + 'directory is created only when the server starts. Later changes of the LDAP server settings (host, TLS, cooldown) take effect with '
+            + 'SYSTEM RELOAD CONFIG. Directory users then sign in with their directory password; the users and roles managed here keep working.'),
+        existing ? h('div', {className: 'message info'}, `The server already has the directory ${existing.name} with the LDAP server ${existing.params.server}: the fields start from it, `
+            + 'except the connection settings, which the server does not report.') : null,
+        h('div', {className: 'form-grid'}, adminField('Server name', f.server), adminField('Host', f.host), adminField('Port', f.port), adminField('Encryption', f.tls)),
+        adminField('CA certificate file', f.ca_file, 'The certificate authority of the LDAP server, on the ClickHouse host. The certificate of the server is always checked (tls_require_cert demand).'),
+        adminField('Bind DN', f.bind_dn, 'The DN the server binds as to check a password; {user_name} is the name the user signs in with. For Active Directory: {user_name}@corp.example.com.'),
+        adminField('Verification cooldown (seconds)', f.cooldown, 'Recommended: 300. 0 checks the password with the directory on every request.'),
+        adminField('Default roles', f.roles),
+        h('fieldset', {className: 'box'}, h('legend', {}, 'Roles from LDAP groups (leave the base DN empty for none)'),
+            adminField('Base DN of the groups', f.base_dn), adminField('Search filter', f.search_filter),
+            h('div', {className: 'form-grid'}, adminField('Attribute', f.attribute), adminField('Prefix', f.prefix)),
+            h('p', {className: 'note'}, 'A group whose attribute is "<prefix>analysts" gives the role analysts. Groups without the prefix are ignored. The roles must exist.')),
+        error, output, h('div', {className: 'actions-row'}, copy),
+    ], [button('Close', closeDialog, {className: 'primary'})]);
 }
 
 async function createUserDialog() {

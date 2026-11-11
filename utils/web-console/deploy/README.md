@@ -200,6 +200,35 @@ node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user
     --binary /usr/bin/clickhouse [--staged <staging directory of a server bundle>]
 ```
 
+## 8. Directory sign-in (LDAP)
+
+Users are managed in the console with SQL. Optionally, the users of an LDAP directory (OpenLDAP, Active Directory) can
+sign in as well, with their directory password: an **LDAP user directory**. They are not created in ClickHouse. Their
+roles come from default roles and from their LDAP groups, and they appear on the Users page, read-only, once they have
+signed in. The users of `users.xml` and those created with SQL keep working, and the console is the same for both.
+
+1. **Generate the configuration.** On **Administration → Users → Directory sign-in (LDAP)**, select **Configure LDAP…**
+   and fill in the LDAP server, the bind DN (`uid={user_name},ou=users,dc=example,dc=org`, or
+   `{user_name}@corp.example.com` for Active Directory), and the group mapping. The configuration is secure by default:
+   LDAPS (or StartTLS), TLS 1.2 or later, the certificate of the LDAP server always checked
+   (`tls_require_cert demand`, with your certificate authority in `tls_ca_cert_file`), and a verification cooldown.
+2. **Create the roles** the groups stand for: with the prefix `clickhouse-`, the group `clickhouse-analysts` gives the
+   role `analysts`, which must exist (Roles & Permissions). Groups without the prefix are ignored.
+3. **Install it.** Save the text as a file in `config.d` (with Compose, `config.d/ldap.xml` next to `web-console.xml`,
+   mounted like it; on Kubernetes, a key of the ConfigMap), with the CA certificate, and **restart the server**: a new
+   user directory is created only when the server starts. Later changes of the LDAP server settings take effect with
+   `SYSTEM RELOAD CONFIG`.
+4. **Check it** with **Test sign-in…**: it signs in once as a directory user, without storing the password, and shows
+   the roles and the directory that accepted the user.
+
+| Setting | Why |
+|---|---|
+| `verification_cooldown` (300 s) | The server checks a password with the directory on every request unless a check succeeded within this many seconds; the console sends a request for every action, about 80 when signing in. A user disabled in the directory keeps access for at most this long. |
+| Precedence | The directories are tried in order: `users.xml`, then the users created with SQL, then LDAP. A local user with the same name as a directory user comes first. |
+| Offboarding | Disable the user, or remove them from the groups, in the directory: it takes effect after the cooldown. Directory users cannot be suspended or deleted in the console. |
+| Access reviews | ClickHouse cannot list the directory: review group membership in LDAP. The Users page shows directory users that have signed in since the server started. |
+| Transport | Passwords travel with every request: serve the console over HTTPS, and never use LDAP without TLS. |
+
 ## Upgrade and rollback
 
 Load the new archives, change `CONSOLE_VERSION` in `.env` (or the image tags), and run `docker compose up -d` (or
