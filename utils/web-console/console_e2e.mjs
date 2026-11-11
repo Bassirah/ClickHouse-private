@@ -734,8 +734,11 @@ await test('Legacy pages and links keep working on their own', async () => {
     await page.waitForSelector('#query');
     await page.goto(`${BASE}/`);
     check(await page.getAttribute('#links a:first-child', 'href') === '/console', 'no Console link on the landing page');
+    /// Not the page, and a client error: 404, or 401 when the default user has a password, because the server asks
+    /// for credentials before it reports a path that no handler serves.
     const response = await page.goto(`${BASE}/consolex`);
-    check(response.status() === 404, `/consolex: ${response.status()}`);
+    check([401, 404].includes(response.status()), `/consolex: ${response.status()}`);
+    check(!(await response.text()).includes('<title>ClickHouse Console</title>'), '/consolex serves the console');
     await context.close();
 });
 

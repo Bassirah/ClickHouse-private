@@ -15,7 +15,11 @@ done
 ${CLICKHOUSE_CURL} -sS -I -o /dev/null -w "HEAD %{http_code}\n" "${BASE}/console"
 
 echo "--- sibling paths are not taken over"
-${CLICKHOUSE_CURL} -sS -o /dev/null -w "/consolex %{http_code}\n" "${BASE}/consolex"
+# Not the page, and a client error: 404, or 401 when the default user has a password, because the server asks for
+# credentials before it reports a path that no handler serves.
+BODY=$(${CLICKHOUSE_CURL} -sS -w '\n%{http_code}' "${BASE}/consolex")
+CODE=$(echo "$BODY" | tail -n1)
+echo "/consolex ${CODE:0:1}xx $(echo "$BODY" | grep -c '<title>ClickHouse Console</title>')"
 
 echo "--- the page is not cached, not framed by other sites, and loads nothing external"
 HEADERS=$(${CLICKHOUSE_CURL} -sS -D - -o /dev/null "${BASE}/console/home" | tr -d '\r')
