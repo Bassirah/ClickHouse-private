@@ -1,0 +1,37 @@
+# Server bundles of the backup worker: the configuration of this deployment and the secrets in it, encrypted with a
+# master key and stored at a backup destination (README.md, "Server bundles"). Use it with compose.yaml:
+#
+#   docker compose -f compose.yaml -f compose.bundles.yaml up -d backup-worker
+#
+# With BUNDLE_KEY_PROVIDER=file (the default here), create the key once, then copy it out of band (a password manager,
+# a sealed envelope), with its fingerprint: without it, no bundle can be decrypted.
+#
+#   mkdir -p bundle-keys restore-staging && sudo chown 101:101 bundle-keys restore-staging && sudo chmod 700 bundle-keys restore-staging
+#   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker bundle-key-init --key-file /keys/bundle.key
+#
+# With BUNDLE_KEY_PROVIDER=vault, set VAULT_ADDR and VAULT_TRANSIT_KEY in .env, and put a token that may only encrypt and
+# decrypt with that key in bundle-keys/vault-token (mode 600). With a passphrase, bundles are made by a person:
+#
+#   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker bundle --destination <name>
+services:
+  backup-worker:
+    environment:
+      BUNDLE_KEY_PROVIDER: ${BUNDLE_KEY_PROVIDER:-file}
+      BUNDLE_KEY_FILE: /keys/bundle.key
+      VAULT_ADDR: ${VAULT_ADDR:-}
+      VAULT_TOKEN_FILE: /keys/vault-token
+      VAULT_TRANSIT_KEY: ${VAULT_TRANSIT_KEY:-}
+      VAULT_TRANSIT_MOUNT: ${VAULT_TRANSIT_MOUNT:-transit}
+      # The deployment's configuration. The server's other files come from the image of CONSOLE_VERSION. To include
+      # .env as well, mount it below and make it readable by the user 101.
+      BUNDLE_PATHS: /deploy/config.d
+      BUNDLE_STAGING_DIR: /staging
+      # Automatic bundles: a destination of Backup & Restore, and the interval (0: only on request).
+      BUNDLE_DESTINATION: ${BUNDLE_DESTINATION:-}
+      BUNDLE_EVERY_HOURS: ${BUNDLE_EVERY_HOURS:-0}
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./config.d:/deploy/config.d:ro
+      - ./bundle-keys:/keys
+      - ./restore-staging:/staging

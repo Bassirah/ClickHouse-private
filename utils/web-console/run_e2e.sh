@@ -54,6 +54,9 @@ ADMIN_PASSWORD=e2e-admin-pass
 LIMITED_PASSWORD=e2e-limited-pass
 MINIO_CONTAINER=console-e2e-minio
 MINIO_IMAGE=minio/minio:RELEASE.2025-07-23T15-54-02Z
+VAULT_CONTAINER=console-e2e-vault
+VAULT_IMAGE=hashicorp/vault:1.17.6
+VAULT_PORT=39200
 MINIO_USER=e2eminio
 MINIO_SECRET=e2eminio-secret-1
 BUCKET=ch-backups
@@ -73,7 +76,7 @@ fi
 if has_suite backup; then
     docker image inspect "$MINIO_IMAGE" > /dev/null 2>&1 || die "the image $MINIO_IMAGE is not on this host"
 fi
-for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT; do
+for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT; do
     ! ss -ltn | grep -q ":$port " || die "port $port is in use: is another run still going? (stop it, or remove what --keep left)"
 done
 
@@ -225,13 +228,13 @@ AGENT_PID=""
 cleanup() {
     [ "$KEEP" = 1 ] && return
     [ -n "$AGENT_PID" ] && kill "$AGENT_PID" 2> /dev/null || true
-    docker rm -f "$MINIO_CONTAINER" > /dev/null 2>&1 || true
+    docker rm -f "$MINIO_CONTAINER" "$VAULT_CONTAINER" > /dev/null 2>&1 || true
     if [ -f "$SERVER/server.pid" ]; then
         pid=$(cat "$SERVER/server.pid")
         kill "$pid" 2> /dev/null || true
         while kill -0 "$pid" 2> /dev/null; do sleep 1; done
     fi
-    rm -rf "$SERVER" "$RUN/agent" "$RUN/suites"
+    rm -rf "$SERVER" "$RUN/agent" "$RUN/suites" "$RUN/keys" "$RUN/staging"
 }
 trap cleanup EXIT
 
@@ -286,6 +289,35 @@ run_suite access access_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" 
 run_suite data_access data_access_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --native-port "$TCP_PORT" \
     --clickhouse "$BINARY" --worker "$HERE/access_policy_worker.mjs" --console-html "$ROOT/programs/server/console.html" \
     --cluster dap_secret --partial-cluster console_test
+if has_suite backup && docker image inspect "$VAULT_IMAGE" > /dev/null 2>&1; then
+    # A Vault in development mode, with a Transit key and a token that may only encrypt and decrypt with it, as
+    # deploy/README.md recommends; without the image, the checks use a stand-in of its API.
+    docker rm -f "$VAULT_CONTAINER" > /dev/null 2>&1 || true
+    docker run -d --name "$VAULT_CONTAINER" --cap-add IPC_LOCK -p "127.0.0.1:$VAULT_PORT:8200" -e VAULT_DEV_ROOT_TOKEN_ID=e2e-root-token \
+        -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 "$VAULT_IMAGE" > /dev/null
+    for _ in $(seq 30); do curl -sf "http://127.0.0.1:$VAULT_PORT/v1/sys/health" > /dev/null 2>&1 && break; sleep 1; done
+    vault() { docker exec -i -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=e2e-root-token "$VAULT_CONTAINER" vault "$@"; }
+    vault secrets enable transit > /dev/null
+    vault write -f transit/keys/clickhouse-bundles > /dev/null
+    printf 'path "transit/encrypt/clickhouse-bundles" { capabilities = ["update"] }\npath "transit/decrypt/clickhouse-bundles" { capabilities = ["update"] }\n' \
+        | vault policy write clickhouse-bundles - > /dev/null
+    printf 'path "transit/encrypt/clickhouse-bundles" { capabilities = ["update"] }\n' | vault policy write encrypt-only - > /dev/null
+    export VAULT_TEST_ADDR="http://127.0.0.1:$VAULT_PORT" VAULT_TEST_ROOT_TOKEN=e2e-root-token
+    VAULT_TEST_TOKEN=$(vault token create -policy=clickhouse-bundles -field=token)
+    VAULT_TEST_TOKEN_ENCRYPT_ONLY=$(vault token create -policy=encrypt-only -field=token)
+    export VAULT_TEST_TOKEN VAULT_TEST_TOKEN_ENCRYPT_ONLY E2E_VAULT_ADDR="$VAULT_TEST_ADDR" E2E_VAULT_TOKEN="$VAULT_TEST_TOKEN"
+    echo "Vault: $VAULT_IMAGE on port $VAULT_PORT"
+fi
+if has_suite backup; then
+    # The module of server bundles alone, then the worker of the suite with a key file, the configuration of this server,
+    # and its embedded Keeper.
+    echo "Running bundle module"
+    if node "$HERE/server_bundle_test.mjs" > "$LOGS/bundle_module.log" 2>&1; then echo "  $(tail -n 1 "$LOGS/bundle_module.log")"
+    else echo "  $(tail -n 1 "$LOGS/bundle_module.log") (log $LOGS/bundle_module.log)"; FAILED="$FAILED bundle_module"; fi
+    node "$HERE/backup_worker.mjs" bundle-key-init --key-file "$RUN/keys/bundle.key" > /dev/null
+    export BUNDLE_KEY_PROVIDER=file BUNDLE_KEY_FILE="$RUN/keys/bundle.key" BUNDLE_PATHS="$SERVER/config.d,$SERVER/users.d" \
+        BUNDLE_KEEPER="127.0.0.1:$KEEPER_PORT" BUNDLE_KEEPER_SNAPSHOTS="$SERVER/data/coordination/snapshots" BUNDLE_STAGING_DIR="$RUN/staging" BUNDLE_COMPARE_ROOT=/
+fi
 run_suite backup backup_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --native-port "$TCP_PORT" \
     --s3 "http://127.0.0.1:$MINIO_PORT/$BUCKET:$MINIO_USER:$MINIO_SECRET" --minio-container "$MINIO_CONTAINER" \
     --worker "$HERE/backup_worker.mjs" --server-restart "$RUN/restart-server.sh" --server-log "$LOGS/clickhouse-server.log"

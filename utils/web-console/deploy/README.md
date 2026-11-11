@@ -103,6 +103,53 @@ and continue with steps 1 and 2 of the previous section, with `kubectl -n clickh
 in place of `docker compose exec -T clickhouse`. For access from outside the cluster, put an Ingress with TLS in front
 of the Service: the console sends passwords in HTTP headers.
 
+## 5. Server bundles
+
+`BACKUP` copies databases, tables, and access entities, but not the server's configuration files, the secrets in them,
+TLS keys, scripts, or Keeper's own state. The backup worker backs those up as **server bundles**: it reads the files on
+the server host, encrypts them, and stores the ciphertext at a destination of Backup & Restore. They appear on
+**Administration → Backup & Restore → Server state**.
+
+Each bundle has its own random 256-bit data key (AES-256-GCM); the master key of the worker wraps that data key. The
+master key is never stored with a bundle, and the destination and the server only ever hold ciphertext. Choose where
+the master key lives with `BUNDLE_KEY_PROVIDER`:
+
+| Provider | Where the master key is | Bundles from the console and on a schedule | What you must do |
+|---|---|---|---|
+| `file` | A file on the worker host, readable by its owner only | Yes | Create it with `bundle-key-init`, then keep a copy **out of band**, away from this host and from the backups (a password manager, a sealed envelope), with its fingerprint. Without the key, no bundle can be decrypted. |
+| `vault` | The Transit secrets engine of HashiCorp Vault; the key never leaves Vault | Yes | Create a Transit key, and give the worker a token whose policy allows only `encrypt` and `decrypt` on it. Vault must be reachable to restore. |
+| `passphrase` | Nowhere: derived from a passphrase with scrypt | No: a person makes and restores bundles on the worker host | Keep the passphrase out of band. |
+
+With Docker Compose, `compose.bundles.yaml` mounts the deployment's `config.d`, a key directory, and a staging
+directory into the worker; its header has the commands. Create the key, copy it out of band, then start the worker:
+
+```bash
+mkdir -p bundle-keys restore-staging && sudo chown 101:101 bundle-keys restore-staging && sudo chmod 700 bundle-keys restore-staging
+docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker bundle-key-init --key-file /keys/bundle.key
+docker compose -f compose.yaml -f compose.bundles.yaml up -d backup-worker
+```
+
+Also grant the worker its bundle tables (the line in `service-accounts.sql`):
+`GRANT CREATE TABLE, DROP TABLE, INSERT, SELECT, BACKUP ON console_admin.server_bundle* TO backup_worker`.
+
+| Variable | Meaning |
+|---|---|
+| `BUNDLE_PATHS` | Files and directories to include, comma-separated (default `/etc/clickhouse-server`). Add TLS keys, `user_scripts`, format schemas, dictionary files, the named collections directory, and the cluster agent's state directory where they are on this host. A file the worker cannot read fails the bundle. |
+| `BUNDLE_KEEPER`, `BUNDLE_KEEPER_SNAPSHOTS` | `host:port` of Keeper and its snapshot directory: the worker asks Keeper for a new snapshot (`csnp`, allowed by default in `four_letter_word_white_list`) and includes it. |
+| `BUNDLE_DESTINATION`, `BUNDLE_EVERY_HOURS` | Automatic bundles to that destination (not with a passphrase). |
+| `BUNDLE_STAGING_DIR` | Where restores put files (default `/var/lib/clickhouse-console/restore-staging`). |
+
+**Restoring.** A restore never writes into the server. On the Server state tab, **Compare** decrypts a bundle and
+reports, by checksum, which files on the worker host are the same, changed, missing, or not in the bundle; only names
+are recorded. **Stage** writes the files into a new directory under `BUNDLE_STAGING_DIR`, readable by their owner only,
+with a `RESTORE.txt`. To apply them: stop the server, compare and copy the files you need, restore their owners and
+modes, and start the server; for Keeper, put the snapshot into its snapshot directory with Keeper stopped and its newer
+snapshots and logs moved aside. Then delete the staging directory: it holds secrets in clear. With a passphrase, run
+`backup-worker bundle-restore --bundle <ID> --mode compare|stage` on the worker host instead.
+
+**Testing the key.** Compare the latest bundle with the host regularly, for example after every change of the
+configuration: it proves that the master key, the bundle, and the destination all still work.
+
 ## Upgrade and rollback
 
 Load the new archives, change `CONSOLE_VERSION` in `.env` (or the image tags), and run `docker compose up -d` (or

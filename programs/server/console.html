@@ -7451,7 +7451,7 @@ ENGINE = ReplacingMergeTree(updated_at) ORDER BY id`,
 ENGINE = ReplacingMergeTree(updated_at) ORDER BY id`,
     backup_operations: () => `(
     op_id String,
-    kind Enum8('backup' = 1, 'restore' = 2, 'verify' = 3, 'delete' = 4, 'test' = 5),
+    kind Enum8('backup' = 1, 'restore' = 2, 'verify' = 3, 'delete' = 4, 'test' = 5, 'bundle' = 6, 'bundle_restore' = 7),
     requested_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
     requested_by String MATERIALIZED currentUser(),
     server String,
@@ -7496,7 +7496,7 @@ ENGINE = MergeTree ORDER BY (op_id, at)`,
 ENGINE = ReplacingMergeTree(updated_at) ORDER BY endpoint`,
 };
 
-const BACKUP_TABS = [['overview', 'Overview'], ['backups', 'Backups'], ['restore', 'Restore'], ['schedules', 'Schedules'],
+const BACKUP_TABS = [['overview', 'Overview'], ['backups', 'Backups'], ['server', 'Server state'], ['restore', 'Restore'], ['schedules', 'Schedules'],
     ['destinations', 'Destinations'], ['operations', 'Operations'], ['verification', 'Recovery verification']];
 
 const TERMINAL_STATES = ['succeeded', 'failed', 'cancelled', 'deleted'];
@@ -7665,11 +7665,16 @@ async function loadBackupState() {
     const events = operations.length ? await adminRows(`SELECT op_id, formatDateTime(e.at, '%Y-%m-%d %H:%i:%S') AS at, toUnixTimestamp64Milli(e.at) AS at_ms, recorded_by,
             toString(kind) AS kind, toString(state) AS state, name, native_id, query_id, error, num_files, total_size, details
         FROM ${db}.backup_events AS e WHERE op_id IN {ops:Array(String)} ORDER BY e.at`, {ops: arrayParam(operations.map(op => op.op_id))}) : [];
-    const worker = await adminRows(`SELECT op_id, formatDateTime(max(e.at), '%Y-%m-%d %H:%i:%S') AS last_at, dateDiff('second', max(e.at), now64(3)) AS age
+    const worker = (await adminRows(`SELECT op_id, formatDateTime(max(e.at), '%Y-%m-%d %H:%i:%S') AS last_at, dateDiff('second', max(e.at), now64(3)) AS age,
+            argMax(details, e.at) AS details
         FROM ${db}.backup_events AS e WHERE op_id LIKE 'worker:%' AND e.at > now64(3) - INTERVAL 7 DAY GROUP BY op_id ORDER BY max(e.at) DESC`).catch(e => {
         if (e instanceof AdminSessionChanged) throw e;
         return [];
-    });
+    })).map(w => ({...w, details: parseJSON(w.details, {})}));
+    /// Installations set up before server bundles have no such kinds of operations: the Server state tab offers the update.
+    const kind_type = (await adminRows(`SELECT type FROM system.columns WHERE database = {db:String} AND table = 'backup_operations' AND name = 'kind'`,
+        {db: session.admin.db}))[0];
+    const bundle_kinds = !!kind_type && kind_type.type.includes("'bundle_restore'");
     const console_endpoints = session.admin.can.read_endpoints ? await adminRows(`SELECT endpoint, note, updated_by,
             formatDateTime(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at FROM ${db}.backup_endpoints FINAL WHERE NOT deleted ORDER BY endpoint`) : null;
     const by_op = new Map(operations.map(op => [op.op_id, {...op, scope: parseJSON(op.scope, {}), parameters: parseJSON(op.parameters, {}),
@@ -7689,6 +7694,8 @@ async function loadBackupState() {
             if (Number(event.num_files)) op.num_files = Number(event.num_files);
             const details = parseJSON(event.details, {});
             if (details.duration_s !== undefined) op.duration_s = details.duration_s;
+            /// What the worker recorded with the last state of a server bundle or its restore.
+            if (op.kind === 'bundle' || op.kind === 'bundle_restore') op.result = details;
             if (event.state === 'running' && !op.started_ms) op.started_ms = Number(event.at_ms);
             if (TERMINAL_STATES.includes(event.state) && event.state !== 'deleted') op.finished_ms = Number(event.at_ms);
             if (event.state === 'deleted') op.deleted = true;
@@ -7696,7 +7703,7 @@ async function loadBackupState() {
             op.checks.push({...event, details: parseJSON(event.details, {})});
         }
     }
-    return {destinations, schedules, operations: [...by_op.values()], destinations_by_id: new Map(destinations.map(d => [d.id, d])), worker, console_endpoints};
+    return {destinations, schedules, operations: [...by_op.values()], destinations_by_id: new Map(destinations.map(d => [d.id, d])), worker, console_endpoints, bundle_kinds};
 }
 
 /// The incremental chain of a backup, from the backup itself to its full base: `{chain, missing}`.
@@ -7734,7 +7741,7 @@ function backupDescendants(state, op) {
 function retentionBlock(state, op) {
     const descendants = backupDescendants(state, op);
     if (descendants.length) return `Required as the base of ${descendants.map(d => shortId(d.op_id)).join(', ')}.`;
-    const in_use = state.operations.filter(o => ['restore', 'verify'].includes(o.kind) && o.base_op_id === op.op_id && !TERMINAL_STATES.includes(o.state));
+    const in_use = state.operations.filter(o => ['restore', 'verify', 'bundle_restore'].includes(o.kind) && o.base_op_id === op.op_id && !TERMINAL_STATES.includes(o.state));
     if (in_use.length) return `Used by the running operation ${shortId(in_use[0].op_id)}.`;
     if (!TERMINAL_STATES.includes(op.state)) return 'The backup operation has not finished.';
     const deletion = state.operations.find(o => o.kind === 'delete' && o.base_op_id === op.op_id && !['failed', 'cancelled'].includes(o.state));
@@ -7936,7 +7943,8 @@ ADMIN_PAGES.backups = (root, route, page) => {
     const panel = h('div', {className: 'admin-page'});
     put(root, pageHeader(c, 'Backup & Restore', null, [button('Refresh', reloadAdmin)]),
         h('p', {className: 'note'}, 'Backups of databases and tables with the server\'s native BACKUP and RESTORE. A database backup does not include the server '
-            + 'configuration, secrets, Keeper data, the data of tables that store it elsewhere (S3, URL, MySQL engines, ...), or other platform components.'),
+            + 'configuration, secrets, Keeper data, the data of tables that store it elsewhere (S3, URL, MySQL engines, ...), or other platform components: '
+            + 'the backup worker backs up the configuration, secrets, and Keeper data as encrypted server bundles (Server state).'),
         tabList(c, null, BACKUP_TABS, tab), panel);
     if (!admin.can.read_backups) {
         put(panel, backupSetupBox());
@@ -7969,12 +7977,159 @@ function backupSetupBox() {
 const BACKUP_VIEWS = {
     overview: renderBackupOverview,
     backups: renderBackupInventory,
+    server: renderServerState,
     restore: renderRestoreStart,
     schedules: renderSchedules,
     destinations: renderDestinations,
     operations: renderOperations,
     verification: renderVerifications,
 };
+
+/// --- Backup & Restore: server state (server bundles of the backup worker) ---
+
+const BUNDLE_PROVIDERS = {
+    file: ['Key file on the worker host', 'Keep a copy of the key outside this host and outside the backups, with its fingerprint: without it, no bundle can be decrypted.'],
+    vault: ['HashiCorp Vault Transit', 'Vault wraps the data key of each bundle; the master key never leaves Vault. Vault must be reachable to restore.'],
+    passphrase: ['Passphrase', 'Entered on the worker host for each bundle and each restore (backup_worker.mjs bundle, bundle-restore): bundles are not made from the console or on a schedule.'],
+};
+
+/// The latest heartbeat of a worker that makes server bundles, with what it reports about them.
+function bundleWorker(state) {
+    const worker = state.worker.find(w => w.details && w.details.bundle);
+    return worker ? {...worker.details.bundle, worker: worker.op_id.slice('worker:'.length), last_at: worker.last_at, age: Number(worker.age)} : null;
+}
+
+function renderServerState(state) {
+    const can = session.admin.can;
+    const db = session.admin.db;
+    const intro = paragraph('A server bundle holds what BACKUP cannot reach: the configuration files, the secrets in them, TLS keys, scripts, and a snapshot of Keeper. '
+        + 'The backup worker reads them on the server host, encrypts them with a new key for each bundle, wrapped by the master key of the worker, and stores the '
+        + 'ciphertext at a destination through a backup of its own. A restore never writes into the server: it compares a bundle with the host, or stages its files '
+        + 'in a directory for an operator to apply.');
+    if (!state.bundle_kinds) {
+        return [intro, h('div', {className: 'box'}, h('h2', {}, 'Update the operations table'),
+            paragraph(`${db}.backup_operations was created before server bundles, and does not accept their operations yet. The update adds two values to its kind column; `
+                + 'it changes no data.'),
+            h('div', {className: 'actions-row'}, button('Update', () => reviewPlan({action: 'setup_bundles', target_type: 'platform', target_name: db,
+                summary: `Allow server bundles in ${db}.backup_operations`, local_only: true,
+                steps: [{description: 'Add the kinds bundle and bundle_restore', sql: `ALTER TABLE ${quoteIdentifier(db)}.backup_operations MODIFY COLUMN kind `
+                    + "Enum8('backup' = 1, 'restore' = 2, 'verify' = 3, 'delete' = 4, 'test' = 5, 'bundle' = 6, 'bundle_restore' = 7)"}],
+                onclose: reloadAdmin}), {className: 'primary', disabled: !can.setup, title: can.setup ? null : `Needs ALTER on ${db}.backup_operations.`})))];
+    }
+    const worker = bundleWorker(state);
+    const enabled = state.destinations.filter(d => d.enabled);
+    const bundles = state.operations.filter(op => op.kind === 'bundle');
+    const restores = state.operations.filter(op => op.kind === 'bundle_restore');
+    const provider = worker && BUNDLE_PROVIDERS[worker.provider];
+    const worker_box = h('div', {className: 'box'}, h('h2', {}, 'Backup worker'),
+        !worker ? h('div', {className: 'message warning'}, 'No backup worker makes server bundles. Set BUNDLE_KEY_PROVIDER (file, vault, or passphrase) and its key settings '
+            + 'for the worker on the server host; see "Server bundles" in the documentation.')
+            : [kvList([
+                ['Worker', `${worker.worker}, last seen ${worker.last_at} UTC (${formatSeconds(worker.age)} ago)`],
+                ['Master key', provider ? [provider[0], worker.key_id ? h('div', {}, h('code', {}, worker.key_id)) : null, h('div', {className: 'note'}, provider[1])] : worker.provider],
+                ['Included', [worker.paths.join(', '), worker.keeper ? h('div', {}, 'and a new snapshot of Keeper') : h('div', {className: 'note'}, 'No Keeper snapshot (BUNDLE_KEEPER is not set).')]],
+                ['Restores staged in', worker.staging],
+                ['Automatic bundles', worker.schedule ? `every ${worker.schedule.every_hours} h to ${worker.schedule.destination}` : 'none (BUNDLE_EVERY_HOURS and BUNDLE_DESTINATION)'],
+            ]), worker.error ? h('div', {className: 'message error'}, `The worker cannot make bundles: ${worker.error}`) : null,
+            worker.age > 300 ? h('div', {className: 'message warning'}, 'The worker has not been seen for more than 5 minutes: requests wait until it runs.') : null]);
+    const from_console = worker && worker.from_console;
+    const new_bundle = button('Back up the server state…', () => bundleDialog(state), {className: 'primary',
+        disabled: !from_console || !can.write_backup_ops || !enabled.length,
+        title: !worker ? 'No worker makes server bundles.' : !from_console ? (worker.provider === 'passphrase' ? 'With a passphrase, bundles are made on the worker host.' : worker.error)
+            : !can.write_backup_ops ? 'Your user cannot record backup operations.' : !enabled.length ? 'Add and enable a destination first.' : null});
+    const bundle_table = dataTable([
+        {title: 'Bundle', render: op => [h('code', {}, shortId(op.op_id)), h('div', {className: 'note'}, `${op.requested_at} UTC`),
+            h('div', {className: 'note'}, op.parameters.scheduled ? 'automatic' : op.parameters.from_command ? 'from the worker host' : op.requested_by)]},
+        {title: 'Destination', render: op => [destinationLabel(state.destinations_by_id.get(op.destination_id)), h('div', {className: 'note'}, op.artifact)]},
+        {title: 'State', render: op => [stateBadge(op.state, op.error), op.error ? h('div', {className: 'note'}, op.error.slice(0, 300)) : null]},
+        {title: 'Contents', render: op => op.state === 'succeeded' && op.result ? [`${op.result.files} files, ${formatBytes(op.result.bytes)}`,
+            op.result.keeper ? h('div', {className: 'note'}, `Keeper snapshot ${op.result.keeper.index}`) : null,
+            h('div', {className: 'note'}, `encrypted ${formatBytes(op.result.ciphertext_size)}`)] : '—'},
+        {title: 'Key', render: op => op.result && op.result.key_id ? [op.result.provider, h('div', {}, h('code', {}, op.result.key_id))] : '—'},
+        {title: '', render: op => op.state === 'succeeded' && !op.deleted ? h('span', {className: 'actions-row'},
+            button('Compare', () => bundleRestoreDialog(state, op, 'compare'), {className: 'small', disabled: !from_console || !can.write_backup_ops}),
+            button('Stage…', () => bundleRestoreDialog(state, op, 'stage'), {className: 'small', disabled: !from_console || !can.write_backup_ops}),
+            can.write_backup_ops ? button('Delete', () => deleteBackupDialog(state, op), {className: 'small danger'}) : null) : null},
+    ], bundles, 'No server bundles yet.', 'Server bundles');
+    const restore_table = dataTable([
+        {title: 'Restore', render: op => [h('code', {}, shortId(op.op_id)), h('div', {className: 'note'}, `${op.requested_at} UTC`)]},
+        {title: 'Bundle', render: op => h('code', {}, shortId(op.base_op_id))},
+        {title: 'Mode', render: op => (op.parameters.mode === 'stage' ? 'Stage the files' : 'Compare with the host')},
+        {title: 'State', render: op => [stateBadge(op.state, op.error), op.error ? h('div', {className: 'note'}, op.error.slice(0, 300)) : null]},
+        {title: 'Result', render: op => bundleRestoreResult(op)},
+    ], restores, 'No restores of server bundles yet.', 'Restores of server bundles');
+    return [intro, worker_box, h('div', {className: 'admin-head'}, h('h2', {}, 'Server bundles'), h('span', {className: 'spacer'}), new_bundle), bundle_table,
+        h('h2', {}, 'Restores'), restore_table];
+}
+
+function bundleRestoreResult(op) {
+    const r = op.result;
+    if (op.state !== 'succeeded' || !r) return '—';
+    const list = entries => h('details', {}, h('summary', {}, `${entries.length} files`),
+        h('ul', {}, entries.map(e => h('li', {}, h('code', {}, e.path), e.status ? ` — ${e.status}` : '', e.kind === 'keeper-snapshot' ? ' (Keeper snapshot)' : ''))));
+    if (r.mode === 'stage') return [h('div', {}, 'Staged in ', h('code', {}, r.staging_dir)), list(r.entries || []),
+        h('div', {className: 'note'}, 'The files hold secrets in clear: delete the directory after applying them.')];
+    return [h('div', {}, `${r.same} same, ${r.changed} changed, ${r.missing} missing on the host, ${r.extra} not in the bundle`), (r.entries || []).length ? list(r.entries) : null];
+}
+
+/// Records a request for the worker, and audits it.
+async function requestBundleOperation(op, action, summary) {
+    try {
+        await recordOperation(op);
+        await recordBackupEvent(op.op_id, {state: 'queued'});
+        if (session.admin.can.write_audit) {
+            await writeAudit(session, {action, target_type: 'backup', target_name: op.base_op_id || op.op_id, summary},
+                {correlation_id: op.op_id, scope: 'local', result: 'success', steps: []}, '');
+        }
+        closeDialog();
+        reloadAdmin();
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('Not requested', [errorBox(e)], [button('Close', closeDialog)], {onclose: reloadAdmin});
+    }
+}
+
+function bundleDialog(state) {
+    const worker = bundleWorker(state);
+    const enabled = state.destinations.filter(d => d.enabled);
+    const destination = select(enabled.map(d => [d.id, `${d.name} — ${destinationLabel(d)}`]), (enabled[0] || {}).id);
+    openDialog('Back up the server state', [
+        kvList([['Worker', worker.worker], ['Included', `${worker.paths.join(', ')}${worker.keeper ? ', and a new Keeper snapshot' : ''}`],
+            ['Master key', [BUNDLE_PROVIDERS[worker.provider][0], ' ', h('code', {}, worker.key_id)]]]),
+        adminField('Destination', destination),
+        paragraph('The worker makes the bundle when it next runs, and records the outcome here. The destination receives only ciphertext.'),
+    ], [button('Cancel', closeDialog), button('Request the bundle', () => {
+        const op_id = crypto.randomUUID();
+        requestBundleOperation({op_id, kind: 'bundle', destination_id: destination.value,
+            artifact: `server/${utcNowCompact().replace(/[^0-9]/g, '').slice(0, 14)}-${op_id.slice(0, 8)}`, parameters: {}},
+        'request_server_bundle', `Request a server bundle to ${state.destinations_by_id.get(destination.value).name}`);
+    }, {className: 'primary'})]);
+}
+
+function bundleRestoreDialog(state, bundle, mode) {
+    const worker = bundleWorker(state);
+    const confirm = h('input', {type: 'text', autocomplete: 'off', spellcheck: false});
+    const error = h('div', {className: 'message error', hidden: true});
+    const stage = mode === 'stage';
+    openDialog(`${stage ? 'Stage' : 'Compare'} the server bundle ${shortId(bundle.op_id)}`, [
+        kvList([['Bundle', `${bundle.op_id} (${bundle.requested_at} UTC)`], ['Files', bundle.result ? `${bundle.result.files}` : '—'],
+            [stage ? 'Staged in' : 'Compared with', stage ? `a new directory under ${worker.staging}` : `the files of the worker host (${worker.worker})`]]),
+        paragraph(stage
+            ? 'The worker decrypts the bundle and writes its files, readable by their owner only, into a new directory on the worker host. It writes nothing into the '
+                + 'server. The files hold secrets in clear: apply what you need, then delete the directory.'
+            : 'The worker decrypts the bundle and compares each file with the one at the same path on its host, by checksum. Only names and results are recorded, '
+                + 'never contents.'),
+        stage ? adminField(`Type ${shortId(bundle.op_id)} to confirm`, confirm) : null, error,
+    ], [button('Cancel', closeDialog), button(stage ? 'Request staging' : 'Request the comparison', () => {
+        if (stage && confirm.value !== shortId(bundle.op_id)) {
+            error.textContent = 'The ID does not match.';
+            error.hidden = false;
+            return;
+        }
+        requestBundleOperation({op_id: crypto.randomUUID(), kind: 'bundle_restore', base_op_id: bundle.op_id, destination_id: bundle.destination_id, artifact: bundle.artifact,
+            parameters: {mode}}, stage ? 'request_server_bundle_staging' : 'request_server_bundle_comparison',
+        `${stage ? 'Stage' : 'Compare'} the server bundle ${shortId(bundle.op_id)}`);
+    }, {className: stage ? 'primary danger' : 'primary'})]);
+}
 
 function renderBackupOverview(state) {
     const week = Date.now() - 7 * 86400000;

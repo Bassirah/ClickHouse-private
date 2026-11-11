@@ -19,7 +19,9 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `tests/integration/test_web_console` | `web_console` configuration, configuration reload, `console` handler type. |
 | `utils/web-console/console_e2e.mjs` | Browser end-to-end checks (Playwright; not part of the build). |
 | `utils/web-console/access_e2e.mjs` | Browser acceptance checks of the Administration pages (Playwright; not part of the build). |
-| `utils/web-console/backup_worker.mjs` | Backup worker: schedules, reconciliation, retention, deletions (Node.js 18, no packages). |
+| `utils/web-console/backup_worker.mjs` | Backup worker: schedules, reconciliation, retention, deletions, and server bundles (Node.js 18, no packages). |
+| `utils/web-console/server_bundle.mjs` | Server bundles: collects the configuration, secrets, and a Keeper snapshot, and encrypts them (AES-256-GCM, a data key per bundle wrapped by a key file, HashiCorp Vault Transit, or a passphrase). See "Server bundles" in `deploy/README.md`. |
+| `utils/web-console/server_bundle_test.mjs` | Tests of `server_bundle.mjs` without a server: round trips with each key provider, wrong keys, changed and truncated bundles. |
 | `utils/web-console/backup_e2e.mjs` | Browser acceptance checks of Backup & Restore, including a server restart and an unavailable destination (Playwright; not part of the build). |
 | `utils/web-console/cluster_agent.mjs` | Cluster agent: executes cluster lifecycle operations through the docker-compose and kubernetes providers, and observes clusters (Node.js 18, no packages). |
 | `utils/web-console/access_policy_worker.mjs` | Access policy worker: imports user attributes from a feed, and reconciles the native grants, role memberships, and row policies of the policy rules, acting as each rule's author (Node.js 18, no packages). |

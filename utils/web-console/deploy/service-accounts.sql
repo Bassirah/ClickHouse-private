@@ -12,6 +12,9 @@
 -- databases of the schedules. The template lists its exact privileges before it creates the role.
 CREATE USER IF NOT EXISTS backup_worker IDENTIFIED WITH sha256_password BY {backup_pw:String};
 -- GRANT <role made with the Backup Administrator template> TO backup_worker;
+-- Server bundles (only with BUNDLE_KEY_PROVIDER): the worker stores each encrypted bundle in a table of its own, backs it
+-- up, and drops it; a restore brings it back under another name of the same prefix.
+GRANT CREATE TABLE, DROP TABLE, INSERT, SELECT, BACKUP ON console_admin.server_bundle* TO backup_worker;
 
 -- Access policy worker: acts as each rule's author, so it needs no privilege to grant anything itself.
 CREATE USER IF NOT EXISTS access_policy_worker IDENTIFIED WITH sha256_password BY {policy_pw:String};

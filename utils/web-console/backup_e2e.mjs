@@ -14,7 +14,9 @@
 
 import {chromium} from 'playwright';
 import {execFileSync, spawn} from 'node:child_process';
-import {existsSync, mkdirSync, readFileSync} from 'node:fs';
+import crypto from 'node:crypto';
+import {existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 
 function arg(name, fallback) {
@@ -531,6 +533,163 @@ await test('Server objects: functions and the console tables are backed up, list
     const again = await restoreTo(true);
     check(again.state === 'failed', `a restore over an existing function did not fail: ${again.state}`);
     await sql(`DROP FUNCTION IF EXISTS ${fn}`);
+});
+
+/// Every file under `dir`, recursively.
+function filesUnder(dir) {
+    return readdirSync(dir, {withFileTypes: true}).flatMap(e => e.isDirectory() ? filesUnder(path.join(dir, e.name)) : [path.join(dir, e.name)]);
+}
+
+/// A stand-in for the Transit secrets engine of HashiCorp Vault (`/v1/transit/encrypt|decrypt/<key>`).
+async function transitStandIn(token) {
+    const keys = new Map();
+    const server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', c => { body += c; });
+        req.on('end', () => {
+            const m = req.url.match(/^\/v1\/transit\/(encrypt|decrypt)\/([^/]+)$/);
+            if (!m || req.headers['x-vault-token'] !== token) return res.writeHead(403, {'Content-Type': 'application/json'}).end('{"errors":["permission denied"]}');
+            if (!keys.has(m[2])) keys.set(m[2], crypto.randomBytes(32));
+            const key = keys.get(m[2]);
+            const data = JSON.parse(body);
+            if (m[1] === 'encrypt') {
+                const iv = crypto.randomBytes(12);
+                const c = crypto.createCipheriv('aes-256-gcm', key, iv);
+                const ct = Buffer.concat([c.update(Buffer.from(data.plaintext, 'base64')), c.final()]);
+                return res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify({data: {ciphertext: `vault:v1:${Buffer.concat([iv, c.getAuthTag(), ct]).toString('base64')}`}}));
+            }
+            const raw = Buffer.from(data.ciphertext.slice(9), 'base64');
+            const d = crypto.createDecipheriv('aes-256-gcm', key, raw.subarray(0, 12));
+            d.setAuthTag(raw.subarray(12, 28));
+            res.writeHead(200, {'Content-Type': 'application/json'}).end(JSON.stringify({data: {plaintext: Buffer.concat([d.update(raw.subarray(28)), d.final()]).toString('base64')}}));
+        });
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    return {server, addr: `http://127.0.0.1:${server.address().port}`};
+}
+
+await test('Server bundles: the configuration, a secret, and a Keeper snapshot are backed up encrypted, compared, and staged; another key is refused', async () => {
+    check(process.env.BUNDLE_KEY_PROVIDER === 'file' && process.env.BUNDLE_KEY_FILE, 'the worker of this run has no key file (BUNDLE_KEY_PROVIDER=file, BUNDLE_KEY_FILE): run_e2e.sh sets them');
+    const config_dir = process.env.BUNDLE_PATHS.split(',')[0];
+    const secret = `e2e-bundle-secret-${RUN}-${crypto.randomBytes(6).toString('hex')}`;
+    const secret_file = path.join(config_dir, `zz-e2e-bundle-${RUN}.xml`);
+    writeFileSync(secret_file, `<clickhouse><!-- ${secret} --></clickhouse>\n`, {mode: 0o600});
+    const result = async op_id => JSON.parse(await sql(`SELECT argMax(details, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`,
+        ADMIN_USER, ADMIN_PASSWORD, {id: op_id}) || '{}');
+    try {
+        await runWorker();
+        await signIn();
+        await go('/console/admin-backups?tab=server');
+        const fingerprint = execFileSync(process.execPath, ['-e', `import('${new URL('./server_bundle.mjs', `file://${WORKER}`).href}').then(m => console.log(m.keyFingerprint(m.readKeyFile(process.argv[1]))))`,
+            process.env.BUNDLE_KEY_FILE]).toString().trim();
+        check((await page.locator('#admin-view').innerText()).includes(fingerprint), `the worker's key ${fingerprint} is not shown`);
+
+        /// A bundle, made by the worker at the request of the console.
+        await page.locator('#admin-view button', {hasText: 'Back up the server state'}).click();
+        const destination = dialog().locator('select').first();
+        await destination.selectOption(await destination.evaluate((el, name) => [...el.options].find(o => o.textContent.startsWith(name))?.value, disk_destination));
+        const previous = await latestOp('bundle');
+        await dialog().locator('.dialog-actions button.primary').click();
+        const bundle = await until(async () => { const latest = await latestOp('bundle'); return latest !== previous ? latest : null; }, 30000, 'the bundle request');
+        check(await opState(bundle) === 'queued', 'the bundle is not queued');
+        await runWorker();
+        check(await opState(bundle) === 'succeeded', `bundle: ${await opState(bundle)} ${await sql(`SELECT argMax(error, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`, ADMIN_USER, ADMIN_PASSWORD, {id: bundle})}`);
+        const made = await result(bundle);
+        check(made.files > 0 && made.key_id === fingerprint && made.provider === 'file', `bundle result: ${JSON.stringify(made)}`);
+        check(!process.env.BUNDLE_KEEPER || (made.keeper && made.keeper.index > 0), 'no Keeper snapshot in the bundle');
+        const artifact = await sql(`SELECT concat(d.path, dest.prefix, '/', o.artifact) FROM ${DB}.backup_operations AS o, ${DB}.backup_destinations AS dest FINAL, system.disks AS d
+            WHERE o.op_id = {id:String} AND dest.id = o.destination_id AND d.name = dest.disk LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {id: bundle});
+        check(existsSync(path.join(artifact, '.backup')), `no backup of the bundle at ${artifact}`);
+        check(!filesUnder(artifact).some(f => readFileSync(f).includes(secret)), 'the secret is in clear in the stored bundle');
+        check(await sql(`SELECT count() FROM system.tables WHERE database = '${DB}' AND name LIKE 'server_bundle%'`) === '0', 'a bundle table was left on the server');
+
+        /// Compare: one file of the bundle is gone, one new file is not in it.
+        rmSync(secret_file);
+        const extra_file = path.join(config_dir, `zz-e2e-bundle-extra-${RUN}.xml`);
+        writeFileSync(extra_file, '<clickhouse/>\n');
+        const compare_op = await (async () => {
+            await go('/console/admin-backups?tab=server');
+            const previous_restore = await latestOp('bundle_restore');
+            await page.locator('#admin-view tr', {hasText: bundle.slice(0, 8)}).locator('button', {hasText: 'Compare'}).click();
+            await dialog().locator('.dialog-actions button.primary').click();
+            return until(async () => { const latest = await latestOp('bundle_restore'); return latest !== previous_restore ? latest : null; }, 30000, 'the comparison request');
+        })();
+        await runWorker();
+        rmSync(extra_file);
+        check(await opState(compare_op) === 'succeeded', `comparison: ${await opState(compare_op)}`);
+        const compared = await result(compare_op);
+        check(compared.missing === 1 && compared.extra === 1 && compared.changed === 0, `comparison: ${JSON.stringify(compared).slice(0, 400)}`);
+        check(compared.entries.some(e => e.path === secret_file && e.status === 'missing on this host'), 'the removed file is not reported');
+        check(!JSON.stringify(compared).includes(secret), 'a comparison recorded a secret');
+
+        /// Stage: the files come back, readable by their owner only, and nothing is written to the server.
+        await go('/console/admin-backups?tab=server');
+        const previous_stage = await latestOp('bundle_restore');
+        await page.locator('#admin-view tr', {hasText: bundle.slice(0, 8)}).locator('button', {hasText: 'Stage'}).click();
+        await dialog().locator('input[type=text]').fill(bundle.slice(0, 8));
+        await dialog().locator('.dialog-actions button.primary').click();
+        const stage_op = await until(async () => { const latest = await latestOp('bundle_restore'); return latest !== previous_stage ? latest : null; }, 30000, 'the staging request');
+        await runWorker();
+        check(await opState(stage_op) === 'succeeded', `staging: ${await opState(stage_op)}`);
+        const staged = await result(stage_op);
+        const staged_secret = path.join(staged.staging_dir, secret_file);
+        check(existsSync(staged_secret) && readFileSync(staged_secret, 'utf8').includes(secret), 'the secret file is not staged');
+        check((statSync(staged_secret).mode & 0o077) === 0, 'a staged file is readable by others');
+        check(existsSync(path.join(staged.staging_dir, 'RESTORE.txt')), 'no RESTORE.txt');
+        check(!existsSync(secret_file), 'the restore wrote into the server configuration');
+        rmSync(staged.staging_dir, {recursive: true, force: true});
+
+        /// Another key file: refused before anything is decrypted.
+        const other_key = path.join(path.dirname(process.env.BUNDLE_KEY_FILE), `other-${RUN}.key`);
+        execFileSync(process.execPath, [WORKER, 'bundle-key-init', '--key-file', other_key]);
+        const wrong = crypto.randomUUID();
+        await sql(`INSERT INTO ${DB}.backup_operations (op_id, kind, server, base_op_id, parameters) VALUES ({id:String}, 'bundle_restore', 'e2e', {b:String}, '{"mode":"compare"}')`,
+            ADMIN_USER, ADMIN_PASSWORD, {id: wrong, b: bundle});
+        await sql(`INSERT INTO ${DB}.backup_events (op_id, kind, state) VALUES ({id:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {id: wrong});
+        await runWorker({BUNDLE_KEY_FILE: other_key});
+        check(await opState(wrong) === 'failed', `with another key: ${await opState(wrong)}`);
+        check((await sql(`SELECT argMax(error, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`, ADMIN_USER, ADMIN_PASSWORD, {id: wrong})).includes('encrypted with the master key'),
+            'the refusal does not name the key');
+
+        /// A worker whose key is a passphrase does not act on requests from the console.
+        const by_console = crypto.randomUUID();
+        await sql(`INSERT INTO ${DB}.backup_operations (op_id, kind, server, base_op_id, parameters) VALUES ({id:String}, 'bundle_restore', 'e2e', {b:String}, '{"mode":"compare"}')`,
+            ADMIN_USER, ADMIN_PASSWORD, {id: by_console, b: bundle});
+        await sql(`INSERT INTO ${DB}.backup_events (op_id, kind, state) VALUES ({id:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {id: by_console});
+        await runWorker({BUNDLE_KEY_PROVIDER: 'passphrase'});
+        check((await sql(`SELECT argMax(error, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`, ADMIN_USER, ADMIN_PASSWORD, {id: by_console})).includes('passphrase'),
+            'a passphrase worker acted on a console request');
+
+        /// Vault Transit: the Vault of the run (E2E_VAULT_ADDR, E2E_VAULT_TOKEN, a Transit key clickhouse-bundles), or a stand-in of its API.
+        const vault = process.env.E2E_VAULT_ADDR ? {addr: process.env.E2E_VAULT_ADDR, token: process.env.E2E_VAULT_TOKEN, server: {close() {}}}
+            : {...await transitStandIn('e2e-vault-token'), token: 'e2e-vault-token'};
+        try {
+            const vault_env = {BUNDLE_KEY_PROVIDER: 'vault', VAULT_ADDR: vault.addr, VAULT_TOKEN: vault.token, VAULT_TRANSIT_KEY: 'clickhouse-bundles', BUNDLE_KEEPER: ''};
+            await runWorker(vault_env);
+            await go('/console/admin-backups?tab=server');
+            check((await page.locator('#admin-view').innerText()).includes('vault:transit/clickhouse-bundles'), 'the Vault key is not shown');
+            await page.locator('#admin-view button', {hasText: 'Back up the server state'}).click();
+            const vault_previous = await latestOp('bundle');
+            await dialog().locator('.dialog-actions button.primary').click();
+            const vault_bundle = await until(async () => { const latest = await latestOp('bundle'); return latest !== vault_previous ? latest : null; }, 30000, 'the bundle request');
+            await runWorker(vault_env);
+            check(await opState(vault_bundle) === 'succeeded', `Vault bundle: ${await opState(vault_bundle)}`);
+            check((await result(vault_bundle)).key_id === 'vault:transit/clickhouse-bundles', 'the bundle does not name the Vault key');
+            const vault_compare = crypto.randomUUID();
+            await sql(`INSERT INTO ${DB}.backup_operations (op_id, kind, server, base_op_id, parameters) VALUES ({id:String}, 'bundle_restore', 'e2e', {b:String}, '{"mode":"compare"}')`,
+                ADMIN_USER, ADMIN_PASSWORD, {id: vault_compare, b: vault_bundle});
+            await sql(`INSERT INTO ${DB}.backup_events (op_id, kind, state) VALUES ({id:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {id: vault_compare});
+            await runWorker(vault_env);
+            const vault_result = await result(vault_compare);
+            check(await opState(vault_compare) === 'succeeded' && vault_result.changed === 0 && vault_result.missing === 0, `Vault comparison: ${JSON.stringify(vault_result).slice(0, 300)}`);
+        } finally {
+            vault.server.close();
+        }
+        await runWorker();
+        if (SCREENSHOTS) await page.screenshot({path: `${SCREENSHOTS}/b10-server-state.png`, fullPage: true});
+    } finally {
+        rmSync(secret_file, {force: true});
+    }
 });
 
 await test('Existing target objects conflict: the restore is blocked', async () => {
