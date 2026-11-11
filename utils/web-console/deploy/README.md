@@ -150,6 +150,56 @@ snapshots and logs moved aside. Then delete the staging directory: it holds secr
 **Testing the key.** Compare the latest bundle with the host regularly, for example after every change of the
 configuration: it proves that the master key, the bundle, and the destination all still work.
 
+## 6. Protect the backups
+
+**Administration → Backup & Restore → Overview** checks the backups of the last 7 days against the 3-2-1-1 rule, and
+**Destinations** shows what protects each destination:
+
+| Rule | How |
+|---|---|
+| Two copies | Give each schedule a **Second copy to** destination: after each full backup, the worker makes a new, independent full backup of the same databases there. Retention keeps the same number at each destination. |
+| One off-site | Make the second destination an S3 bucket in another place: another region, account, or provider. A disk of the server, and an endpoint on this host, are the same site. |
+| One immutable | Enable Object Lock with a default retention on that bucket. Nothing, not even the worker, can then delete a backup before its retention ends: a deletion only adds delete markers, and the console says so. Keep the console retention at least as long as the lock. |
+| Encrypted at rest | Enable default encryption on the bucket (SSE-KMS, or SSE-S3); the server then needs no encryption setting. For a disk destination, use an `encrypted` disk. Server bundles are always encrypted by the worker. |
+| Least privilege | Give the server a key that can write and read backups but not delete them, and the worker a separate key that can delete. **Destinations → Recommended S3 permissions** has both policies. |
+
+The worker reads the encryption, Object Lock, and versioning of each S3 bucket after every destination test and every
+6 hours, with its own key, which needs `s3:GetEncryptionConfiguration`, `s3:GetBucketObjectLockConfiguration`, and
+`s3:GetBucketVersioning`. A setting it cannot read is shown as unknown, never as met.
+
+## 7. Recover a whole server
+
+Prepare before you need it, and keep this list with the key of the server bundles:
+
+- the version of the images (`CONSOLE_VERSION`) and of the server;
+- the master key of the server bundles (or access to Vault, or the passphrase), stored out of band;
+- the credentials of at least one destination, readable without the lost server.
+
+To recover:
+
+1. Start a new server from the same images (step 3 or 4), with an empty data volume.
+2. Restore the configuration: on the new host, run the worker with the same key settings, and stage the latest server
+   bundle (`backup-worker bundle-restore --bundle <ID> --mode stage`; the bundle IDs are on the Server state tab of any
+   console that still sees the destination, or in the destination under `server/`). Copy the staged configuration into
+   place, restore owners and modes, and restart the server.
+3. Restore Keeper: stop Keeper, move its snapshots and logs aside, put the staged snapshot into its snapshot directory,
+   and start it.
+4. In the console, set up Backup & Restore if needed, add the destinations again with the same names, and restore the
+   latest backup of each database into its own name (rename the suggested target), with the access entities and the
+   functions, workloads, and resources.
+5. Check: compare the server bundle with the host (**Compare**), and run a restore test of the latest backups.
+
+**Rehearse it.** `utils/web-console/recovery_rehearsal.mjs` proves the procedure without touching production: it
+starts an isolated server (127.0.0.1, its own ports, data, and Keeper), optionally from a staged configuration with its
+storage, Keeper, clusters, and paths replaced, restores the latest backup of each database from its real destination,
+compares the row counts and fingerprints recorded when the backups were made, and records the result with each backup
+(**Recovery rehearsed** in the inventory) and in the audit log. Run it on the server host, for example monthly:
+
+```bash
+node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user <admin> --password <password> \
+    --binary /usr/bin/clickhouse [--staged <staging directory of a server bundle>]
+```
+
 ## Upgrade and rollback
 
 Load the new archives, change `CONSOLE_VERSION` in `.env` (or the image tags), and run `docker compose up -d` (or

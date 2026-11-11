@@ -574,8 +574,8 @@ await test('Server bundles: the configuration, a secret, and a Keeper snapshot a
     const secret = `e2e-bundle-secret-${RUN}-${crypto.randomBytes(6).toString('hex')}`;
     const secret_file = path.join(config_dir, `zz-e2e-bundle-${RUN}.xml`);
     writeFileSync(secret_file, `<clickhouse><!-- ${secret} --></clickhouse>\n`, {mode: 0o600});
-    const result = async op_id => JSON.parse(await sql(`SELECT argMax(details, at) FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state'`,
-        ADMIN_USER, ADMIN_PASSWORD, {id: op_id}) || '{}');
+    const result = async op_id => JSON.parse(JSON.parse(await sql(`SELECT argMax(details, at) AS details FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state' FORMAT JSONEachRow`,
+        ADMIN_USER, ADMIN_PASSWORD, {id: op_id})).details || '{}');
     try {
         await runWorker();
         await signIn();
@@ -764,6 +764,150 @@ await test('Two scheduler workers see the same run: only one operation is submit
     check(submitted.length === 1, `submitted ${submitted.length} times:\n${a.output}\n${b.output}`);
     await sql(`INSERT INTO ${DB}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref, deleted)
         VALUES ({id:String}, 'e2e hourly', false, '', [], [], false, 'full', 1, 'hourly', 0, 0, 0, 'UTC', 2, 'fail', false, '', true)`, ADMIN_USER, ADMIN_PASSWORD, {id});
+});
+
+await test('Recovery rehearsal: a backup restores and matches on an isolated server, also with the staged configuration; a configuration that does not start fails', async () => {
+    check(process.env.REHEARSAL_BINARY && process.env.BUNDLE_PATHS, 'the run gives no clickhouse binary (REHEARSAL_BINARY) or server configuration (BUNDLE_PATHS): run_e2e.sh sets them');
+    const script = new URL('./recovery_rehearsal.mjs', `file://${WORKER}`).pathname;
+    const work = path.join(path.dirname(process.env.BUNDLE_STAGING_DIR), `rehearsal-${RUN}`);
+    /// Asynchronous: a blocked event loop would keep the HTTP client from seeing the server close its idle connections.
+    const rehearse = (...extra) => new Promise(resolve => {
+        const child = spawn(process.execPath, [script, '--url', BASE, '--user', ADMIN_USER, '--password', ADMIN_PASSWORD, '--binary', process.env.REHEARSAL_BINARY,
+            '--backup', full_backup, '--work-dir', work, ...extra], {env: process.env});
+        let output = '';
+        child.stdout.on('data', d => { output += d; });
+        child.stderr.on('data', d => { output += d; });
+        const timer = setTimeout(() => child.kill('SIGKILL'), 600000);
+        child.on('close', exit => {
+            clearTimeout(timer);
+            resolve({ok: exit === 0, output});
+        });
+    });
+    const last = async () => {
+        const row = JSON.parse(await sql(`SELECT toString(argMax(state, at)) AS state, argMax(details, at) AS details FROM ${DB}.backup_events
+            WHERE op_id = {id:String} AND name = 'rehearsal' FORMAT JSONEachRow`, ADMIN_USER, ADMIN_PASSWORD, {id: full_backup}));
+        return {state: row.state, details: JSON.parse(row.details || '{}')};
+    };
+
+    const plain = await rehearse();
+    check(plain.ok, `rehearsal: ${plain.output.slice(-800)}`);
+    const recorded = await last();
+    check(recorded.state === 'passed' && recorded.details.compared > 0 && recorded.details.tables.every(t => t.ok), `recorded: ${JSON.stringify(recorded).slice(0, 400)}`);
+    check(!existsSync(work), 'the rehearsal server was not removed');
+
+    /// The configuration of the test server, staged as a bundle stages it: its Keeper, clusters, disks, and ports are
+    /// replaced, so the rehearsal starts beside the running server without touching it.
+    const server_dir = path.dirname(process.env.BUNDLE_PATHS.split(',')[0]);
+    const staged = path.join(path.dirname(process.env.BUNDLE_STAGING_DIR), `staged-${RUN}`);
+    const staged_config = path.join(staged, 'etc', 'clickhouse-server');
+    mkdirSync(staged_config, {recursive: true});
+    for (const name of ['config.xml', 'users.xml', 'config.d', 'users.d']) execFileSync('cp', ['-r', path.join(server_dir, name), staged_config]);
+    const with_config = await rehearse('--staged', staged);
+    check(with_config.ok, `with the staged configuration: ${with_config.output.slice(-800)}`);
+    check((await last()).details.staged === staged, 'the rehearsal does not record the staged configuration');
+    check(await sql('SELECT 1') === '1', 'the running server was disturbed');
+
+    writeFileSync(path.join(staged_config, 'config.d', 'zz-broken.xml'), '<clickhouse><unclosed>\n');
+    const broken = await rehearse('--staged', staged);
+    check(!broken.ok && /did not start/.test(broken.output), `a broken configuration was not reported: ${broken.output.slice(-500)}`);
+    check((await last()).state === 'failed', 'the failed rehearsal is not recorded');
+    rmSync(staged, {recursive: true, force: true});
+
+    await go('/console/admin-backups?tab=backups');
+    check((await opRow(full_backup).first().innerText()).includes('Rehearsal failed'), 'the inventory does not show the last rehearsal');
+});
+
+/// An S3 request to the MinIO of the run, signed by curl (AWS Signature Version 4).
+function minio(method, url_path, {headers = {}, body = null} = {}) {
+    const args = ['-sS', '-X', method, '--user', `${S3_KEY}:${S3_SECRET}`, '--aws-sigv4', 'aws:amz:us-east-1:s3', '-w', '\n%{http_code}'];
+    for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
+    if (body !== null) {
+        args.push('-H', `Content-MD5: ${crypto.createHash('md5').update(body).digest('base64')}`, '--data-binary', body);
+    }
+    const out = execFileSync('curl', [...args, `${new URL(S3_URL).origin}${url_path}`]).toString();
+    const status = Number(out.slice(out.lastIndexOf('\n') + 1));
+    return {status, text: out.slice(0, out.lastIndexOf('\n'))};
+}
+
+await test('Protection and second copies: bucket encryption and Object Lock are reported, a schedule copies to the locked bucket, and its deletion keeps the data', async () => {
+    /// A bucket with Object Lock (GOVERNANCE, 1 day) and default encryption.
+    const bucket = `e2e-locked-${RUN}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 50);
+    check(minio('PUT', `/${bucket}`, {headers: {'x-amz-bucket-object-lock-enabled': 'true'}}).status === 200, 'the locked bucket was not created');
+    const lock = minio('PUT', `/${bucket}?object-lock=`, {body: '<ObjectLockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><ObjectLockEnabled>Enabled</ObjectLockEnabled>'
+        + '<Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days></DefaultRetention></Rule></ObjectLockConfiguration>'});
+    check(lock.status === 200, `Object Lock: ${lock.status} ${lock.text.slice(0, 200)}`);
+    const encryption = minio('PUT', `/${bucket}?encryption=`, {body: '<ServerSideEncryptionConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule>'
+        + '<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>'});
+    check(encryption.status === 200, `default encryption: ${encryption.status} ${encryption.text.slice(0, 200)}`);
+
+    /// Its destination, made like the console makes one.
+    const locked_name = `e2e locked ${RUN}`;
+    const locked_id = crypto.randomUUID();
+    const collection = `console_backup_e2elock${RUN.replace(/[^A-Za-z0-9]/g, '').slice(0, 10)}`;
+    const quote = v => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+    const created = await sql(`CREATE NAMED COLLECTION ${collection} AS url = ${quote(`${new URL(S3_URL).origin}/${bucket}/e2e/`)}, access_key_id = ${quote(S3_KEY)}, secret_access_key = ${quote(S3_SECRET)}`);
+    check(!code(created), `named collection: ${created}`);
+    await sql(`INSERT INTO ${DB}.backup_destinations (id, name, description, type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled, allowed_databases, test_result, deleted)
+        VALUES ({id:String}, {n:String}, 'Object Lock and default encryption', 's3', '', {c:String}, {e:String}, {b:String}, 'e2e', 'E2E_S3', true, true, [], '{}', false)`,
+    ADMIN_USER, ADMIN_PASSWORD, {id: locked_id, n: locked_name, c: collection, e: new URL(S3_URL).origin, b: bucket});
+
+    /// The worker reads what the buckets enforce.
+    await runWorker();
+    await signIn();
+    await go('/console/admin-backups?tab=destinations');
+    const row = name => page.locator('#admin-view table[aria-label="Destinations"] tr', {hasText: name}).first().innerText();
+    const locked_row = await row(locked_name);
+    check(locked_row.includes('Encrypted (AES256)') && locked_row.includes('Object Lock GOVERNANCE 1 d') && locked_row.includes('Same site'), `locked bucket: ${locked_row}`);
+    const plain_row = await row(s3_destination);
+    check(plain_row.includes('Not encrypted') && plain_row.includes('No Object Lock'), `plain bucket: ${plain_row}`);
+    const disk_row = await row(disk_destination);
+    check(disk_row.includes('Not encrypted') && disk_row.includes('Same site'), `disk: ${disk_row}`);
+    check((await page.locator('#admin-view').innerText()).includes('Recommended S3 permissions'), 'no permission guidance');
+
+    /// A schedule with a second copy at the locked bucket.
+    const id = `e2e-copy-${Date.now()}`;
+    const disk_id = await sql(`SELECT id FROM ${DB}.backup_destinations FINAL WHERE name = {n:String}`, ADMIN_USER, ADMIN_PASSWORD, {n: disk_destination});
+    await sql(`INSERT INTO ${DB}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref, copy_destination_id)
+        VALUES ({id:String}, 'e2e copied', true, {d:String}, ['e2e_bk_src'], [], false, 'full', 1, 'hourly', {m:UInt8}, 0, 0, 'UTC', 5, 'fail', false, '', {c:String})`,
+    ADMIN_USER, ADMIN_PASSWORD, {id, d: disk_id, m: String((new Date().getUTCMinutes() + 59) % 60), c: locked_id});
+    /// JSONEachRow: the default text format escapes quotes and backslashes, so JSON inside it cannot be parsed as is.
+    const ops = async () => (await sql(`SELECT op_id, destination_id, artifact, parameters FROM ${DB}.backup_operations WHERE schedule_id = {id:String} AND kind = 'backup'
+        ORDER BY requested_at LIMIT 1 BY op_id FORMAT JSONEachRow`, ADMIN_USER, ADMIN_PASSWORD, {id})).split('\n').filter(Boolean).map(line => {
+        const r = JSON.parse(line);
+        return [r.op_id, r.destination_id, r.artifact, r.parameters];
+    });
+    let copy = null;
+    await until(async () => {
+        await runWorker();
+        copy = (await ops()).find(o => o[1] === locked_id);
+        return copy && await opState(copy[0]) === 'succeeded';
+    }, 300000, 'the backup and its second copy');
+    const original = (await ops()).find(o => o[1] === disk_id);
+    check(original && await opState(original[0]) === 'succeeded', 'the backup at the first destination did not succeed');
+    check(JSON.parse(copy[3]).copy_of === original[0] && copy[2].includes('/copies/'), `copy record: ${JSON.stringify(copy)}`);
+    await go('/console/admin-backups?tab=schedules');
+    check((await page.locator('#admin-view').innerText()).includes(`second copy to ${locked_name}`), 'the schedule does not show its second copy');
+    await go('/console/admin-backups?tab=overview');
+    const overview = await page.locator('#admin-view').innerText();
+    check(overview.includes('Resilience (3-2-1-1)') && overview.includes('One immutable'), 'no resilience summary');
+
+    /// Deleting the copy hides it, but Object Lock keeps its data.
+    const deletion = crypto.randomUUID();
+    await sql(`INSERT INTO ${DB}.backup_operations (op_id, kind, server, destination_id, artifact, base_op_id) VALUES ({id:String}, 'delete', 'e2e', {d:String}, {a:String}, {b:String})`,
+        ADMIN_USER, ADMIN_PASSWORD, {id: deletion, d: locked_id, a: copy[2], b: copy[0]});
+    await sql(`INSERT INTO ${DB}.backup_events (op_id, kind, state) VALUES ({id:String}, 'state', 'queued')`, ADMIN_USER, ADMIN_PASSWORD, {id: deletion});
+    await runWorker();
+    const deleted = JSON.parse(JSON.parse(await sql(`SELECT argMax(details, at) AS details FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'state' FORMAT JSONEachRow`,
+        ADMIN_USER, ADMIN_PASSWORD, {id: deletion})).details || '{}');
+    check(await opState(deletion) === 'succeeded' && (deleted.note || '').includes('delete markers'), `deletion: ${await opState(deletion)} ${JSON.stringify(deleted)}`);
+    const versions = minio('GET', `/${bucket}?versions=&prefix=${encodeURIComponent(`e2e/${copy[2]}/`)}`);
+    check(/<Version>/.test(versions.text) && /<DeleteMarker>/.test(versions.text), 'the data of the copy is not kept under its delete markers');
+
+    await sql(`INSERT INTO ${DB}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref, copy_destination_id, deleted)
+        VALUES ({id:String}, 'e2e copied', false, '', [], [], false, 'full', 1, 'hourly', 0, 0, 0, 'UTC', 2, 'fail', false, '', '', true)`, ADMIN_USER, ADMIN_PASSWORD, {id});
+    await sql(`INSERT INTO ${DB}.backup_destinations (id, name, description, type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled, allowed_databases, test_result, deleted)
+        VALUES ({id:String}, {n:String}, '', 's3', '', {c:String}, '', '', '', '', true, false, [], '{}', true)`, ADMIN_USER, ADMIN_PASSWORD, {id: locked_id, n: locked_name, c: collection});
+    if (SCREENSHOTS) await page.screenshot({path: `${SCREENSHOTS}/b11-resilience.png`, fullPage: true});
 });
 
 await test('Restore verification fails: the failure stays visible and audited', async () => {

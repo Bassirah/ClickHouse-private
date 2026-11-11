@@ -21,6 +21,7 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/access_e2e.mjs` | Browser acceptance checks of the Administration pages (Playwright; not part of the build). |
 | `utils/web-console/backup_worker.mjs` | Backup worker: schedules, reconciliation, retention, deletions, and server bundles (Node.js 18, no packages). |
 | `utils/web-console/server_bundle.mjs` | Server bundles: collects the configuration, secrets, and a Keeper snapshot, and encrypts them (AES-256-GCM, a data key per bundle wrapped by a key file, HashiCorp Vault Transit, or a passphrase). See "Server bundles" in `deploy/README.md`. |
+| `utils/web-console/recovery_rehearsal.mjs` | Recovery rehearsal: restores the latest backups, optionally with a staged configuration, on an isolated server, compares them with the values recorded at backup time, and records the result with each backup. See "Recover a whole server" in `deploy/README.md`. |
 | `utils/web-console/server_bundle_test.mjs` | Tests of `server_bundle.mjs` without a server: round trips with each key provider, wrong keys, changed and truncated bundles. |
 | `utils/web-console/backup_e2e.mjs` | Browser acceptance checks of Backup & Restore, including a server restart and an unavailable destination (Playwright; not part of the build). |
 | `utils/web-console/cluster_agent.mjs` | Cluster agent: executes cluster lifecycle operations through the docker-compose and kubernetes providers, and observes clusters (Node.js 18, no packages). |

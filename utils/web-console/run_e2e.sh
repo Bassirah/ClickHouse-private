@@ -248,7 +248,8 @@ start_server
 if has_suite backup; then
     docker rm -f "$MINIO_CONTAINER" > /dev/null 2>&1 || true
     docker run -d --name "$MINIO_CONTAINER" -p "127.0.0.1:$MINIO_PORT:9000" \
-        -e MINIO_ROOT_USER="$MINIO_USER" -e MINIO_ROOT_PASSWORD="$MINIO_SECRET" "$MINIO_IMAGE" server /data > /dev/null
+        -e MINIO_ROOT_USER="$MINIO_USER" -e MINIO_ROOT_PASSWORD="$MINIO_SECRET" \
+        -e MINIO_KMS_SECRET_KEY="e2e-key:$(head -c 32 /dev/urandom | base64)" "$MINIO_IMAGE" server /data > /dev/null
     for _ in $(seq 60); do
         curl -sf "http://127.0.0.1:$MINIO_PORT/minio/health/live" > /dev/null 2>&1 && break
         sleep 1
@@ -316,7 +317,8 @@ if has_suite backup; then
     else echo "  $(tail -n 1 "$LOGS/bundle_module.log") (log $LOGS/bundle_module.log)"; FAILED="$FAILED bundle_module"; fi
     node "$HERE/backup_worker.mjs" bundle-key-init --key-file "$RUN/keys/bundle.key" > /dev/null
     export BUNDLE_KEY_PROVIDER=file BUNDLE_KEY_FILE="$RUN/keys/bundle.key" BUNDLE_PATHS="$SERVER/config.d,$SERVER/users.d" \
-        BUNDLE_KEEPER="127.0.0.1:$KEEPER_PORT" BUNDLE_KEEPER_SNAPSHOTS="$SERVER/data/coordination/snapshots" BUNDLE_STAGING_DIR="$RUN/staging" BUNDLE_COMPARE_ROOT=/
+        BUNDLE_KEEPER="127.0.0.1:$KEEPER_PORT" BUNDLE_KEEPER_SNAPSHOTS="$SERVER/data/coordination/snapshots" BUNDLE_STAGING_DIR="$RUN/staging" BUNDLE_COMPARE_ROOT=/ \
+        REHEARSAL_BINARY="$BINARY"
 fi
 run_suite backup backup_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --native-port "$TCP_PORT" \
     --s3 "http://127.0.0.1:$MINIO_PORT/$BUCKET:$MINIO_USER:$MINIO_SECRET" --minio-container "$MINIO_CONTAINER" \

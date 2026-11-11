@@ -7443,6 +7443,7 @@ ENGINE = ReplacingMergeTree(updated_at) ORDER BY id`,
     on_missing_base Enum8('fail' = 1, 'full' = 2),
     verify Bool,
     notify_ref String,
+    copy_destination_id String DEFAULT '',
     deleted Bool DEFAULT false,
     updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
     updated_by String MATERIALIZED currentUser(),
@@ -7650,12 +7651,20 @@ function scopeDatabases(scope) {
 
 async function loadBackupState() {
     const db = quoteIdentifier(session.admin.db);
+    /// Installations set up before second copies have no copy_destination_id: the Schedules tab offers the update.
+    const schedule_copies = (await adminRows(`SELECT count() AS n FROM system.columns WHERE database = {db:String} AND table = 'backup_schedules' AND name = 'copy_destination_id'`,
+        {db: session.admin.db}))[0].n > 0;
+    const disks = new Map((await adminRows('SELECT name, type, is_encrypted, object_storage_type FROM system.disks').catch(e => {
+        if (e instanceof AdminSessionChanged) throw e;
+        return [];
+    })).map(d => [d.name, d]));
     const [destinations, schedules, operations] = await Promise.all([
         adminRows(`SELECT id, name, description, toString(type) AS type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled,
                 allowed_databases, test_result, if(tested_at IS NULL, '', formatDateTime(tested_at, '%Y-%m-%d %H:%i:%S')) AS tested_at, updated_by
             FROM ${db}.backup_destinations FINAL WHERE NOT deleted ORDER BY name`),
         adminRows(`SELECT id, name, enabled, destination_id, databases, tables, structure_only, toString(strategy) AS strategy, full_every,
-                toString(frequency) AS frequency, minute, hour, weekday, timezone, keep_chains, toString(on_missing_base) AS on_missing_base, verify, notify_ref, updated_by
+                toString(frequency) AS frequency, minute, hour, weekday, timezone, keep_chains, toString(on_missing_base) AS on_missing_base, verify, notify_ref, updated_by,
+                ${schedule_copies ? 'copy_destination_id' : "'' AS copy_destination_id"}
             FROM ${db}.backup_schedules FINAL WHERE NOT deleted ORDER BY name`),
         adminRows(`SELECT op_id, toString(kind) AS kind, formatDateTime(o.requested_at, '%Y-%m-%d %H:%i:%S') AS requested_at,
                 toUnixTimestamp64Milli(o.requested_at) AS requested_ms, requested_by, server, destination_id, artifact, scope, strategy, base_op_id, schedule_id,
@@ -7703,7 +7712,7 @@ async function loadBackupState() {
             op.checks.push({...event, details: parseJSON(event.details, {})});
         }
     }
-    return {destinations, schedules, operations: [...by_op.values()], destinations_by_id: new Map(destinations.map(d => [d.id, d])), worker, console_endpoints, bundle_kinds};
+    return {destinations, schedules, operations: [...by_op.values()], destinations_by_id: new Map(destinations.map(d => [d.id, d])), worker, console_endpoints, bundle_kinds, schedule_copies, disks};
 }
 
 /// The incremental chain of a backup, from the backup itself to its full base: `{chain, missing}`.
@@ -8152,6 +8161,7 @@ function renderBackupOverview(state) {
                 : paragraph('No backup worker has reported in the last 7 days: schedules, retention, and deletions do not run. See "Backup worker" in the documentation.'),
             worker && Number(worker.age) > 300 ? h('div', {className: 'message warning'}, 'The worker has not reported for more than 5 minutes.') : null),
     ];
+    parts.push(resilienceSummary(state));
     if (failures.length) {
         parts.push(h('div', {className: 'box'}, h('h2', {}, 'Recent failures'), operationsTable(state, failures.slice(0, 10))));
     }
@@ -8217,12 +8227,16 @@ function chainNote(state, op) {
 function backupStatusList(state, op) {
     const artifact = [...op.checks].reverse().find(check => check.name === 'artifact');
     const verification = lastVerification(state, op);
+    /// A whole-server recovery rehearsal (recovery_rehearsal.mjs) records its result as a check of each backup.
+    const rehearsal = [...op.checks].reverse().find(check => check.name === 'rehearsal');
     return h('div', {className: 'chips'},
         stateBadge(op.state, op.error || (op.reconciled_from ? `Reconciled from ${op.reconciled_from}.` : null)),
         artifact ? badge(artifact.state === 'passed' ? 'Artifact opened' : 'Artifact unreadable', artifact.state === 'passed' ? 'ok' : 'bad', `Checked ${artifact.at} UTC`)
             : badge('Artifact not checked'),
         verification ? badge(verification.state === 'passed' ? 'Restore test passed' : 'Restore test failed', verification.state === 'passed' ? 'ok' : 'bad',
-            `${verification.op.requested_at} UTC`) : badge('Never test-restored'));
+            `${verification.op.requested_at} UTC`) : badge('Never test-restored'),
+        rehearsal ? badge(rehearsal.state === 'passed' ? 'Recovery rehearsed' : 'Rehearsal failed', rehearsal.state === 'passed' ? 'ok' : 'bad',
+            `${rehearsal.at} UTC on an isolated server${rehearsal.details.staged ? ', with the staged configuration' : ''}${rehearsal.error ? `: ${rehearsal.error}` : ''}`) : null);
 }
 
 function operationsTable(state, ops) {
@@ -8418,6 +8432,71 @@ function endpointRowStep(endpoint, note, description, removal = false) {
         + JSON.stringify({endpoint, note, deleted: removal})};
 }
 
+/// What protects the backups at a destination: encryption at rest, immutability, versioning, and whether the
+/// destination is in another place than the server. For S3, as the bucket reported it to the backup worker
+/// (destination tests, and every 6 hours); for a disk, as the server reports the disk. Unknown is never shown as met.
+function destinationProtection(state, d) {
+    if (d.type === 'disk') {
+        const disk = state.disks.get(d.disk);
+        if (!disk) return {encryption: {state: 'unknown', error: `the disk ${d.disk} is not on this server`}, object_lock: {state: 'off'}, versioning: {state: 'off'}, offsite: {state: 'unknown'}};
+        const remote = disk.object_storage_type && disk.object_storage_type !== 'None';
+        return {encryption: Number(disk.is_encrypted) ? {state: 'on', algorithm: 'encrypted disk'} : {state: 'off'}, object_lock: {state: 'off'}, versioning: {state: 'off'},
+            offsite: remote ? {state: 'unknown', note: `object storage (${disk.object_storage_type})`} : {state: 'off', note: 'a disk of this server'}};
+    }
+    const reported = (parseJSON(d.test_result, {}) || {}).protection;
+    const host = (() => {
+        try {
+            return new URL(d.endpoint).hostname;
+        } catch (e) {
+            return '';
+        }
+    })();
+    const loopback = /^(localhost|127\.|\[?::1\]?$)/.test(host);
+    const offsite = loopback ? {state: 'off', note: 'on this host'} : isInternalHost(host) ? {state: 'unknown', note: 'on a private network'} : {state: 'on', note: host};
+    if (!reported) return {encryption: {state: 'unknown', error: 'not checked yet: test the destination'}, object_lock: {state: 'unknown'}, versioning: {state: 'unknown'}, offsite};
+    return {...reported, offsite};
+}
+
+function protectionBadges(p) {
+    const level = x => (x.state === 'on' ? 'ok' : x.state === 'unknown' ? 'warn' : '');
+    return h('div', {className: 'chips'},
+        badge(p.encryption.state === 'on' ? `Encrypted${p.encryption.algorithm ? ` (${p.encryption.algorithm})` : ''}` : p.encryption.state === 'off' ? 'Not encrypted' : 'Encryption unknown',
+            level(p.encryption), p.encryption.error || (p.encryption.kms_key ? `KMS key ${p.encryption.kms_key}` : null)),
+        badge(p.object_lock.state === 'on' ? `Object Lock ${p.object_lock.mode} ${p.object_lock.days} d` : p.object_lock.state === 'off' ? 'No Object Lock'
+            : p.object_lock.state === 'unknown' ? 'Object Lock unknown' : 'Object Lock without default retention', level(p.object_lock), p.object_lock.error || null),
+        badge(p.offsite.state === 'on' ? 'Off-site' : p.offsite.state === 'off' ? 'Same site' : 'Site unknown', level(p.offsite), p.offsite.note || null),
+        p.checked_at ? h('span', {className: 'note'}, `checked ${p.checked_at} UTC`) : null);
+}
+
+/// The 3-2-1-1 rule over the backups of the last 7 days: two copies of each database, one off-site, one immutable,
+/// all encrypted, and restores tested. Each line says what is met and what is not.
+function resilienceSummary(state) {
+    const week = Date.now() - 7 * 86400000;
+    const recent = state.operations.filter(op => op.kind === 'backup' && op.state === 'succeeded' && !op.deleted && op.requested_ms >= week);
+    const used = [...new Set(recent.map(op => op.destination_id))].map(id => state.destinations_by_id.get(id)).filter(Boolean);
+    const protection = new Map(used.map(d => [d.id, destinationProtection(state, d)]));
+    const by_db = new Map();
+    for (const op of recent) for (const db of scopeDatabases(op.scope)) by_db.set(db, new Set([...(by_db.get(db) || []), op.destination_id]));
+    const single = [...by_db].filter(([, dests]) => dests.size < 2).map(([db]) => db);
+    const tested = state.operations.some(op => op.kind === 'verify' && op.state === 'succeeded' && op.requested_ms >= Date.now() - 30 * 86400000);
+    const any = key => used.some(d => protection.get(d.id)[key].state === 'on');
+    const all = key => used.length && used.every(d => protection.get(d.id)[key].state === 'on');
+    const rows = [
+        ['Two copies', !by_db.size ? null : !single.length, single.length ? `Only one destination this week: ${single.join(', ')}. Add a second copy to their schedules.` : 'Every database backed up this week is at two destinations.'],
+        ['One off-site', !used.length ? null : any('offsite'), any('offsite') ? 'At least one destination used this week is in another place.' : 'No destination used this week is known to be in another place.'],
+        ['One immutable', !used.length ? null : any('object_lock'), any('object_lock') ? 'At least one destination used this week has Object Lock with a default retention.' : 'No destination used this week has Object Lock.'],
+        ['Encrypted at rest', !used.length ? null : !!all('encryption'), all('encryption') ? 'Every destination used this week encrypts at rest.'
+            : `Not known to encrypt: ${used.filter(d => protection.get(d.id).encryption.state !== 'on').map(d => d.name).join(', ')}.`],
+        ['Restores tested', tested, tested ? 'A restore test passed in the last 30 days.' : 'No restore test passed in the last 30 days.'],
+    ];
+    return h('div', {className: 'box'}, h('h2', {}, 'Resilience (3-2-1-1)'),
+        dataTable([
+            {title: 'Rule', render: r => r[0]},
+            {title: 'State', render: r => (r[1] === null ? badge('No backups this week') : r[1] ? badge('Met', 'ok') : badge('Not met', 'bad'))},
+            {title: 'Why', render: r => r[2]},
+        ], rows, null, 'Resilience'));
+}
+
 function destinationsTable(state, compact) {
     const can = session.admin.can;
     return dataTable([
@@ -8426,12 +8505,14 @@ function destinationsTable(state, compact) {
         {title: 'Location', render: d => h('code', {}, destinationLabel(d))},
         {title: 'Enabled', render: d => d.enabled ? badge('Enabled', 'ok') : badge('Disabled')},
         {title: 'Last test', render: d => {
-            const result = parseJSON(d.test_result, null);
-            if (!result) return badge('Never tested', 'warn');
+            const {protection, ...result} = parseJSON(d.test_result, {}) || {};
+            void protection;
+            if (!Object.keys(result).length) return badge('Never tested', 'warn');
             const failed = Object.values(result).some(v => v && v.ok === false);
             return [badge(failed ? 'Failed' : 'Passed', failed ? 'bad' : 'ok'), h('div', {className: 'note'}, `${d.tested_at} UTC`),
                 h('div', {className: 'note'}, Object.entries(result).map(([k, v]) => `${k}: ${v === null ? 'not tested' : v.ok ? 'ok' : 'failed'}`).join(', '))];
         }},
+        {title: 'Protection', render: d => protectionBadges(destinationProtection(state, d))},
         ...(compact ? [] : [
             {title: 'Restricted to', render: d => d.allowed_databases.length ? d.allowed_databases.join(', ') : 'any database'},
             {title: '', render: d => h('span', {className: 'actions-row'},
@@ -8454,6 +8535,15 @@ function renderDestinations(state) {
         + 'S3 credentials are stored in a named collection on the server, never in the console tables or the browser. '
         + 'The connection test runs on the server, which is the node that must reach the destination; deleting artifacts is done by the backup worker, '
         + 'with the credentials of its credential reference.'),
+    h('details', {className: 'box'}, h('summary', {}, 'Recommended S3 permissions and bucket settings'),
+        paragraph('Give the server and the backup worker separate keys. The server key writes and reads backups but cannot delete them, so a compromised server cannot '
+            + 'erase its backups; only the worker deletes, by retention and on request. Enable default encryption (SSE-KMS) and Object Lock with a default retention '
+            + 'on the bucket: the server then needs no encryption setting, and nothing, not even the worker, deletes a backup before its retention ends. '
+            + 'Keep the console retention at least as long as the Object Lock retention.'),
+        h('pre', {className: 'code'}, JSON.stringify({server_key: {Effect: 'Allow', Action: ['s3:PutObject', 's3:GetObject', 's3:ListBucket', 's3:AbortMultipartUpload', 's3:ListMultipartUploadParts'],
+            Resource: ['arn:aws:s3:::BUCKET', 'arn:aws:s3:::BUCKET/PREFIX/*']},
+        worker_key: {Effect: 'Allow', Action: ['s3:GetObject', 's3:ListBucket', 's3:DeleteObject', 's3:GetEncryptionConfiguration', 's3:GetBucketObjectLockConfiguration', 's3:GetBucketVersioning'],
+            Resource: ['arn:aws:s3:::BUCKET', 'arn:aws:s3:::BUCKET/PREFIX/*']}}, null, 2))),
     destinationsTable(state, false), allowedEndpointsBox(state, allowlist)];
 }
 
@@ -8763,7 +8853,8 @@ function schedulesTable(state, compact) {
             return [scheduleText(s), h('div', {className: 'note'}, next ? `next ${new Date(next.at).toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'no next run')];
         }},
         {title: 'Strategy', render: s => s.strategy === 'incremental' ? `incremental, full every ${s.full_every} runs; missing base: ${s.on_missing_base === 'full' ? 'make a full backup' : 'fail'}` : 'full'},
-        {title: 'Destination', render: s => (state.destinations_by_id.get(s.destination_id) || {name: 'missing destination'}).name},
+        {title: 'Destination', render: s => [(state.destinations_by_id.get(s.destination_id) || {name: 'missing destination'}).name,
+            s.copy_destination_id ? h('div', {className: 'note'}, `second copy to ${(state.destinations_by_id.get(s.copy_destination_id) || {name: 'a missing destination'}).name}`) : null]},
         {title: 'Last run', render: s => {
             const last = state.operations.filter(op => op.schedule_id === s.id && op.kind === 'backup').sort((a, b) => b.requested_ms - a.requested_ms)[0];
             return last ? [stateBadge(last.state, last.error), h('div', {className: 'note'}, `${last.scheduled_for || last.requested_at} UTC`)] : h('span', {className: 'note'}, 'never');
@@ -8788,6 +8879,11 @@ function renderSchedules(state) {
         + 'the artifact path, so a run is submitted once even when several workers see it: the server rejects a second backup with the same ID or location. '
         + 'A run is skipped while the previous run of the same schedule is still running. After the worker was stopped, it runs only the latest missed run. '
         + 'When daylight saving ends, a repeated local time runs once; when it starts, a skipped local time runs at the first minute after the gap.'),
+    state.schedule_copies ? null : h('div', {className: 'message warning'}, `${session.admin.db}.backup_schedules was created before second copies. `,
+        button('Update the table', () => reviewPlan({action: 'setup_backup_copies', target_type: 'platform', target_name: session.admin.db,
+            summary: `Allow second copies in ${session.admin.db}.backup_schedules`, local_only: true,
+            steps: [{description: 'Add the column copy_destination_id', sql: `ALTER TABLE ${quoteIdentifier(session.admin.db)}.backup_schedules ADD COLUMN IF NOT EXISTS copy_destination_id String DEFAULT '' AFTER notify_ref`}],
+            onclose: reloadAdmin}), {className: 'small', disabled: !can.setup, title: can.setup ? null : `Needs ALTER on ${session.admin.db}.backup_schedules.`})),
     schedulesTable(state, false)];
 }
 
@@ -8808,6 +8904,8 @@ async function scheduleDialog(state, existing) {
     const keep = h('input', {type: 'number', min: 1, max: 10000, value: existing ? existing.keep_chains : 7});
     const verify = checkbox('Test-restore each backup after it is made (isolated database on this server)', existing ? existing.verify : false);
     const notify = h('input', {type: 'text', value: existing ? existing.notify_ref : '', autocomplete: 'off', spellcheck: false, placeholder: 'BACKUP_ALERT_WEBHOOK'});
+    const copy = select([['', 'None'], ...state.destinations.map(d => [d.id, `${d.name}${d.enabled ? '' : ' (disabled)'}`])], existing ? existing.copy_destination_id || '' : '',
+        {disabled: !state.schedule_copies, title: state.schedule_copies ? null : 'Update the schedules table first (Schedules tab).'});
     const incremental_fields = h('div', {className: 'form-grid'}, adminField('Full backup every N runs', full_every), adminField('When the base is missing', on_missing));
     const time_fields = h('div', {className: 'form-grid'}, adminField('Weekday', weekday), adminField('Hour', hour), adminField('Minute', minute), adminField('Time zone', timezone));
     const sync = () => {
@@ -8820,6 +8918,8 @@ async function scheduleDialog(state, existing) {
     sync();
     formDialog(existing ? `Edit ${existing.name}` : 'Add schedule', [
         adminField('Name', name), adminField('Destination', destination),
+        adminField('Second copy to', copy, 'Optional: after each full backup, the worker makes a new, independent full backup of the same databases at this destination. '
+            + 'Choose one in another place, ideally immutable (Object Lock), for two copies with one off-site. Retention keeps the same number there.'),
         h('fieldset', {className: 'box'}, h('legend', {}, 'Databases'), db_boxes.map(b => b.element), structure_only.element),
         adminField('Strategy', strategy), incremental_fields, adminField('Frequency', frequency), time_fields,
         h('datalist', {id: 'backup-timezones'}, (Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : ['UTC']).map(z => h('option', {value: z}))),
@@ -8835,6 +8935,9 @@ async function scheduleDialog(state, existing) {
         if (!dest) return 'Choose a destination.';
         const outside = chosen.filter(db => dest.allowed_databases.length && !dest.allowed_databases.includes(db));
         if (outside.length) return `The destination is restricted and does not allow ${outside.join(', ')}.`;
+        const copy_dest = copy.value ? state.destinations_by_id.get(copy.value) : null;
+        if (copy_dest && copy_dest.id === dest.id) return 'The second copy must go to another destination.';
+        if (copy_dest && chosen.some(db => copy_dest.allowed_databases.length && !copy_dest.allowed_databases.includes(db))) return 'The second destination is restricted and does not allow all these databases.';
         try {
             new Intl.DateTimeFormat('en-US', {timeZone: timezone.value}).format();
         } catch (e) {
@@ -8849,7 +8952,8 @@ async function scheduleDialog(state, existing) {
         const row = {id: existing ? existing.id : crypto.randomUUID(), name: name.value.trim(), enabled: existing ? existing.enabled : true, destination_id: dest.id,
             databases: chosen, tables: [], structure_only: structure_only.input.checked, strategy: strategy.value, full_every: Number(full_every.value),
             frequency: frequency.value, minute: Number(minute.value), hour: Number(hour.value), weekday: Number(weekday.value), timezone: timezone.value,
-            keep_chains: Number(keep.value), on_missing_base: on_missing.value, verify: verify.input.checked, notify_ref: notify.value};
+            keep_chains: Number(keep.value), on_missing_base: on_missing.value, verify: verify.input.checked, notify_ref: notify.value,
+            ...(state.schedule_copies ? {copy_destination_id: copy.value} : {})};
         return scheduleRowPlan(row, `${existing ? 'Edit' : 'Add'} schedule ${row.name}`);
     });
 }
@@ -8857,10 +8961,13 @@ async function scheduleDialog(state, existing) {
 function scheduleRowPlan(row, summary, removal) {
     const data = {...row, deleted: !!removal};
     delete data.updated_by;
+    /// The column exists only on tables updated for second copies (`copy_destination_id` is loaded as '' otherwise).
+    const copies = backup_page_state.data && backup_page_state.data.schedule_copies;
+    if (!copies) delete data.copy_destination_id;
     return {action: removal ? 'remove_backup_schedule' : 'save_backup_schedule', target_type: 'backup_schedule', target_name: row.name, summary, local_only: true,
         danger: !!removal, confirm_text: removal ? 'Remove' : null,
         warning: removal ? 'Backups made by the schedule are kept; the worker no longer deletes them by retention.' : null,
-        steps: [{description: summary, sql: `INSERT INTO ${quoteIdentifier(session.admin.db)}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref, deleted) FORMAT JSONEachRow\n${JSON.stringify(data)}`}]};
+        steps: [{description: summary, sql: `INSERT INTO ${quoteIdentifier(session.admin.db)}.backup_schedules (id, name, enabled, destination_id, databases, tables, structure_only, strategy, full_every, frequency, minute, hour, weekday, timezone, keep_chains, on_missing_base, verify, notify_ref${copies ? ', copy_destination_id' : ''}, deleted) FORMAT JSONEachRow\n${JSON.stringify(data)}`}]};
 }
 
 function saveSchedule(row, summary, removal) {
@@ -8870,8 +8977,8 @@ function saveSchedule(row, summary, removal) {
 /// The backups of a schedule that retention would delete now, and why the others are kept. The same rule
 /// is applied by the backup worker: keep the newest `keep_chains` full backups with everything that depends
 /// on them; delete older chains, except backups in use or required by kept ones.
-function retentionPlan(state, schedule) {
-    const backups = state.operations.filter(op => op.kind === 'backup' && op.schedule_id === schedule.id && op.state === 'succeeded' && !op.deleted)
+function retentionPlan(state, schedule, destination_id = schedule.destination_id) {
+    const backups = state.operations.filter(op => op.kind === 'backup' && op.schedule_id === schedule.id && op.destination_id === destination_id && op.state === 'succeeded' && !op.deleted)
         .sort((a, b) => b.requested_ms - a.requested_ms);
     const fulls = backups.filter(op => op.strategy !== 'incremental');
     const kept_fulls = new Set(fulls.slice(0, schedule.keep_chains).map(op => op.op_id));
@@ -8896,15 +9003,15 @@ function retentionPlan(state, schedule) {
 }
 
 function retentionPreview(state, schedule) {
-    const plan = retentionPlan(state, schedule);
+    const destinations = [schedule.destination_id, schedule.copy_destination_id].filter(Boolean);
     openDialog(`Retention of ${schedule.name}`, [
-        paragraph(`Keeps the ${schedule.keep_chains} newest ${schedule.strategy === 'incremental' ? 'full backups with their incremental chains' : 'backups'}. `
+        paragraph(`Keeps the ${schedule.keep_chains} newest ${schedule.strategy === 'incremental' ? 'full backups with their incremental chains' : 'backups'} at each destination. `
             + 'The backup worker applies this after each run; deleting a base before its incremental backups is never done.'),
-        dataTable([
+        destinations.map(id => [h('h3', {}, (state.destinations_by_id.get(id) || {name: 'missing destination'}).name), dataTable([
             {title: 'Backup', render: item => [h('code', {}, shortId(item.op.op_id)), h('div', {className: 'note'}, `${item.op.requested_at} UTC · ${item.op.strategy || 'full'}`)]},
             {title: 'Decision', render: item => item.delete ? badge('Delete', 'bad') : badge('Keep', 'ok')},
             {title: 'Reason', render: item => item.reason},
-        ], plan, 'The schedule has no backups yet.', 'Retention preview'),
+        ], retentionPlan(state, schedule, id), 'No backups of the schedule here yet.', 'Retention preview')]),
     ], [button('Close', closeDialog, {className: 'primary'})]);
 }
 

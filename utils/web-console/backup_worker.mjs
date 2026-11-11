@@ -131,12 +131,16 @@ const NATIVE = {CREATING_BACKUP: 'running', RESTORING: 'running', BACKUP_CREATED
     BACKUP_FAILED: 'failed', RESTORE_FAILED: 'failed', BACKUP_CANCELLED: 'cancelled', RESTORE_CANCELLED: 'cancelled'};
 
 async function loadState() {
+    /// Tables set up before second copies have no copy_destination_id: their schedules have none.
+    const has_copy = (await query(`SELECT count() AS n FROM system.columns WHERE database = {db:String} AND table = 'backup_schedules' AND name = 'copy_destination_id'`,
+        {params: {db: DB}}))[0].n > 0;
     const [destinations, schedules, operations] = await Promise.all([
         query(`SELECT id, name, toString(type) AS type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled, allowed_databases, test_result,
             if(tested_at IS NULL, '', toString(tested_at)) AS tested_at, description
             FROM ${q(DB)}.backup_destinations FINAL WHERE NOT deleted`),
         query(`SELECT id, name, enabled, destination_id, databases, tables, structure_only, toString(strategy) AS strategy, full_every, toString(frequency) AS frequency,
-            minute, hour, weekday, timezone, keep_chains, toString(on_missing_base) AS on_missing_base, verify, notify_ref FROM ${q(DB)}.backup_schedules FINAL WHERE NOT deleted`),
+            minute, hour, weekday, timezone, keep_chains, toString(on_missing_base) AS on_missing_base, verify, notify_ref,
+            ${has_copy ? 'copy_destination_id' : "'' AS copy_destination_id"} FROM ${q(DB)}.backup_schedules FINAL WHERE NOT deleted`),
         query(`SELECT op_id, toString(kind) AS kind, toUnixTimestamp64Milli(requested_at) AS requested_ms, requested_by, destination_id, artifact, scope, strategy, base_op_id,
             schedule_id, target, parameters FROM ${q(DB)}.backup_operations ORDER BY requested_at LIMIT 1 BY op_id`),
     ]);
@@ -367,7 +371,8 @@ async function runSchedules(state, now) {
             continue;
         }
         if (schedule.strategy === 'incremental') {
-            const backups = state.operations.filter(o => o.kind === 'backup' && o.schedule_id === schedule.id && o.state === 'succeeded' && !o.deleted)
+            const backups = state.operations.filter(o => o.kind === 'backup' && o.schedule_id === schedule.id && o.destination_id === schedule.destination_id
+                && o.state === 'succeeded' && !o.deleted)
                 .sort((a, b) => b.requested_ms - a.requested_ms);
             const last_full = backups.findIndex(o => o.strategy !== 'incremental');
             if (backups.length && last_full >= 0 && last_full + 1 < schedule.full_every) {
@@ -507,8 +512,10 @@ async function afterBackups(state) {
 // ---------------------------------------------------------------------------------------------
 // Retention and deletion
 
-export function retentionDeletions(state, schedule) {
-    const backups = state.operations.filter(o => o.kind === 'backup' && o.schedule_id === schedule.id && o.state === 'succeeded' && !o.deleted)
+/// The backups of `schedule` at `destination_id` that its retention deletes: the first destination and the second copies
+/// are retained separately, each keeping `keep_chains`.
+export function retentionDeletions(state, schedule, destination_id = schedule.destination_id) {
+    const backups = state.operations.filter(o => o.kind === 'backup' && o.schedule_id === schedule.id && o.destination_id === destination_id && o.state === 'succeeded' && !o.deleted)
         .sort((a, b) => b.requested_ms - a.requested_ms);
     const fulls = backups.filter(o => o.strategy !== 'incremental');
     const kept = new Set(fulls.slice(0, schedule.keep_chains).map(o => o.op_id));
@@ -519,7 +526,8 @@ export function retentionDeletions(state, schedule) {
 
 async function applyRetention(state) {
     for (const schedule of state.schedules.filter(sch => sch.enabled)) {
-        for (const backup of retentionDeletions(state, schedule)) {
+        const deletions = [schedule.destination_id, schedule.copy_destination_id].filter(Boolean).flatMap(id => retentionDeletions(state, schedule, id));
+        for (const backup of deletions) {
             if (state.operations.some(o => o.kind === 'delete' && o.base_op_id === backup.op_id)) continue;
             const op = {op_id: `ret-${backup.op_id}`.slice(0, 64), kind: 'delete', destination_id: backup.destination_id, artifact: backup.artifact, scope: backup.scope,
                 base_op_id: backup.op_id, schedule_id: schedule.id, parameters: {reason: `retention of ${schedule.name}: keep ${schedule.keep_chains}`}};
@@ -645,12 +653,18 @@ async function processDeletions(state) {
         await recordEvent(op.op_id, {state: 'running', details: {worker: WORKER_ID}});
         try {
             const result = await deleteArtifact(destination, op.artifact);
+            /// On a bucket that keeps versions (always with Object Lock), a deletion without a version only adds delete
+            /// markers: the backup disappears from listings, but its data stays until the bucket's retention ends.
+            const reported = parseJSON(destination.test_result, {}).protection;
+            if (destination.type === 's3' && reported && (reported.versioning.state === 'on' || reported.object_lock.state === 'on')) {
+                result.note = 'The bucket keeps versions: delete markers hide the objects, and their data stays until the bucket\'s retention ends.';
+            }
             await recordEvent(op.op_id, {state: 'succeeded', details: result});
             if (op.kind === 'delete') {
                 await recordEvent(op.base_op_id, {state: 'deleted', details: {deletion: op.op_id, ...result}});
                 await audit('delete_backup', op.base_op_id, `Deleted backup ${op.base_op_id}`, 'success', '', op.op_id, result);
             } else {
-                await recordDestinationCapabilities(destination, {list: {ok: true}, delete: {ok: true}});
+                await recordDestinationCapabilities(destination, {list: {ok: true}, delete: {ok: true}, ...(destination.type === 's3' ? {protection: await destinationProtection(destination)} : {})});
             }
             log('artifact deleted', {op: op.op_id, artifact: op.artifact, ...result});
         } catch (e) {
@@ -673,6 +687,97 @@ async function recordDestinationCapabilities(destination, results) {
     const merged = {...parseJSON(current.test_result, {}), ...results};
     const row = {...current, test_result: JSON.stringify(merged), tested_at: current.tested_at || null, deleted: false};
     await query(`INSERT INTO ${q(DB)}.backup_destinations (id, name, description, type, disk, named_collection, endpoint, bucket, prefix, credential_ref, allow_http, enabled, allowed_databases, test_result, tested_at, deleted) FORMAT JSONEachRow\n${JSON.stringify(row)}`, {raw: true});
+}
+
+// ---------------------------------------------------------------------------------------------
+// Protection of destinations, and second copies
+
+/// What protects the backups at an S3 destination, as the bucket reports it to the worker's credentials: its default
+/// encryption, its Object Lock configuration, and versioning. A setting the bucket does not report is `unknown`, with
+/// the reason, never assumed.
+export async function destinationProtection(destination) {
+    const result = {checked_at: new Date().toISOString().replace('T', ' ').slice(0, 19)};
+    let creds;
+    try {
+        creds = s3Credentials(destination);
+    } catch (e) {
+        return {...result, encryption: {state: 'unknown', error: e.message}, object_lock: {state: 'unknown', error: e.message}, versioning: {state: 'unknown', error: e.message}};
+    }
+    const ask = async parameter => {
+        try {
+            return {xml: await s3Request(destination, creds, 'GET', '', {[parameter]: ''})};
+        } catch (e) {
+            return {error: e.message, missing: /\b404\b|NotFound|NoSuch/.test(e.message)};
+        }
+    };
+    const tag = (xml, name) => (xml.match(new RegExp(`<${name}>([^<]*)</${name}>`)) || [])[1] || '';
+    const [encryption, lock, versioning] = await Promise.all([ask('encryption'), ask('object-lock'), ask('versioning')]);
+    result.encryption = encryption.xml ? {state: 'on', algorithm: tag(encryption.xml, 'SSEAlgorithm'), kms_key: tag(encryption.xml, 'KMSMasterKeyID')}
+        : encryption.missing ? {state: 'off'} : {state: 'unknown', error: encryption.error};
+    if (lock.xml && tag(lock.xml, 'ObjectLockEnabled') === 'Enabled') {
+        const days = Number(tag(lock.xml, 'Days')) || Number(tag(lock.xml, 'Years')) * 365 || 0;
+        result.object_lock = days ? {state: 'on', mode: tag(lock.xml, 'Mode'), days} : {state: 'no default retention'};
+    } else {
+        result.object_lock = lock.xml || lock.missing ? {state: 'off'} : {state: 'unknown', error: lock.error};
+    }
+    const status = versioning.xml ? tag(versioning.xml, 'Status') : '';
+    result.versioning = versioning.xml ? {state: status === 'Enabled' ? 'on' : status === 'Suspended' ? 'suspended' : 'off'} : {state: 'unknown', error: versioning.error};
+    return result;
+}
+
+/// Checks the protection of each enabled S3 destination every 6 hours, so that a change of the bucket shows.
+async function checkProtection(state) {
+    for (const destination of state.destinations.filter(d => d.enabled && d.type === 's3')) {
+        const previous = parseJSON(destination.test_result, {}).protection;
+        if (previous && Date.now() - Date.parse(`${previous.checked_at}Z`) < 6 * 3600000) continue;
+        await recordDestinationCapabilities(destination, {protection: await destinationProtection(destination)});
+    }
+}
+
+/// Second copies of the scheduled backups that have a second destination (3-2-1: two copies, one of them elsewhere).
+/// A copy is a new full backup of the same scope, made after the backup at the first destination succeeded; it is not
+/// a copy of its files, so damage at one destination cannot reach the other. Copies are made of full backups only: for
+/// an incremental schedule, one per chain.
+async function copyBackups(state) {
+    for (const schedule of state.schedules.filter(sch => sch.enabled && sch.copy_destination_id)) {
+        const latest = state.operations.filter(o => o.kind === 'backup' && o.schedule_id === schedule.id && o.destination_id === schedule.destination_id
+            && o.strategy !== 'incremental' && o.state === 'succeeded' && !o.deleted).sort((a, b) => b.requested_ms - a.requested_ms)[0];
+        if (!latest || Date.now() - latest.requested_ms > 2 * PERIOD[schedule.frequency] * Math.max(1, schedule.strategy === 'incremental' ? schedule.full_every : 1)) continue;
+        const op_id = periodOpId(`copy:${latest.op_id}`);
+        if (state.operations.some(o => o.op_id === op_id)) continue;
+        const destination = state.destinations_by_id.get(schedule.copy_destination_id);
+        const scope = latest.scope;
+        const op = {op_id, kind: 'backup', destination_id: schedule.copy_destination_id, scope, schedule_id: schedule.id, strategy: 'full', base_op_id: '',
+            artifact: `schedules/${schedule.id}/copies/${(latest.parameters.run || latest.op_id).replace(/:/g, '')}`,
+            parameters: {worker: WORKER_ID, copy_of: latest.op_id, run: latest.parameters.run, timezone: schedule.timezone}};
+        if (!destination || !destination.enabled) {
+            await recordOperation(op);
+            await recordEvent(op_id, {state: 'failed', error: destination ? 'The second destination is disabled.' : 'The second destination no longer exists.'});
+            await notify(state, op, {state: 'failed', error: 'second destination unavailable'});
+            continue;
+        }
+        const busy = state.operations.find(o => !TERMINAL.includes(o.state) && o.state !== 'unknown' && ['backup', 'restore', 'verify'].includes(o.kind)
+            && (o.destination_id === destination.id || scopeDatabases(o.scope).some(db => scopeDatabases(scope).includes(db))));
+        if (busy) continue;
+        op.parameters.server_version = (await query('SELECT version() AS v'))[0].v;
+        op.parameters.objects = await query(`SELECT database, name, engine FROM system.tables WHERE database IN {dbs:Array(String)}`, {params: {dbs: arrayParam(scopeDatabases(scope))}});
+        await recordOperation(op);
+        const items = [...(scope.databases || []).map(db => `DATABASE ${q(db)}`), ...(scope.tables || []).map(([db, t]) => `TABLE ${q(db)}.${q(t)}`)];
+        const settings = [`id = ${s(op_id)}`, 'async = 1', ...(scope.structure_only ? ['structure_only = 1'] : [])];
+        try {
+            await query(`BACKUP ${items.join(', ')} TO ${location(destination, op.artifact)} SETTINGS ${settings.join(', ')}`, {raw: true, settings: {log_comment: `console-admin:${op_id}`}});
+        } catch (e) {
+            if (e.code === 598 || (e.code === 36 && /same ID/.test(e.message))) continue;
+            await recordEvent(op_id, {state: e.code ? 'failed' : 'unknown', native_id: op_id, error: e.message});
+            await audit('submit_backup', op_id, `Second copy of ${latest.op_id} (${schedule.name})`, 'failure', e.message, op_id);
+            await notify(state, op, {state: 'failed', error: e.message});
+            continue;
+        }
+        await recordEvent(op_id, {state: 'running', native_id: op_id, details: {submitted_by: WORKER_ID}});
+        await audit('submit_backup', op_id, `Second copy of ${latest.op_id} to ${destination.name} (${schedule.name})`, 'success', '', op_id, {copy_of: latest.op_id});
+        log('second copy submitted', {schedule: schedule.name, of: latest.op_id, op: op_id});
+        state.operations.push({...op, requested_ms: Date.now(), state: 'running', checks: [], deleted: false});
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1022,7 +1127,9 @@ async function cycle() {
     await runSchedules(state, Date.now());
     state = await loadState();
     await afterBackups(state);
+    await copyBackups(state);
     await applyRetention(state);
+    await checkProtection(state);
     state = await loadState();
     await processDeletions(state);
     if (BUNDLE.provider) {
