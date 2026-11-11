@@ -27,6 +27,7 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/cluster_k8s_e2e.mjs` | Browser acceptance checks of the Kubernetes provider of Cluster Management: the wizard's choices, provisioning, configuration and drift, storage expansion, replicas, backup, retirement, and deletion (Playwright; not part of the build). |
 | `utils/web-console/k8s_lab.sh` | Creates and deletes the Kubernetes lab: a k3d cluster with cert-manager, the ClickHouse operator, and an expandable storage class. |
 | `utils/web-console/cluster_e2e.mjs` | Browser acceptance checks of Cluster Management against a running agent: provisioning, registration, drift, scaling, failures, and retirement (Playwright; not part of the build). |
+| `utils/web-console/run_e2e.sh` | Runs the browser suites against a server of their own, with its own MinIO and cluster agent, started and removed for each run. |
 | `utils/web-console/Dockerfile` | Server image: a locally built binary on top of the official image. |
 | `utils/web-console/Dockerfile.tools`, `tools-entrypoint.sh` | Tools image: the backup worker, the cluster agent (with `docker`, Compose, and `kubectl`), and the access policy worker. |
 | `utils/web-console/build_images.sh` | Builds the images from source, end to end: checks, a Release build of the binary, then `package_images.sh`. |
@@ -134,6 +135,34 @@ npm init -y && npm install playwright@1.48.2 && npx playwright install chromium
 cp ~/src/ClickHouse-private/utils/web-console/console_e2e.mjs .
 node console_e2e.mjs --url http://127.0.0.1:28123 --admin alice:alicepass --limited limited:limitedpass --screenshots shots
 ```
+
+The usual way to run the suites is `run_e2e.sh`, which runs them against a server of their own. Every run starts a
+new server with an empty data directory (HTTP 38123, native 39000, Keeper 39181), its own MinIO container (39900),
+and its own cluster agent (lab ports 32000-32999), then stops and removes them. The results depend only on the code:
+not on what a person or an earlier run left on a server, and the development instance is never touched.
+
+```bash
+cd ~/src/ClickHouse-private
+utils/web-console/run_e2e.sh                                    # all suites, with the page built into the binary
+utils/web-console/run_e2e.sh --page-from-source                 # with programs/server/console.html as it is now
+utils/web-console/run_e2e.sh --suites console,access            # only some: console, access, data_access, backup, cluster
+```
+
+| Option | Meaning |
+|---|---|
+| `--suites <list>` | Suites to run, comma-separated (default: all). |
+| `--binary <path>` | The `clickhouse` binary (default: `build/programs/clickhouse`). |
+| `--page-from-source` | Serve `programs/server/console.html` from the working tree, with the headers of the built-in handler: try a change of the page without rebuilding. The other pages come from the binary. |
+| `--e2e-dir <dir>` | The Playwright workspace (default: `~/console-e2e`). |
+| `--keep` | Leave the server, MinIO, and the agent running at the end, to look at what a suite left. Stop them before the next run. |
+
+The logs, one per suite plus the server's and the agent's, and the screenshots are in `tmp/console-e2e-run/logs/`.
+The script exits with an error when a suite fails. The backup suite needs the image
+`minio/minio:RELEASE.2025-07-23T15-54-02Z` on the host, and the cluster suite the images of the lab clusters. If
+Chromium needs libraries that are not installed system-wide, set `LD_LIBRARY_PATH` before running it.
+
+Each suite can also run alone against another server, such as the development instance, as below. The checks then
+depend on that server's state, for example its component access policy.
 
 The Administration pages have their own checks. They need a user with access management and every privilege
 `WITH GRANT OPTION`, create and remove `e2e_*` users, roles, profiles, quotas, and databases, and set up the
