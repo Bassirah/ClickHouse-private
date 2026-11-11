@@ -197,6 +197,27 @@ for (const statement of ['DROP DATABASE IF EXISTS e2e_bk_src', 'CREATE DATABASE 
     const result = await sql(statement);
     check(!code(result), `${statement}: ${result}`);
 }
+/// On a server without the console tables, such as a new one, they are created through the console's own setup: first
+/// those of the administration pages, which keep the audit log, then those of Backup & Restore.
+async function ensureSetUp() {
+    await signIn();
+    const exists = await sql(`SELECT count() FROM system.tables WHERE database = '${DB}' AND name IN ('audit_log', 'component_policy', 'protected_accounts')`);
+    if (exists !== '3') {
+        await go('/console/admin-access');
+        await page.locator('#admin-view button', {hasText: 'Set up'}).click();
+        check((await reviewAndApply()).includes('Applied.'), 'the setup of the administration pages failed');
+        await signIn();
+    }
+    await go('/console/admin-backups');
+    const setup = page.locator('#admin-view button', {hasText: 'Set up'});
+    if (await setup.count()) {
+        await setup.click();
+        check((await applyPlan()).includes('Applied.'), 'the setup of Backup & Restore failed');
+        await signIn();
+    }
+}
+await ensureSetUp();
+
 const STARTED = await sql('SELECT now()');
 
 await test('Unauthorized user calls the backup operations directly: the server rejects them', async () => {

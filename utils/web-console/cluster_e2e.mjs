@@ -140,6 +140,29 @@ const shot = async name => { if (SCREENSHOTS) await page.screenshot({path: path.
 
 // ---------------------------------------------------------------------------------------------
 
+/// On a server without the console tables, such as a new one, they are created through the console's own setup: first
+/// those of the administration pages, which keep the audit log and create the role `console_admin_reader`, then those
+/// of Cluster Management.
+async function ensureSetUp() {
+    await signIn();
+    const exists = await sql(`SELECT count() FROM system.tables WHERE database = '${DB}' AND name IN ('audit_log', 'component_policy', 'protected_accounts')`);
+    if (exists !== '3') {
+        await go('/console/admin-access');
+        await page.locator('#admin-view button', {hasText: 'Set up'}).click();
+        await review();
+        check((await applyPlan()).includes('Applied.'), 'the setup of the administration pages failed');
+        await signIn();
+    }
+    await go('/console/admin-clusters');
+    const setup = page.locator('#admin-view button', {hasText: 'Set up'});
+    if (await setup.count()) {
+        await setup.click();
+        check((await applyPlan()).includes('Applied.'), 'the setup of Cluster Management failed');
+        await signIn();
+    }
+}
+await ensureSetUp();
+
 const NAME = `e2e-${RUN}`;
 /// The administrator password typed in the wizard: it must not appear anywhere in the console tables or logs.
 const ADMIN_SECRET = `E2e-Admin-${RUN}-Pw`;
