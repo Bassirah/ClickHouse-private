@@ -357,6 +357,8 @@ table.data tr:last-child td { border-bottom: 0; }
 table.data th { font-weight: 600; color: var(--muted); font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.03em; background: var(--bg-subtle); white-space: nowrap; }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.data td.center, table.data th.center { text-align: center; }
+details.contents { margin-top: 0.25rem; font-size: 0.92em; }
+details.contents ul { margin: 0.15rem 0 0.4rem; padding-left: 1.1rem; }
 .select-all-head { display: inline-flex; flex-direction: column; align-items: center; gap: 0.25rem; }
 table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
@@ -7569,7 +7571,12 @@ function destinationLabel(destination) {
 }
 
 /// The scope of a backup: `{databases: [...], tables: [[db, table], ...], partitions: [...], structure_only,
-/// access_entities}`. Whole databases, or tables of one database (optionally some partitions of one table).
+/// access_entities, sql_objects}`. Whole databases, or tables of one database (optionally some partitions of one
+/// table), plus the console's own database when chosen.
+const ACCESS_ENTITY_TABLES = ['users', 'roles', 'settings_profiles', 'row_policies', 'quotas'];
+/// SQL user-defined functions, workloads, and resources: kept by the server outside of any database.
+const SQL_OBJECT_TABLES = ['functions', 'workloads', 'resources'];
+
 function backupScopeSQL(scope) {
     const items = [];
     for (const db of scope.databases || []) items.push(`DATABASE ${quoteIdentifier(db)}`);
@@ -7578,9 +7585,8 @@ function backupScopeSQL(scope) {
         if (scope.partitions && scope.partitions.length) item += ` PARTITIONS ${scope.partitions.map(quoteString).join(', ')}`;
         items.push(item);
     }
-    if (scope.access_entities) {
-        for (const table of ['users', 'roles', 'settings_profiles', 'row_policies', 'quotas']) items.push(`TABLE system.${table}`);
-    }
+    if (scope.access_entities) for (const table of ACCESS_ENTITY_TABLES) items.push(`TABLE system.${table}`);
+    if (scope.sql_objects) for (const table of SQL_OBJECT_TABLES) items.push(`TABLE system.${table}`);
     return items.join(', ');
 }
 
@@ -7590,8 +7596,49 @@ function scopeText(scope) {
     if ((scope.tables || []).length) parts.push(`tables ${scope.tables.map(([db, table]) => `${db}.${table}`).join(', ')}`);
     if ((scope.partitions || []).length) parts.push(`partitions ${scope.partitions.join(', ')}`);
     if (scope.access_entities) parts.push('access entities');
+    if (scope.sql_objects) parts.push('functions, workloads, resources');
     if (scope.structure_only) parts.push('structure only');
     return parts.join('; ') || '—';
+}
+
+/// Server state that `BACKUP` cannot reach: files on the host, and SQL objects it does not back up in this version.
+/// Every backup lists them, so that nobody takes a backup for a copy of the whole server.
+const BACKUP_NEVER_INCLUDED = [
+    'The server configuration: config.xml, config.d, users.xml, users.d',
+    'Secrets in files: TLS certificates and keys, keys of encrypted disks, passwords in the configuration',
+    'Named collections, including the credentials of S3 destinations',
+    "Keeper's own state (RESTORE rebuilds the Keeper metadata of replicated tables)",
+    'Executable UDF scripts, dictionary source files, and format schemas',
+    "The cluster agent's key and the secrets of the clusters it created",
+];
+
+/// What a backup contains, and what it leaves out, from its recorded scope. Backups made before a part of the
+/// scope existed have no flag for it, and are shown without it, which is what they contain.
+function backupContents(scope) {
+    const admin_db = session.admin.db;
+    const databases = scope.databases || [];
+    const data = scope.structure_only ? 'schemas only' : 'schemas and data';
+    const contains = [];
+    const user_dbs = databases.filter(db => db !== admin_db);
+    if (user_dbs.length) contains.push(`Databases ${user_dbs.join(', ')} (${data})`);
+    if ((scope.tables || []).length) {
+        contains.push(`Tables ${scope.tables.map(([db, table]) => `${db}.${table}`).join(', ')}${(scope.partitions || []).length ? `, partitions ${scope.partitions.join(', ')}` : ''} (${data})`);
+    }
+    if (admin_db && databases.includes(admin_db)) contains.push(`The console's tables in ${admin_db}: audit log, policies, backup and cluster records`);
+    if (scope.access_entities) contains.push('Users, roles, settings profiles, row policies, and quotas created with SQL');
+    if (scope.sql_objects) contains.push('SQL user-defined functions, workloads, and resources');
+    const missing = [];
+    if (!scope.access_entities) missing.push('Users, roles, settings profiles, row policies, and quotas');
+    if (!scope.sql_objects) missing.push('SQL user-defined functions, workloads, and resources');
+    if (admin_db && !databases.includes(admin_db)) missing.push(`The console's tables in ${admin_db}`);
+    return {contains, missing: [...missing, ...BACKUP_NEVER_INCLUDED]};
+}
+
+function backupContentsDetails(scope) {
+    const {contains, missing} = backupContents(scope);
+    return h('details', {className: 'contents'}, h('summary', {}, 'Contents'),
+        h('div', {className: 'note'}, 'Contains:'), h('ul', {}, contains.map(text => h('li', {}, text))),
+        h('div', {className: 'note'}, 'Not in this backup:'), h('ul', {}, missing.map(text => h('li', {}, text))));
 }
 
 /// The source databases a scope reads, which is also the set of `Backup` engine databases needed to open it.
@@ -7977,7 +8024,7 @@ function renderBackupInventory(state) {
         list.replaceChildren(dataTable([
             {title: 'Backup', render: op => [h('code', {}, shortId(op.op_id)), h('div', {className: 'note'}, op.requested_at + ' UTC'),
                 op.schedule_id ? h('div', {className: 'note'}, `schedule ${(state.schedules.find(s => s.id === op.schedule_id) || {name: op.schedule_id}).name}`) : null]},
-            {title: 'Scope', render: op => scopeText(op.scope)},
+            {title: 'Scope', render: op => [scopeText(op.scope), backupContentsDetails(op.scope)]},
             {title: 'Type', render: op => op.strategy === 'incremental'
                 ? [badge('incremental'), h('div', {className: 'note'}, `base ${shortId(op.base_op_id)}`), chainNote(state, op)] : badge('full')},
             {title: 'Destination', render: op => [destinationLabel(state.destinations_by_id.get(op.destination_id)), h('div', {className: 'note'}, op.artifact)]},
@@ -8892,12 +8939,18 @@ function wizard(title, steps, finish_text, finish) {
 
 async function backupWizard(state) {
     const admin = session.admin;
-    const databases = (await adminRows("SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') AND engine != 'Backup' ORDER BY name")).map(r => r.name);
-    const w = {databases: [], table_db: '', tables: [], partitions: '', structure_only: false, access_entities: false, destination_id: '', strategy: 'full', base_op_id: '', capture: true};
+    const admin_db = admin.db;
+    /// The console's own database is a separate choice below, included by default when the user may back it up.
+    const databases = (await adminRows("SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') AND engine != 'Backup' ORDER BY name"))
+        .map(r => r.name).filter(name => name !== admin_db);
+    const can_backup_console = !!admin_db && await checkGrant(`BACKUP ON ${quoteIdentifier(admin_db)}.*`);
+    const w = {databases: [], table_db: '', tables: [], partitions: '', structure_only: false, access_entities: false, sql_objects: false,
+        console_tables: can_backup_console, destination_id: '', strategy: 'full', base_op_id: '', capture: true};
     const enabled = state.destinations.filter(d => d.enabled);
     let review = null;
     const scope = () => {
-        const s = {databases: w.table_db ? [] : w.databases, tables: w.table_db ? w.tables.map(t => [w.table_db, t]) : [], structure_only: w.structure_only, access_entities: w.access_entities};
+        const s = {databases: [...(w.table_db ? [] : w.databases), ...(w.console_tables ? [admin_db] : [])], tables: w.table_db ? w.tables.map(t => [w.table_db, t]) : [],
+            structure_only: w.structure_only, access_entities: w.access_entities, sql_objects: w.sql_objects};
         if (w.table_db && w.tables.length === 1 && w.partitions.trim()) s.partitions = w.partitions.split(',').map(p => p.trim()).filter(Boolean);
         return s;
     };
@@ -8934,11 +8987,21 @@ async function backupWizard(state) {
             const structure = checkbox('Structure only: CREATE statements without table data', w.structure_only, {onchange: e => { w.structure_only = e.target.checked; }});
             const access = checkbox('Include users, roles, settings profiles, row policies, and quotas (needs SHOW ACCESS privileges)', w.access_entities,
                 {onchange: e => { w.access_entities = e.target.checked; }});
+            const sql_objects = checkbox('Include SQL user-defined functions, workloads, and resources', w.sql_objects,
+                {onchange: e => { w.sql_objects = e.target.checked; }});
+            const console_tables = admin_db ? checkbox(`Include the console's tables in ${admin_db}: audit log, policies, backup and cluster records`, w.console_tables,
+                {onchange: e => { w.console_tables = e.target.checked; }, disabled: !can_backup_console,
+                    title: can_backup_console ? null : `Needs BACKUP on ${admin_db}.*.`}) : null;
+            const {missing} = backupContents({});
             return [paragraph(`Server: ${session.hostname} (ClickHouse ${session.version}). The backup is made by this server; in a cluster, it contains this server's data only.`),
-                adminField('What to back up', mode), db_part, table_part, structure.element, access.element];
+                adminField('What to back up', mode), db_part, table_part, structure.element,
+                h('fieldset', {className: 'box'}, h('legend', {}, 'Server objects'), access.element, sql_objects.element, console_tables ? console_tables.element : null),
+                h('details', {}, h('summary', {}, 'Never in a backup made here'),
+                    h('ul', {}, missing.filter(text => BACKUP_NEVER_INCLUDED.includes(text)).map(text => h('li', {}, text))),
+                    h('p', {className: 'note'}, 'These are files on the host, or objects the server does not back up. Keep them with your configuration management.'))];
         }, validate: () => {
             const s = scope();
-            if (!scopeDatabases(s).length) return 'Choose at least one database or table.';
+            if (!scopeDatabases(s).filter(db => db !== admin_db).length) return 'Choose at least one database or table.';
             if (s.partitions && s.partitions.some(p => !/^[A-Za-z0-9_-]+$/.test(p))) return 'Partition IDs are letters, digits, _ and -, as in system.parts.partition_id.';
             return null;
         }},
@@ -9096,7 +9159,7 @@ async function verifyDialog(state, backup) {
 
 async function runVerification(state, backup, mapping) {
     const destination = state.destinations_by_id.get(backup.destination_id);
-    const op = {op_id: crypto.randomUUID(), kind: 'verify', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: false},
+    const op = {op_id: crypto.randomUUID(), kind: 'verify', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: false, sql_objects: false},
         base_op_id: backup.op_id, target: mapping, parameters: {target_version: session.version, target_host: session.hostname}};
     try {
         await recordOperation(op);
@@ -9190,10 +9253,13 @@ function restoreSQL(backup, destination, mapping, options) {
         if (backup.scope.partitions && backup.scope.partitions.length) item += ` PARTITIONS ${backup.scope.partitions.map(quoteString).join(', ')}`;
         items.push(item);
     }
-    if (options.access_entities) for (const table of ['users', 'roles', 'settings_profiles', 'row_policies', 'quotas']) items.push(`TABLE system.${table}`);
+    if (options.access_entities) for (const table of ACCESS_ENTITY_TABLES) items.push(`TABLE system.${table}`);
+    if (options.sql_objects) for (const table of SQL_OBJECT_TABLES) items.push(`TABLE system.${table}`);
     const settings = [`id = ${quoteString(options.op_id)}`, 'async = 1', `restore_access_entities = ${options.access_entities ? 1 : 0}`];
     if (options.structure_only) settings.push('structure_only = 1');
     if (options.access_entities) settings.push("create_access = 'create'");
+    /// Like access entities: restored only when chosen, also with structure only, and never replacing existing ones.
+    if (options.sql_objects) settings.push('restore_functions = 1', "create_function = 'create'", "create_workloads_and_resources = 'create'");
     return `RESTORE ${items.join(', ')} FROM ${backupLocationSQL(destination, backup.artifact)} SETTINGS ${settings.join(', ')}`;
 }
 
@@ -9216,15 +9282,19 @@ function renderRestoreStart(state) {
 async function restoreWizard(state, backup) {
     const destination = state.destinations_by_id.get(backup.destination_id);
     const stamp = utcNowCompact().slice(0, 13).replace('-', '_');
-    const w = {mapping: Object.fromEntries(scopeDatabases(backup.scope).map(db => [db, `restore_${db}_${stamp}`.slice(0, 60)])), access_entities: false, structure_only: false,
-        probe: null, preflight: null, conflicts: null};
+    const w = {mapping: Object.fromEntries(scopeDatabases(backup.scope).map(db => [db, `restore_${db}_${stamp}`.slice(0, 60)])), access_entities: false, sql_objects: false,
+        structure_only: false, probe: null, preflight: null, conflicts: null};
     wizard(`Restore ${shortId(backup.op_id)}`, [
         {title: 'Backup and chain', render: async () => {
             const {chain, missing} = backupChain(state, backup);
             w.probe = missing ? null : await probeBackupArtifact(destination, backup);
+            const contents = backupContents(backup.scope);
             return [kvList([['Backup', backup.op_id], ['Made', `${backup.requested_at} UTC on ${backup.server}, ClickHouse ${backup.parameters.server_version || 'unknown version'}`],
                 ['Scope', scopeText(backup.scope)], ['Location', `${destinationLabel(destination)}/${backup.artifact}`],
-                ['Chain', chain.map(op => `${shortId(op.op_id)} (${op.strategy || 'full'})`).join(' → ')]]),
+                ['Chain', chain.map(op => `${shortId(op.op_id)} (${op.strategy || 'full'})`).join(' → ')],
+                ['Contains', h('ul', {}, contents.contains.map(text => h('li', {}, text)))],
+                ['Not in this backup', h('details', {}, h('summary', {}, `${contents.missing.length} kinds of server state: restore them from elsewhere`),
+                    h('ul', {}, contents.missing.map(text => h('li', {}, text))))]]),
             missing ? h('div', {className: 'message error'}, `The chain is broken: ${missing}.`)
                 : w.probe.ok ? h('div', {className: 'message info'}, `The backup and its chain open: ${w.probe.tables.length} tables. This is an inspection of the backup, not a dry run of the restore.`)
                     : h('div', {className: 'message error'}, `The backup cannot be opened: ${w.probe.error}`)];
@@ -9267,6 +9337,12 @@ async function restoreWizard(state, backup) {
                         + 'so it is a separate choice. Existing entities with the same names make the restore fail (create_access = create).'),
                     checkbox('Also restore the access entities', w.access_entities, {onchange: e => { w.access_entities = e.target.checked; }}).element));
             }
+            if (backup.scope.sql_objects) {
+                fields.push(h('div', {className: 'box'}, h('h3', {}, 'Functions, workloads, and resources'),
+                    paragraph('This backup contains SQL user-defined functions, workloads, and resources. They are server-wide and change how queries run and are scheduled, '
+                        + 'so restoring them is a separate choice. Existing objects with the same names make the restore fail (create = create).'),
+                    checkbox('Also restore the functions, workloads, and resources', w.sql_objects, {onchange: e => { w.sql_objects = e.target.checked; }}).element));
+            }
             return fields;
         }, validate: () => {
             for (const db of Object.values(w.mapping)) if (nameError(db, 'database')) return nameError(db, 'database');
@@ -9296,7 +9372,8 @@ async function restoreWizard(state, backup) {
             const confirm = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, oninput: e => { w.confirm = e.target.value; }});
             w.confirm = '';
             return [kvList([['Backup', `${shortId(backup.op_id)} (${scopeText(backup.scope)})`], ['Into', Object.entries(w.mapping).map(([s, t]) => `${s} → ${t}`).join(', ')],
-                ['Server', session.hostname], ['Access entities', w.access_entities ? badge('Restored', 'warn') : 'not restored'], ['Data', w.structure_only ? 'structure only' : 'tables with data']]),
+                ['Server', session.hostname], ['Access entities', w.access_entities ? badge('Restored', 'warn') : 'not restored'],
+                ['Functions, workloads, resources', w.sql_objects ? badge('Restored', 'warn') : 'not restored'], ['Data', w.structure_only ? 'structure only' : 'tables with data']]),
             adminField(`Type ${Object.values(w.mapping)[0]} to confirm the target`, confirm)];
         }, validate: () => (w.confirm === Object.values(w.mapping)[0] ? null : 'The name does not match.')},
     ], 'Start restore', () => startRestore(state, backup, destination, w));
@@ -9334,8 +9411,9 @@ function dropTargetDialog(db, backup) {
 }
 
 async function startRestore(state, backup, destination, w) {
-    const op = {op_id: crypto.randomUUID(), kind: 'restore', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: w.access_entities},
-        base_op_id: backup.op_id, target: w.mapping, parameters: {target_version: session.version, structure_only: w.structure_only, access_entities: w.access_entities}};
+    const op = {op_id: crypto.randomUUID(), kind: 'restore', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: w.access_entities, sql_objects: w.sql_objects},
+        base_op_id: backup.op_id, target: w.mapping,
+        parameters: {target_version: session.version, structure_only: w.structure_only, access_entities: w.access_entities, sql_objects: w.sql_objects}};
     openDialog('Starting the restore', [loadingBox('Submitting…')], null);
     try {
         await recordOperation(op);
@@ -9344,7 +9422,7 @@ async function startRestore(state, backup, destination, w) {
             openDialog('Restore not started', [h('div', {className: 'message error'}, created)], [button('Close', closeDialog)], {onclose: reloadAdmin});
             return;
         }
-        const event = await submitOperation(op, restoreSQL(backup, destination, w.mapping, {access_entities: w.access_entities, structure_only: w.structure_only, op_id: op.op_id}),
+        const event = await submitOperation(op, restoreSQL(backup, destination, w.mapping, {access_entities: w.access_entities, sql_objects: w.sql_objects, structure_only: w.structure_only, op_id: op.op_id}),
             {action: 'submit_restore', summary: `Restore backup ${shortId(backup.op_id)} into ${Object.values(w.mapping).join(', ')}`});
         if (event.state !== 'running') {
             openDialog('Restore not started', [h('div', {className: 'message error'}, event.error)], [button('Close', closeDialog)], {onclose: reloadAdmin});

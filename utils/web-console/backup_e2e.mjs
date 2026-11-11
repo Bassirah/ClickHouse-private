@@ -148,13 +148,18 @@ async function latestOp(kind) {
     return sql(`SELECT op_id FROM ${DB}.backup_operations WHERE kind = {k:String} ORDER BY requested_at DESC LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {k: kind});
 }
 
-/// Runs the backup wizard: whole databases, a destination, full or incremental.
-async function backupThroughWizard(databases, destination_name, {incremental = false, capture = true, close_early = false} = {}) {
+/// Runs the backup wizard: whole databases, a destination, full or incremental. The server objects (functions, workloads,
+/// and resources; the console's own tables) are chosen explicitly, so that each check backs up what it names.
+async function backupThroughWizard(databases, destination_name,
+    {incremental = false, capture = true, close_early = false, sql_objects = false, console_tables = false} = {}) {
     const previous = await latestOp('backup');
     await go('/console/admin-backups?tab=backups');
     await page.locator('#admin-view button', {hasText: 'New backup'}).click();
     await dialog().locator('select').first().selectOption('databases');
     for (const db of databases) await dialog().locator('label', {hasText: new RegExp(`^${db}$`)}).locator('input').check();
+    await dialog().locator('label', {hasText: 'Include SQL user-defined functions'}).locator('input').setChecked(sql_objects);
+    const console_box = dialog().locator('label', {hasText: "Include the console's tables"}).locator('input');
+    if (console_tables || await console_box.isEnabled()) await console_box.setChecked(console_tables);
     check(!(await wizardNext()), 'scope step');
     const destination = dialog().locator('select').first();
     const value = await destination.evaluate((el, name) => [...el.options].find(o => o.textContent.startsWith(name))?.value, destination_name);
@@ -473,6 +478,59 @@ await test('Isolated restore completes: schema and data checks match the capture
     check(await sql(`SELECT count() FROM ${DB}.backup_events WHERE op_id = {id:String} AND kind = 'check' AND name LIKE '%fingerprint'`, ADMIN_USER, ADMIN_PASSWORD, {id: restore}) !== '0', 'no fingerprint check');
     check(await sql(`SELECT engine FROM system.tables WHERE database = {db:String} AND name = 'daily_mv'`, ADMIN_USER, ADMIN_PASSWORD, {db: restore_target}) === 'MaterializedView', 'the materialized view was not restored');
     if (SCREENSHOTS) await page.screenshot({path: `${SCREENSHOTS}/b02-restore.png`});
+});
+
+await test('Server objects: functions and the console tables are backed up, listed, and restored only when chosen', async () => {
+    const fn = `e2e_bk_fn_${Date.now() % 100000}`;
+    await sql(`CREATE FUNCTION ${fn} AS x -> x * 2`);
+    const run = await backupThroughWizard(['e2e_bk_src'], disk_destination, {capture: false, sql_objects: true, console_tables: true});
+    check(await opState(run.op_id) === 'succeeded', `state: ${await opState(run.op_id)}`);
+    const scope = JSON.parse(await sql(`SELECT scope FROM ${DB}.backup_operations WHERE op_id = {id:String} LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {id: run.op_id}));
+    check(scope.sql_objects === true && scope.databases.includes(DB), `recorded scope: ${JSON.stringify(scope)}`);
+    check(await sql(`SELECT count() FROM system.backups WHERE id = {id:String} AND num_files > 0`, ADMIN_USER, ADMIN_PASSWORD, {id: run.op_id}) === '1', 'no native backup');
+
+    /// The inventory says what the backup contains, and what no backup made here contains.
+    await go('/console/admin-backups?tab=backups');
+    const row = page.locator('#admin-view tr').filter({has: page.locator('td:first-child', {hasText: run.op_id.slice(0, 8)})});
+    await row.locator('details.contents summary').click();
+    const contents = await row.locator('details.contents').innerText();
+    check(contents.includes('SQL user-defined functions, workloads, and resources') && contents.includes(`The console's tables in ${DB}`), `contents: ${contents}`);
+    check(contents.includes('The server configuration') && contents.includes("Keeper's own state") && contents.includes('Users, roles'), `not included: ${contents}`);
+
+    /// Restored only when chosen, and never over an existing function.
+    await sql(`DROP FUNCTION ${fn}`);
+    const restoreTo = async choose => {
+        await go(`/console/admin-backups?tab=restore&backup=${run.op_id}`);
+        await dialog().locator('.dialog-actions button.primary').waitFor();
+        check((await dialog().innerText()).includes('Not in this backup'), 'the restore does not say what is missing');
+        check(!(await wizardNext()), 'chain step');
+        check(!(await wizardNext()), 'target step');
+        await dialog().locator('label', {hasText: 'Also restore the functions, workloads, and resources'}).locator('input').setChecked(choose);
+        /// The suggested names are per minute: earlier checks may have restored into them.
+        const suffix = Math.random().toString(36).slice(2, 7);
+        for (const input of await dialog().locator('input[type=text]').all()) await input.fill(`${(await input.inputValue()).slice(0, 50)}_${suffix}`);
+        check(!(await wizardNext()), 'names step');
+        check(!(await wizardNext()), 'conflicts step');
+        const targets = await dialog().innerText();
+        await dialog().locator('input[type=text]').first().fill(targets.match(/Type (\S+) to confirm/)[1]);
+        const previous = await latestOp('restore');
+        await dialog().locator('.dialog-actions button.primary', {hasText: 'Start restore'}).click();
+        const op = await until(async () => { const latest = await latestOp('restore'); return latest !== previous ? latest : null; }, 60000, 'the restore to be recorded');
+        await until(async () => ['succeeded', 'failed', 'cancelled', 'unknown'].includes(await opState(op)), 300000, 'the restore to finish');
+        const target = JSON.parse(await sql(`SELECT target FROM ${DB}.backup_operations WHERE op_id = {id:String} LIMIT 1`, ADMIN_USER, ADMIN_PASSWORD, {id: op}));
+        for (const db of Object.values(target)) await sql(`DROP DATABASE IF EXISTS ${db} SYNC`);
+        return {op, state: await opState(op), target};
+    };
+    const without = await restoreTo(false);
+    check(without.state === 'succeeded', `restore without the functions: ${without.state}`);
+    check(Object.keys(without.target).includes(DB), "the console's tables are not restored into their own database");
+    check(await sql(`SELECT count() FROM system.functions WHERE name = {fn:String}`, ADMIN_USER, ADMIN_PASSWORD, {fn}) === '0', 'the function was restored without being chosen');
+    const chosen = await restoreTo(true);
+    check(chosen.state === 'succeeded', `restore with the functions: ${chosen.state}`);
+    check(await sql(`SELECT count() FROM system.functions WHERE name = {fn:String}`, ADMIN_USER, ADMIN_PASSWORD, {fn}) === '1', 'the function was not restored');
+    const again = await restoreTo(true);
+    check(again.state === 'failed', `a restore over an existing function did not fail: ${again.state}`);
+    await sql(`DROP FUNCTION IF EXISTS ${fn}`);
 });
 
 await test('Existing target objects conflict: the restore is blocked', async () => {
