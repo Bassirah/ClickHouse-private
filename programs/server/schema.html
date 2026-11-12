@@ -796,6 +796,14 @@ function getConsoleConnection() {
 /// When embedded by the console, use its connection. Its credentials are neither offered to the
 /// browser's password manager (`storeCredentials`) nor replaced by remembered ones (`autoLoadOnOpen`).
 const consoleConnection = getConsoleConnection();
+/// The console refreshes short-lived credentials (single sign-on tokens) while this page is open: it posts them to
+/// this frame only, from its own origin, for the same user.
+window.addEventListener('message', e => {
+    if (!consoleConnection || e.source !== window.parent || e.origin !== location.origin) return;
+    if (e.data && e.data.type === 'console-credentials' && e.data.user === consoleConnection.user) {
+        $('password').value = e.data.password;
+    }
+});
 if (consoleConnection) {
     $('url').value = consoleConnection.url;
     $('user').value = consoleConnection.user;

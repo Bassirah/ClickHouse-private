@@ -364,6 +364,13 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.35rem 1.25rem; margin: 0; }
 .kv dt { color: var(--muted); }
+.login-divider { display: flex; align-items: center; gap: 0.75rem; color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0; }
+.login-divider::before, .login-divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+#login-sso { display: grid; gap: 0.5rem; }
+#login-sso[hidden] { display: none; }
+.idp-directory + .idp-directory { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: 0.5rem; }
+.idp-directory h3 { margin: 0; }
+.oidc-callback { max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: var(--text); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
 .tablist { display: flex; gap: 0.15rem; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .tablist a
@@ -558,6 +565,10 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
         <div id="login-warning" class="message warning" hidden></div>
         <div id="login-error" class="message error" role="alert" hidden></div>
         <button id="login-submit" class="button primary" type="submit">Connect</button>
+        <div id="login-sso" hidden>
+            <div class="login-divider"><span>or</span></div>
+            <button id="login-sso-button" class="button" type="button"></button>
+        </div>
         <p class="login-footer">Credentials are kept in this tab's memory only and are sent only to this server.</p>
     </form>
 </div>
@@ -634,6 +645,8 @@ const ICONS = {
     audit: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v2h6V3M9 10h6M9 14h6M9 18h3"/>',
     cluster: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="8.5" y="14" width="7" height="7" rx="1"/><path d="M6.5 10v2h11v-2M12 12v2"/>',
     backup: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3 1.1 0 2.1-.1 3-.3"/><path d="M19 15v6M16 18l3 3 3-3"/>',
+    directory: '<circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M12 7.5v4M12 11.5H5v4M12 11.5h7v4"/>',
+    sso: '<circle cx="8" cy="12" r="4"/><path d="M12 12h9M18 12v3M21 12v2"/><path d="M8 10.5v3"/>',
 };
 
 function icon(name, extra_class) {
@@ -668,6 +681,8 @@ const CATEGORIES = [
     {id: 'workspace', title: 'Workspace'},
     {id: 'diagnostics', title: 'Diagnostics'},
     {id: 'administration', title: 'Administration'},
+    /// How users sign in, besides the users and passwords of the server.
+    {id: 'identity', title: 'Identity Providers'},
     /// Last: links to documentation and other sites, at the bottom of the sidebar.
     {id: 'resources', title: 'Resources'},
 ];
@@ -763,6 +778,13 @@ const COMPONENTS = [
     {id: 'admin-backups', category: 'administration', kind: 'admin', title: 'Backup & Restore', icon: 'backup', page: 'backups',
      admin_needs: ['read_backups', 'setup'],
      description: 'Backup destinations, manual and scheduled backups, restores, and recovery verification.'},
+
+    {id: 'idp-ldap', category: 'identity', kind: 'admin', title: 'LDAP', icon: 'directory', page: 'ldap',
+     admin_needs: ['read_directories'],
+     description: 'LDAP and Active Directory user directories: directory sign-in, roles from groups, and a sign-in test.'},
+    {id: 'idp-sso', category: 'identity', kind: 'admin', title: 'SSO (Keycloak)', icon: 'sso', page: 'sso',
+     admin_needs: ['read_idp', 'setup'],
+     description: 'Single sign-on with Keycloak (OpenID Connect): the provider settings, a connection test, and a test sign-in.'},
 ];
 
 const COMPONENTS_BY_ID = new Map(COMPONENTS.map(c => [c.id, c]));
@@ -1083,6 +1105,7 @@ function showLogin() {
         showLoginNotice(`Sign in to open ${COMPONENTS_BY_ID.get(next).title}.`);
     }
     updateLoginWarning();
+    updateLoginSSO();
     ($('login-user').value ? $('login-password') : $('login-user')).focus();
 }
 
@@ -1185,6 +1208,7 @@ function startSession(connection, info) {
 /// requests, timers, and WebSocket sessions), and forgets the credentials.
 function endSession() {
     if (!session) return;
+    if (session.sso) clearTimeout(session.sso.timer);
     session.controller.abort();
     clearInterval(session.status_timer);
     for (const id of [...frames.keys()]) destroyFrame(id);
@@ -1206,12 +1230,22 @@ function endSession() {
 }
 
 function signOut() {
+    const logout = session ? ssoLogoutUrl(session) : null;
     endSession();
     showLoginNotice('');
+    if (logout) {
+        location.assign(logout);
+        return;
+    }
     navigate(loginPath(null), true);
 }
 
 function switchConnection() {
+    /// Another user of single sign-on needs a new session with the provider, or the provider signs the same user in again.
+    if (session && session.sso) {
+        signOut();
+        return;
+    }
     const previous = session ? `${session.user} at ${session.url}` : '';
     endSession();
     showLoginNotice(`Signed out of ${previous}. Sign in as another user. All panels were closed.`, true);
@@ -2443,6 +2477,8 @@ function adminChecks(db) {
         write_dap_deploy: db ? grant(`INSERT ON ${table('dap_owned')}`) : null,
         write_dap_tests: db ? grant(`INSERT ON ${table('dap_access_tests')}`) : null,
         read_policy: db ? read(table('component_policy')) : null,
+        read_idp: db ? read(table('idp_providers')) : null,
+        write_idp: db ? grant(`INSERT ON ${table('idp_providers')}`) : null,
         read_protected: db ? read(table('protected_accounts')) : null,
         write_audit: db ? grant(`INSERT ON ${table('audit_log')}`) : null,
         write_policy: db ? grant(`INSERT ON ${table('component_policy')}`) : null,
@@ -2688,6 +2724,8 @@ const ADMIN_NATIVE = {
     'admin-audit': 'SELECT on the console audit log and on system.query_log',
     'admin-backups': 'SELECT on the backup tables to read; BACKUP, READ and WRITE on the destinations, and INSERT on the backup tables to act',
     'admin-clusters': 'SELECT on the cluster tables to read; the cluster capabilities (INSERT(<capability>) ON cluster_capabilities), checked again by the cluster agent',
+    'idp-ldap': 'SELECT on system.user_directories to read; the directories are server configuration, which the console generates but does not change',
+    'idp-sso': 'SELECT on the identity provider table to read; INSERT on it to change the provider settings and record connection tests',
 };
 for (const c of COMPONENTS.filter(c => c.kind === 'admin')) {
     if (ADMIN_NATIVE[c.id]) COMPONENT_NATIVE[c.id] = {integration: `An administration page. The policy lists or hides it in the console; every action on it is a statement the server authorizes: ${ADMIN_NATIVE[c.id]}.`};
@@ -3309,7 +3347,7 @@ function renderUserList(root, page) {
         h('p', {className: 'note'}, 'Database users of this server. Signing in to the console uses these users. A user here is not an account '
             + 'in ClickStack or other separately deployed services, and creating one does not give access to them. '
             + 'ClickHouse does not store e-mail addresses, creation dates, or last logins of users, so they are not shown.'),
-        scopedNote('USER'), scopeControl(), directorySignInBox(page),
+        scopedNote('USER'), scopeControl(), identityProvidersNote(),
         h('div', {className: 'toolbar'}, adminField('Search', search)),
         results);
     let timer = null;
@@ -3720,7 +3758,7 @@ function directorySignInBox(page) {
     const directories = ldapDirectories();
     const box = h('div', {className: 'box'}, h('div', {className: 'admin-head'}, h('h2', {}, 'Directory sign-in (LDAP)'), h('span', {className: 'spacer'}),
         directories.length ? button('Test sign-in…', () => testDirectorySignIn(), {className: 'small'}) : null,
-        button(directories.length ? 'Configuration…' : 'Configure LDAP…', () => ldapConfigDialog(directories[0]), {className: 'small'})));
+        button(directories.length ? 'Add a directory…' : 'Configure LDAP…', () => ldapConfigDialog(null), {className: 'small'})));
     if (!session.admin.can.read_directories) {
         box.append(paragraph('Your user cannot read system.user_directories, so the console cannot tell whether an LDAP directory is configured.'));
         return box;
@@ -3743,7 +3781,8 @@ function directorySignInBox(page) {
             const defaults = d.params.roles || [];
             const missing = defaults.filter(r => !roles.has(r));
             const before = order.slice(0, order.indexOf(d.name)).filter(Boolean);
-            return h('div', {}, kvList([
+            return h('div', {className: 'idp-directory'}, h('div', {className: 'actions-row'},
+                h('h3', {}, d.name), h('span', {className: 'spacer'}), button('Configuration…', () => ldapConfigDialog(d), {className: 'small'})), kvList([
                 ['Directory', `${d.name} (precedence ${d.precedence})`],
                 ['LDAP server', h('code', {}, d.params.server || '—')],
                 ['Default roles', defaults.length ? chips(defaults, r => badge(r, roles.has(r) ? 'ok' : 'bad', roles.has(r) ? null : 'This role does not exist: create it, or the users get nothing from it.'))
@@ -3901,6 +3940,742 @@ function ldapConfigDialog(existing) {
             h('p', {className: 'note'}, 'A group whose attribute is "<prefix>analysts" gives the role analysts. Groups without the prefix are ignored. The roles must exist.')),
         error, output, h('div', {className: 'actions-row'}, copy),
     ], [button('Close', closeDialog, {className: 'primary'})]);
+}
+
+/// --- Identity providers ---
+///
+/// How users sign in, besides the users and passwords managed on the Users page:
+/// - LDAP: user directories of the server (OpenLDAP, Active Directory), part of the server configuration. The console
+///   shows and tests them, and generates their configuration.
+/// - SSO: an OpenID Connect provider (Keycloak). Its settings are kept in the console table `idp_providers`; the
+///   console tests the provider and a sign-in with it. The provider's tokens are never stored.
+
+/// On the Users page: where the identity providers moved.
+function identityProvidersNote() {
+    const directories = ldapDirectories();
+    const ldap = COMPONENTS_BY_ID.get('idp-ldap');
+    const sso = COMPONENTS_BY_ID.get('idp-sso');
+    const link = (c, text) => adminComponentState(c).status === 'available' ? adminLink(text, c.id) : text;
+    return h('p', {className: 'note'}, 'Users can also come from identity providers: ', link(ldap, 'LDAP'),
+        directories.length ? ` (${directories.length === 1 ? 'one directory' : `${directories.length} directories`} configured)` : ' (none configured)',
+        ' and ', link(sso, 'SSO (Keycloak)'), ', under Identity Providers. Directory users appear in this list, read-only, once they have signed in.');
+}
+
+ADMIN_PAGES.ldap = (root, route, page) => {
+    const c = page.component;
+    put(root, pageHeader(c, 'LDAP', null, [button('Refresh', reloadAdmin)]),
+        h('p', {className: 'note'}, 'LDAP user directories of this server: OpenLDAP, Active Directory, or another LDAP directory. Their users sign in with '
+            + 'their directory password and get roles from their groups; the users and roles of the Users page keep working. A directory is part of the '
+            + 'server configuration: the console shows it, tests a sign-in through it, and generates its configuration, but does not change the server.'),
+        directorySignInBox(page), ldapUsersBox(page), ldapAttributesBox());
+};
+
+/// The directory users the server knows of: an LDAP user exists in system.users from the first sign-in after the start.
+function ldapUsersBox(page) {
+    const directories = ldapDirectories();
+    if (!directories.length || !session.admin.can.read_users) return null;
+    const content = h('div', {}, h('span', {className: 'spinner'}));
+    adminRows('SELECT name, storage, arraySort(default_roles_list) AS roles FROM system.users WHERE storage IN {s:Array(String)} ORDER BY storage, name',
+        {s: directories.map(d => d.name)}).then(rows => {
+        if (!isCurrent(page)) return;
+        content.replaceChildren(rows.length ? dataTable([
+            {title: 'User', render: r => adminLink(r.name, 'admin-users', r.name)},
+            {title: 'Directory', render: r => r.storage},
+        ], rows, null, 'Directory users') : paragraph('No directory user has signed in since the server started.'));
+    }, e => { if (!(e instanceof AdminSessionChanged)) content.replaceChildren(errorBox(e)); });
+    return h('div', {className: 'box'}, h('h2', {}, 'Directory users seen since the start'), content);
+}
+
+function ldapAttributesBox() {
+    const dap = COMPONENTS_BY_ID.get('admin-data-access');
+    return h('div', {className: 'box'}, h('h2', {}, 'Attributes from the directory'),
+        h('p', {}, 'Data Access Policies can take user attributes, such as the department, from the same directory: define the attribute with the source ldap on ',
+            adminComponentState(dap).status === 'available' ? adminLink('the Attributes tab', 'admin-data-access', null, 'attributes') : 'the Attributes tab of Data Access Policies',
+            ', and run the access policy worker with LDAP_ATTRIBUTES_URL (LDAPS or StartTLS). The worker reads the values; the console does not connect to the directory.'));
+}
+
+/// --- Identity providers: SSO (OpenID Connect, Keycloak) ---
+
+const OIDC_CALLBACK_PATH = `${BASE_PATH}/oidc-callback`;
+
+/// The settings of the identity providers. A row is replaced by a new version; `deleted` removes it.
+const IDP_TABLES = {
+    idp_providers: () => `(
+    id String,
+    kind Enum8('keycloak' = 1),
+    name String,
+    enabled Bool,
+    base_url String,
+    realm String,
+    client_id String,
+    scopes String,
+    username_claim String,
+    groups_claim String,
+    role_prefix String,
+    default_roles Array(String),
+    test_result String,
+    tested_at Nullable(DateTime64(3, 'UTC')),
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY id`,
+};
+
+const IDP_COLUMNS = ['id', 'kind', 'name', 'enabled', 'base_url', 'realm', 'client_id', 'scopes', 'username_claim', 'groups_claim', 'role_prefix', 'default_roles',
+    'test_result', 'tested_at', 'deleted'];
+
+function idpIssuer(p) {
+    return `${p.base_url.replace(/\/+$/, '')}/realms/${encodeURIComponent(p.realm)}`;
+}
+
+function oidcRedirectUri() {
+    return `${location.origin}${OIDC_CALLBACK_PATH}`;
+}
+
+function isLoopbackHost(hostname) {
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+}
+
+/// Tokens and the sign-in page are reached over HTTPS. Plain HTTP only for a provider on this machine, for development.
+function idpUrlProblem(text, what) {
+    let url;
+    try {
+        url = new URL(text);
+    } catch (e) {
+        return `Enter the URL of ${what}, for example https://keycloak.example.com.`;
+    }
+    if (url.username || url.password || url.search || url.hash) return `The URL of ${what} cannot contain credentials, a query, or a fragment.`;
+    if (url.protocol === 'https:') return null;
+    if (url.protocol === 'http:' && isLoopbackHost(url.hostname)) return null;
+    return `${what} must be reached over HTTPS. Plain HTTP is accepted only on localhost, for development.`;
+}
+
+function idpRowStep(row, description, removal = false) {
+    const data = Object.fromEntries(IDP_COLUMNS.map(k => [k, row[k]]));
+    data.tested_at = row.tested_at || null;
+    data.deleted = removal;
+    return {description, sql: `INSERT INTO ${quoteIdentifier(session.admin.db)}.idp_providers (${IDP_COLUMNS.join(', ')}) FORMAT JSONEachRow\n${JSON.stringify(data)}`};
+}
+
+async function loadIdpProviders() {
+    const rows = await adminRows(`SELECT ${IDP_COLUMNS.join(', ')}, updated_at, updated_by FROM ${quoteIdentifier(session.admin.db)}.idp_providers FINAL
+        WHERE NOT deleted ORDER BY name`);
+    return rows.map(r => ({...r, enabled: r.enabled === true || r.enabled === 'true' || Number(r.enabled) === 1, test: parseJSON(r.test_result, null)}));
+}
+
+function idpSetupBox() {
+    const admin = session.admin;
+    const box = h('div', {className: 'box'}, h('h2', {}, 'Set up single sign-on'),
+        paragraph(`The settings of the identity providers are kept in the table ${admin.db}.idp_providers. Setting up creates it; it does not add a provider.`));
+    put(box, h('div', {className: 'actions-row'}, button('Set up', () => {
+        const quoted = quoteIdentifier(admin.db);
+        reviewPlan({action: 'setup_identity_providers', target_type: 'platform', target_name: admin.db, summary: `Set up identity providers in ${admin.db}`, local_only: true,
+            steps: [{description: `Create the database ${admin.db}`, sql: `CREATE DATABASE IF NOT EXISTS ${quoted}`},
+                ...Object.entries(IDP_TABLES).map(([table, ddl]) => ({description: `Create the table ${admin.db}.${table}`,
+                    sql: `CREATE TABLE IF NOT EXISTS ${quoted}.${quoteIdentifier(table)}\n${ddl()}`}))],
+            recovery: 'The statements use IF NOT EXISTS: run the setup again after fixing the error.', onclose: reloadAdminContext});
+    }, {className: 'primary', disabled: !admin.can.setup, title: admin.can.setup ? null : `Needs CREATE TABLE on ${admin.db}.*.`})));
+    if (!admin.can.setup) box.append(paragraph('Your user cannot read the identity providers, and cannot set them up.'));
+    return box;
+}
+
+ADMIN_PAGES.sso = (root, route, page) => {
+    const c = page.component;
+    const admin = session.admin;
+    const body = h('div', {});
+    put(root, pageHeader(c, 'SSO (Keycloak)', null, [button('Refresh', reloadAdmin),
+            admin.can.read_idp && admin.can.write_idp ? button('Add Keycloak…', () => idpDialog(null), {className: 'primary'}) : null]),
+        h('p', {className: 'note'}, 'Single sign-on with Keycloak, over OpenID Connect: the console signs users in with the Authorization Code flow and PKCE, as a '
+            + 'public client, so no client secret is kept in the browser. Here you keep the provider settings, test the connection, and try a sign-in; '
+            + 'the tokens of a test are checked and then dropped, never stored.'),
+        body);
+    if (!admin.can.read_idp) {
+        put(body, idpSetupBox());
+        return;
+    }
+    loadInto(page, body, loadIdpProviders, providers => [
+        providers.length ? providers.map(p => idpProviderBox(p, page)) : h('div', {className: 'box'}, h('h2', {}, 'No identity provider'),
+            paragraph('Add Keycloak with the URL of the server, the realm, and the client of the console. The client must be public, with the standard flow, '
+                + 'PKCE (S256), the redirect URI below, and the origin of the console as a web origin.'),
+            idpClientChecklist()),
+        idpServerSideBox(page),
+    ]);
+};
+
+/// What the Keycloak client of the console needs, with the values of this console.
+function idpClientChecklist() {
+    const copyable = text => h('code', {className: 'copyable'}, text);
+    return h('div', {}, h('h3', {}, 'The client in Keycloak'), kvList([
+        ['Client authentication', 'Off (a public client)'],
+        ['Authentication flow', 'Standard flow only; no implicit flow, no direct access grants'],
+        ['PKCE method', 'S256 (Advanced → Proof Key for Code Exchange)'],
+        ['Valid redirect URI', copyable(oidcRedirectUri())],
+        ['Valid post logout redirect URI', copyable(`${location.origin}${BASE_PATH}/login`)],
+        ['Web origin', copyable(location.origin)],
+        ['Group claim', 'A Group Membership mapper, without the full path, named after the group claim (groups)'],
+        ['Audience', 'An Audience mapper that adds the client to the access token, for the server to check later'],
+    ]));
+}
+
+function idpProviderBox(p, page) {
+    const can_write = session.admin.can.write_idp;
+    const test = p.test;
+    const result = h('div', {});
+    if (test) result.append(idpTestReport(test, `Last connection test, ${p.tested_at ? p.tested_at.replace('T', ' ').slice(0, 19) : ''} UTC`));
+    return h('div', {className: 'box'}, h('div', {className: 'admin-head'}, h('h2', {}, p.name),
+            badge(p.enabled ? 'Enabled' : 'Disabled', p.enabled ? 'ok' : ''), h('span', {className: 'spacer'}),
+            button('Test connection', () => runIdpConnectionTest(p, result), {className: 'small'}),
+            button('Test sign-in…', () => idpTestSignInDialog(p), {className: 'small'}),
+            can_write ? button('Edit…', () => idpDialog(p), {className: 'small'}) : null,
+            can_write ? button('Remove…', () => removeIdp(p), {className: 'small danger'}) : null),
+        kvList([
+            ['Provider', 'Keycloak (OpenID Connect)'],
+            ['Issuer', h('code', {}, idpIssuer(p))],
+            ['Client ID', h('code', {}, p.client_id)],
+            ['Scopes', p.scopes],
+            ['User name claim', h('code', {}, p.username_claim)],
+            ['Group claim', p.groups_claim ? h('code', {}, p.groups_claim) : h('span', {className: 'note'}, 'none: only the default roles')],
+            ['Roles from groups', p.groups_claim ? (p.role_prefix ? `A group "${p.role_prefix}<role>" gives the role <role>; other groups are ignored` : 'Each group is a role name') : '—'],
+            ['Default roles', chips(p.default_roles || [])],
+            ['Redirect URI', h('code', {}, oidcRedirectUri())],
+            ['Changed', `${String(p.updated_at).replace('T', ' ').slice(0, 19)} UTC by ${p.updated_by}`],
+        ]), result);
+}
+
+function idpDialog(existing) {
+    const field = (value, props = {}) => h('input', {type: 'text', value: value ?? '', autocomplete: 'off', spellcheck: false, autocapitalize: 'off', ...props});
+    const p = existing || {};
+    const f = {
+        name: field(p.name || 'Keycloak'),
+        base_url: field(p.base_url || '', {placeholder: 'https://keycloak.example.com'}),
+        realm: field(p.realm || ''),
+        client_id: field(p.client_id || 'clickhouse-console'),
+        scopes: field(p.scopes || 'openid profile email'),
+        username_claim: field(p.username_claim || 'preferred_username'),
+        groups_claim: field(p.groups_claim === undefined ? 'groups' : p.groups_claim),
+        role_prefix: field(p.role_prefix === undefined ? 'clickhouse-' : p.role_prefix),
+        default_roles: field((p.default_roles || []).join(', '), {placeholder: 'roles every SSO user gets, comma-separated'}),
+    };
+    const enabled = checkbox('Enabled', existing ? existing.enabled : true);
+    const issuer = h('code', {});
+    const update = () => { issuer.textContent = f.base_url.value.trim() && f.realm.value.trim() ? idpIssuer({base_url: f.base_url.value.trim(), realm: f.realm.value.trim()}) : '—'; };
+    for (const input of [f.base_url, f.realm]) input.addEventListener('input', update);
+    update();
+    formDialog(existing ? `Edit ${existing.name}` : 'Add Keycloak', [
+        h('div', {className: 'form-grid'}, adminField('Name', f.name), adminField('Client ID', f.client_id)),
+        adminField('Keycloak URL', f.base_url, 'The address of the Keycloak server, without /realms. HTTPS; plain HTTP only on localhost.'),
+        adminField('Realm', f.realm),
+        h('p', {className: 'note'}, 'Issuer: ', issuer),
+        adminField('Scopes', f.scopes, 'Must include openid.'),
+        h('div', {className: 'form-grid'}, adminField('User name claim', f.username_claim, 'The claim that is the ClickHouse user name.'),
+            adminField('Group claim', f.groups_claim, 'Empty for none.'), adminField('Role prefix', f.role_prefix)),
+        adminField('Default roles', f.default_roles),
+        enabled.element,
+        idpClientChecklist(),
+    ], existing ? 'Save' : 'Add', async () => {
+        const v = Object.fromEntries(Object.entries(f).map(([k, input]) => [k, input.value.trim()]));
+        if (!v.name) return 'Enter a name.';
+        const url_problem = idpUrlProblem(v.base_url, 'Keycloak');
+        if (url_problem) return url_problem;
+        if (/\/realms(\/|$)/.test(new URL(v.base_url).pathname)) return 'Enter the Keycloak URL without /realms/…: the realm has its own field.';
+        if (!/^[A-Za-z0-9_.-]+$/.test(v.realm)) return 'Enter the realm name: letters, digits, _, . and -.';
+        if (!/^[\x21-\x7e]+$/.test(v.client_id)) return 'Enter the client ID of the console in the realm.';
+        if (!v.scopes.split(/\s+/).includes('openid')) return 'The scopes must include openid.';
+        if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(v.username_claim)) return 'Enter the name of the user name claim, for example preferred_username.';
+        if (v.groups_claim && !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(v.groups_claim)) return 'Enter the name of the group claim, or leave it empty.';
+        const default_roles = v.default_roles.split(',').map(r => r.trim()).filter(Boolean);
+        if (default_roles.some(r => !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(r))) return 'Role names are letters, digits, _ and -.';
+        const row = {id: existing ? existing.id : crypto.randomUUID(), kind: 'keycloak', name: v.name, enabled: enabled.input.checked,
+            base_url: v.base_url.replace(/\/+$/, ''), realm: v.realm, client_id: v.client_id, scopes: v.scopes.split(/\s+/).join(' '),
+            username_claim: v.username_claim, groups_claim: v.groups_claim, role_prefix: v.role_prefix, default_roles,
+            /// A test describes the settings it ran with: changed settings need a new one.
+            test_result: '', tested_at: null};
+        const summary = existing ? `Change the identity provider ${v.name}` : `Add the identity provider ${v.name}`;
+        return {action: existing ? 'edit_identity_provider' : 'add_identity_provider', target_type: 'identity_provider', target_name: v.name, summary,
+            local_only: true, steps: [idpRowStep(row, summary)],
+            audit_details: {issuer: idpIssuer(row), client_id: row.client_id, enabled: row.enabled}};
+    });
+}
+
+function removeIdp(p) {
+    reviewPlan({action: 'remove_identity_provider', target_type: 'identity_provider', target_name: p.name, summary: `Remove the identity provider ${p.name}`,
+        local_only: true, danger: true, confirm_text: 'Remove', steps: [idpRowStep(p, `Remove the settings of ${p.name}`, true)],
+        warning: 'Only the settings in the console are removed. The realm and the client in Keycloak are not changed.'});
+}
+
+/// --- SSO: connection test ---
+
+async function fetchProviderJSON(url, what) {
+    let response;
+    try {
+        response = await fetch(url, {credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(10000)});
+    } catch (e) {
+        throw new Error(`${what}: no answer from ${url} (${e.name === 'TimeoutError' ? 'timed out after 10 seconds' : 'the server cannot be reached, or it does not allow this console\'s origin (CORS)'}).`);
+    }
+    if (!response.ok) throw new Error(`${what}: ${url} answered HTTP ${response.status}${response.status === 404 ? ' (check the URL and the realm)' : ''}.`);
+    try {
+        return await response.json();
+    } catch (e) {
+        throw new Error(`${what}: ${url} did not return JSON.`);
+    }
+}
+
+/// Keycloak answers an unknown realm with 404 and no CORS headers, which the browser reports as a network error, as it
+/// does for a server it cannot reach. The realm master always exists: if it answers, the server is right and the realm is not.
+async function idpDiscoveryProblem(p, error) {
+    try {
+        await fetchProviderJSON(`${p.base_url.replace(/\/+$/, '')}/realms/master/.well-known/openid-configuration`, 'Discovery');
+    } catch (e) {
+        return error.message;
+    }
+    return `Keycloak answers at ${p.base_url}, but has no realm ${p.realm}: check the name of the realm (it is case-sensitive).`;
+}
+
+/// Checks the provider from the browser, as the console will use it: the discovery document, its endpoints, the signing
+/// keys, and the roles the groups map to. The client itself (redirect URI, web origin, PKCE) is checked by a test sign-in.
+async function idpConnectionTest(p) {
+    const checks = [];
+    const add = (name, status, detail) => checks.push({name, status, detail});
+    const issuer = idpIssuer(p);
+    let discovery = null;
+    let jwks = null;
+    try {
+        discovery = await fetchProviderJSON(`${issuer}/.well-known/openid-configuration`, 'Discovery');
+        add('Discovery document', 'ok', `${issuer}/.well-known/openid-configuration`);
+    } catch (e) {
+        add('Discovery document', 'bad', await idpDiscoveryProblem(p, e));
+    }
+    if (discovery) {
+        add('Issuer', discovery.issuer === issuer ? 'ok' : 'bad', discovery.issuer === issuer ? discovery.issuer
+            : `The provider reports the issuer ${discovery.issuer}, not ${issuer}: tokens would be refused. Check the hostname setting of Keycloak (KC_HOSTNAME).`);
+        const code = (discovery.response_types_supported || []).includes('code');
+        add('Authorization Code flow', code ? 'ok' : 'bad', code ? 'response type code supported' : 'The provider does not offer the response type code.');
+        const s256 = (discovery.code_challenge_methods_supported || []).includes('S256');
+        add('PKCE', s256 ? 'ok' : 'bad', s256 ? 'S256 supported' : 'The provider does not report PKCE with S256.');
+        const endpoints = ['authorization_endpoint', 'token_endpoint', 'jwks_uri', 'end_session_endpoint'].filter(k => discovery[k]);
+        const insecure = endpoints.filter(k => idpUrlProblem(discovery[k], k));
+        add('Endpoints', insecure.length ? 'bad' : 'ok', insecure.length ? `Not over HTTPS: ${insecure.join(', ')}.` : endpoints.map(k => k.replace(/_/g, ' ')).join(', '));
+        try {
+            jwks = await fetchProviderJSON(discovery.jwks_uri, 'Signing keys');
+            const keys = (jwks.keys || []).filter(k => (k.use || 'sig') === 'sig' && ['RS256', 'ES256', 'PS256'].includes(k.alg || (k.kty === 'RSA' ? 'RS256' : '')));
+            add('Signing keys', keys.length ? 'ok' : 'bad', keys.length ? `${keys.length} signing key${keys.length === 1 ? '' : 's'}: ${[...new Set(keys.map(k => k.alg || 'RS256'))].join(', ')}`
+                : 'No signing key that the console can verify (RS256, ES256, PS256).');
+        } catch (e) {
+            add('Signing keys', 'bad', e.message);
+        }
+    }
+    const roles = new Set((await adminRows('SELECT name FROM system.roles').catch(() => [])).map(r => r.name));
+    const missing = (p.default_roles || []).filter(r => !roles.has(r));
+    if ((p.default_roles || []).length) add('Default roles', missing.length ? 'bad' : 'ok', missing.length ? `Do not exist: ${missing.join(', ')}.` : p.default_roles.join(', '));
+    if (p.groups_claim) {
+        const mapped = [...roles].sort().map(r => `${p.role_prefix}${r}`);
+        add('Roles for groups', roles.size ? 'ok' : 'warn', roles.size ? `A group named ${p.role_prefix ? `${p.role_prefix}<role>` : '<role>'} maps to an existing role, for example ${mapped.slice(0, 3).join(', ')}.`
+            : 'No role exists yet: create the roles the groups stand for.');
+    }
+    const ok = checks.every(c => c.status !== 'bad');
+    return {ok, checks, issuer, at: new Date().toISOString(), discovery};
+}
+
+function idpTestReport(test, title) {
+    const label = {ok: ['OK', 'ok'], bad: ['Failed', 'bad'], warn: ['Check', 'warn']};
+    return h('div', {className: `message ${test.ok ? 'info' : 'error'}`}, h('strong', {}, title), dataTable([
+        {title: 'Check', render: c => c.name},
+        {title: 'Result', render: c => badge(...label[c.status] || [c.status])},
+        {title: 'Detail', render: c => c.detail},
+    ], test.checks, null, 'Connection test'));
+}
+
+async function runIdpConnectionTest(p, container) {
+    container.replaceChildren(loadingBox('Testing the connection…'));
+    const test = await idpConnectionTest(p);
+    const stored = {ok: test.ok, checks: test.checks, issuer: test.issuer};
+    container.replaceChildren(idpTestReport(stored, test.ok ? 'The provider is reachable and set up for the console' : 'The connection test found problems'));
+    const correlation_id = crypto.randomUUID();
+    if (session.admin.can.write_idp) {
+        await adminText(idpRowStep({...p, test_result: JSON.stringify(stored), tested_at: test.at.replace('T', ' ').replace('Z', '')}, '').sql).catch(e => {
+            container.append(errorBox(e, 'The result could not be stored:'));
+        });
+    }
+    if (session.admin.can.write_audit) {
+        await writeAudit(session, {action: 'test_identity_provider', target_type: 'identity_provider', target_name: p.name,
+            summary: `Test the connection to ${p.name}: ${test.ok ? 'passed' : 'failed'}`, audit_details: {issuer: test.issuer}},
+        {correlation_id, scope: 'local', result: test.ok ? 'success' : 'failure', steps: []},
+        test.ok ? '' : test.checks.filter(c => c.status === 'bad').map(c => `${c.name}: ${c.detail}`).join(' ')).catch(() => {});
+    }
+}
+
+/// --- SSO: test sign-in (Authorization Code with PKCE, in a separate window) ---
+
+function base64url(bytes) {
+    let text = '';
+    for (const byte of bytes) text += String.fromCharCode(byte);
+    return btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64urlDecode(text) {
+    const padded = text.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - text.length % 4) % 4);
+    return Uint8Array.from(atob(padded), ch => ch.charCodeAt(0));
+}
+
+const randomToken = () => base64url(crypto.getRandomValues(new Uint8Array(32)));
+
+/// Verifies the signature of a JSON Web Token with the provider's keys, and returns its claims. Only asymmetric
+/// algorithms: a token signed with `none` or a shared secret is refused.
+async function verifyJwt(token, jwks) {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 3) throw new Error('The token is not a signed JWT.');
+    const header = JSON.parse(new TextDecoder().decode(base64urlDecode(parts[0])));
+    const algorithms = {
+        RS256: [{name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256'}, {name: 'RSASSA-PKCS1-v1_5'}],
+        PS256: [{name: 'RSA-PSS', hash: 'SHA-256'}, {name: 'RSA-PSS', saltLength: 32}],
+        ES256: [{name: 'ECDSA', namedCurve: 'P-256'}, {name: 'ECDSA', hash: 'SHA-256'}],
+    };
+    if (!algorithms[header.alg]) throw new Error(`The token is signed with ${header.alg}, which the console does not accept.`);
+    const jwk = (jwks.keys || []).find(k => k.kid === header.kid && (k.use || 'sig') === 'sig');
+    if (!jwk) throw new Error(`No signing key ${header.kid} among the provider's keys.`);
+    const [import_params, verify_params] = algorithms[header.alg];
+    const key = await crypto.subtle.importKey('jwk', {kty: jwk.kty, n: jwk.n, e: jwk.e, crv: jwk.crv, x: jwk.x, y: jwk.y}, import_params, false, ['verify']);
+    const valid = await crypto.subtle.verify(verify_params, key, base64urlDecode(parts[2]), new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
+    if (!valid) throw new Error('The signature of the token is not valid.');
+    return JSON.parse(new TextDecoder().decode(base64urlDecode(parts[1])));
+}
+
+/// Points the sign-in window at the provider's sign-in page, and waits for the answer that the window posts from the
+/// redirect URI. The window is opened by the caller, in the click handler. `settings`: `{client_id, scopes, prompt}`.
+function oidcAuthorize(discovery, settings, popup) {
+    const state = randomToken();
+    const nonce = randomToken();
+    const verifier = randomToken();
+    return (async () => {
+        const challenge = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+        const url = new URL(discovery.authorization_endpoint);
+        for (const [k, v] of Object.entries({client_id: settings.client_id, response_type: 'code', redirect_uri: oidcRedirectUri(), scope: settings.scopes, state, nonce,
+            code_challenge: challenge, code_challenge_method: 'S256'})) url.searchParams.set(k, v);
+        if (settings.prompt) url.searchParams.set('prompt', settings.prompt);
+        popup.location.href = url.href;
+        const answer = await new Promise((resolve, reject) => {
+            const channel = new BroadcastChannel('console-oidc');
+            const finish = (fn, value) => {
+                clearTimeout(timeout);
+                clearInterval(watch);
+                channel.close();
+                fn(value);
+            };
+            const timeout = setTimeout(() => finish(reject, new Error('No answer from the sign-in window within 5 minutes.')), 300000);
+            /// The window may close itself right after it posted its answer: give the message a moment.
+            const watch = setInterval(() => {
+                if (popup.closed) setTimeout(() => finish(reject, new Error('The sign-in window was closed before the sign-in finished.')), 1500);
+            }, 1000);
+            channel.onmessage = e => {
+                if (e.data && e.data.state === state) finish(resolve, e.data);
+            };
+        });
+        return {answer, verifier, nonce};
+    })();
+}
+
+/// A sign-in with an OpenID Connect provider: Authorization Code with PKCE in `popup`, the code exchanged for tokens, and the
+/// ID token verified (signature, issuer, audience, expiry, nonce). `settings`: `{issuer, client_id, scopes, prompt}`.
+/// Returns the verified claims of both tokens, the tokens, and the provider's discovery document.
+async function oidcSignIn(settings, popup, discovery) {
+    const {answer, verifier, nonce} = await oidcAuthorize(discovery, settings, popup);
+    if (answer.error) throw new Error(`The provider refused the sign-in: ${answer.error}${answer.error_description ? ` (${answer.error_description})` : ''}.`);
+    /// RFC 9207: the answer names the issuer that sent it, against mix-up attacks.
+    if (answer.iss && answer.iss !== discovery.issuer) throw new Error(`The answer comes from ${answer.iss}, not from ${discovery.issuer}.`);
+    let response;
+    try {
+        response = await fetch(discovery.token_endpoint, {method: 'POST', credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15000),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: new URLSearchParams({grant_type: 'authorization_code', client_id: settings.client_id, code: answer.code, redirect_uri: oidcRedirectUri(), code_verifier: verifier})});
+    } catch (e) {
+        throw new Error(`The token request was blocked. Add ${location.origin} (or +) to the web origins of the client ${settings.client_id}.`);
+    }
+    const tokens = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`The token request was refused: ${tokens.error || `HTTP ${response.status}`}${tokens.error_description ? ` (${tokens.error_description})` : ''}.`);
+    const jwks = await fetchProviderJSON(discovery.jwks_uri, 'Signing keys');
+    const id = await verifyJwt(tokens.id_token, jwks);
+    const now = Date.now() / 1000;
+    const audiences = [].concat(id.aud || []);
+    const problems = [];
+    if (id.iss !== discovery.issuer) problems.push(`the ID token is from ${id.iss}`);
+    if (!audiences.includes(settings.client_id)) problems.push(`the ID token is not for the client ${settings.client_id}`);
+    if (audiences.length > 1 && id.azp !== settings.client_id) problems.push('the ID token was issued to another client (azp)');
+    if (!(id.exp > now)) problems.push('the ID token has expired');
+    if (id.iat && id.iat > now + 60) problems.push('the ID token is issued in the future: check the clocks');
+    if (id.nonce !== nonce) problems.push('the nonce does not match');
+    if (problems.length) throw new Error(`The ID token is not valid: ${problems.join('; ')}.`);
+    /// The access token is what the server checks: its audience must name the console's client.
+    let access = null;
+    let access_problem = null;
+    try {
+        access = await verifyJwt(tokens.access_token, jwks);
+        if (![].concat(access.aud || []).includes(settings.client_id) && access.azp !== settings.client_id) access_problem = `its audience does not include ${settings.client_id}: add an Audience mapper`;
+    } catch (e) {
+        access_problem = e.message;
+    }
+    return {id, access, access_problem, tokens, discovery, expires_in: tokens.expires_in};
+}
+
+async function oidcTestSignIn(p, popup) {
+    let discovery;
+    try {
+        discovery = await fetchProviderJSON(`${idpIssuer(p)}/.well-known/openid-configuration`, 'Discovery');
+    } catch (e) {
+        popup.close();
+        throw new Error(await idpDiscoveryProblem(p, e));
+    }
+    /// prompt=login: a test asks for the password every time, even when the browser has a session with the provider.
+    return oidcSignIn({issuer: idpIssuer(p), client_id: p.client_id, scopes: p.scopes, prompt: 'login'}, popup, discovery);
+}
+
+function idpTestSignInDialog(p) {
+    const result = h('div', {});
+    const run = async () => {
+        /// Opened here, synchronously in the click: a window opened after an await is blocked as a pop-up.
+        const popup = window.open('about:blank', 'console-oidc-test', 'popup,width=520,height=720');
+        if (!popup) {
+            result.replaceChildren(h('div', {className: 'message error', role: 'alert'}, 'The browser blocked the sign-in window: allow pop-ups for this page, and try again.'));
+            return;
+        }
+        result.replaceChildren(loadingBox('Waiting for the sign-in in the other window…'));
+        let outcome;
+        try {
+            outcome = {ok: true, ...await oidcTestSignIn(p, popup)};
+        } catch (e) {
+            outcome = {ok: false, error: e.message};
+        }
+        if (!outcome.ok) {
+            result.replaceChildren(h('div', {className: 'message error', role: 'alert'}, outcome.error));
+        } else {
+            result.replaceChildren(await idpSignInReport(p, outcome));
+        }
+        if (session.admin.can.write_audit) {
+            const who = outcome.ok ? String(outcome.id[p.username_claim] || '') : '';
+            await writeAudit(session, {action: 'test_identity_provider_sign_in', target_type: 'identity_provider', target_name: p.name,
+                summary: `Test a sign-in with ${p.name}: ${outcome.ok ? `accepted, as ${who}` : 'refused'}`, audit_details: {issuer: idpIssuer(p), user: who}},
+            {correlation_id: crypto.randomUUID(), scope: 'local', result: outcome.ok ? 'success' : 'failure', steps: []}, outcome.ok ? '' : outcome.error).catch(() => {});
+        }
+    };
+    openDialog(`Test a sign-in with ${p.name}`, [
+        paragraph('Opens the Keycloak sign-in page in a new window. Sign in there as the user to test: the console then checks the answer and the tokens '
+            + '(signature, issuer, audience, expiry, nonce) and shows who signed in and the roles they would get. The tokens are dropped afterwards: they are '
+            + 'not stored, shown, or recorded. Keycloak asks for the password every time (prompt=login).'),
+        result,
+    ], [button('Close', closeDialog), button('Sign in with Keycloak', run, {className: 'primary'})]);
+}
+
+async function idpSignInReport(p, outcome) {
+    const user = String(outcome.id[p.username_claim] ?? '');
+    const groups_value = p.groups_claim ? (outcome.id[p.groups_claim] ?? (outcome.access || {})[p.groups_claim]) : null;
+    const groups = Array.isArray(groups_value) ? groups_value.map(String) : (groups_value ? [String(groups_value)] : []);
+    const from_groups = groups.filter(g => !p.role_prefix || g.startsWith(p.role_prefix)).map(g => g.slice(p.role_prefix.length).replace(/^\//, ''));
+    const [roles, users] = await Promise.all([
+        adminRows('SELECT name FROM system.roles').catch(() => []),
+        user ? adminRows('SELECT name, storage, auth_type FROM system.users WHERE name = {n:String}', {n: user}).catch(() => []) : [],
+    ]);
+    const existing = new Set(roles.map(r => r.name));
+    const role_chip = r => badge(r, existing.has(r) ? 'ok' : 'bad', existing.has(r) ? null : 'No such role on the server: create it, or the group gives nothing.');
+    const ch_user = users[0];
+    return h('div', {className: 'message info'}, kvList([
+        ['Signed in as', user ? h('strong', {}, user) : h('span', {className: 'message error'}, `The ID token has no claim ${p.username_claim}.`)],
+        ['Name and e-mail', [outcome.id.name, outcome.id.email].filter(Boolean).join(', ') || '—'],
+        ['Groups', p.groups_claim ? chips(groups) : 'no group claim configured'],
+        ['Roles it would get', chips([...new Set([...(p.default_roles || []), ...from_groups])], role_chip)],
+        ['ClickHouse user', ch_user ? `${ch_user.name} exists (${ch_user.storage}, authentication ${ch_user.auth_type})`
+            : 'No user of that name on this server.'],
+        ['Access token', outcome.access_problem ? h('span', {className: 'badge bad'}, `Not usable by the server: ${outcome.access_problem}.`)
+            : `Valid for ${outcome.expires_in} seconds; audience ${[].concat(outcome.access.aud || []).join(', ')}.`],
+        ['Tokens', 'Checked and dropped: not stored or recorded.'],
+    ]));
+}
+
+/// In the window that the provider redirects to: post the answer to the console page that opened the window, then close.
+/// The answer is only the authorization code and the state: without the PKCE verifier, which stays in the opening page,
+/// the code cannot be exchanged for a token.
+function finishOidcCallback() {
+    const params = new URLSearchParams(location.search);
+    const answer = Object.fromEntries(['code', 'state', 'error', 'error_description', 'iss'].filter(k => params.has(k)).map(k => [k, params.get(k)]));
+    history.replaceState(null, '', OIDC_CALLBACK_PATH);
+    if (answer.state) {
+        const channel = new BroadcastChannel('console-oidc');
+        channel.postMessage(answer);
+        channel.close();
+    }
+    document.body.replaceChildren(h('main', {className: 'oidc-callback'}, h('p', {}, answer.state
+        ? 'The sign-in has finished: you can close this window.' : 'This page receives the answer of an identity provider. Open the console instead.')));
+    if (answer.state) setTimeout(() => window.close(), 300);
+}
+
+/// --- Single sign-on on the sign-in page ---
+///
+/// With `web_console.sso_issuer` set in the server configuration, the sign-in page offers "Sign in with <sso_name>". The
+/// console signs in with the provider (Authorization Code with PKCE, a public client), and uses the access token as the
+/// password of the session: the server checks it through its HTTP authentication server (the token authenticator), for
+/// users IDENTIFIED WITH http. The user name is the `sso_username_claim` of the verified ID token.
+///
+/// The tokens stay in this page's memory, like a password. The access token is refreshed before it expires, and the new
+/// one is posted to the native panels; panels without that protocol (the SQL Console, the Web Terminal, ClickStack) keep
+/// the token they started with, until they are reloaded. When the provider refuses a refresh (the session ended there, or
+/// the user was disabled), the console signs out. Signing out also ends the session with the provider.
+
+function ssoSettings() {
+    if (!config.sso_issuer || !config.sso_client_id) return null;
+    return {name: config.sso_name || 'single sign-on', issuer: String(config.sso_issuer).replace(/\/+$/, ''), client_id: config.sso_client_id,
+        scopes: config.sso_scopes || 'openid profile email', username_claim: config.sso_username_claim || 'preferred_username'};
+}
+
+function updateLoginSSO() {
+    const settings = ssoSettings();
+    $('login-sso').hidden = !settings;
+    if (settings) $('login-sso-button').textContent = `Sign in with ${settings.name}`;
+}
+
+async function ssoSignIn() {
+    const settings = ssoSettings();
+    if (!settings) return;
+    /// Opened here, synchronously in the click: a window opened after an await is blocked as a pop-up.
+    const popup = window.open('about:blank', 'console-oidc-sign-in', 'popup,width=520,height=720');
+    if (!popup) {
+        showLoginError('The browser blocked the sign-in window: allow pop-ups for this page, and try again.');
+        return;
+    }
+    $('login-error').hidden = true;
+    const button = $('login-sso-button');
+    const attempt = ++login_attempt;
+    button.disabled = true;
+    button.replaceChildren(Object.assign(document.createElement('span'), {className: 'spinner'}), document.createTextNode(` Signing in with ${settings.name}…`));
+    const done = () => {
+        button.disabled = false;
+        button.textContent = `Sign in with ${settings.name}`;
+    };
+    let result;
+    try {
+        const url_check = validateServerURL(location.origin);
+        if (url_check.error) throw new Error(url_check.error);
+        const problem = idpUrlProblem(settings.issuer, 'the identity provider');
+        if (problem) throw new Error(problem);
+        let discovery;
+        try {
+            discovery = await fetchProviderJSON(`${settings.issuer}/.well-known/openid-configuration`, 'Discovery');
+        } catch (e) {
+            popup.close();
+            throw e;
+        }
+        result = await oidcSignIn(settings, popup, discovery);
+        if (result.access_problem) throw new Error(`The access token cannot be used to sign in to ClickHouse: ${result.access_problem}.`);
+        const user = String(result.id[settings.username_claim] ?? '');
+        if (!user) throw new Error(`The provider's token has no claim ${settings.username_claim}, which is the user name.`);
+        result.connection = {url: url_check.url, origin: url_check.origin, user, password: result.tokens.access_token};
+    } catch (e) {
+        if (attempt !== login_attempt) return;
+        done();
+        showLoginError(e.message);
+        return;
+    }
+    const check = await runQuery(result.connection, CHECK_QUERY, new AbortController().signal);
+    if (attempt !== login_attempt) return;
+    done();
+    if (!check.ok) {
+        showLoginError(check.kind === 'credentials'
+            ? `${settings.name} signed you in as ${result.connection.user}, but the server did not accept the sign-in. The user ${result.connection.user} must exist on the server, `
+                + 'identified with the token authenticator (IDENTIFIED WITH http), and the authenticator must be running. Ask an administrator.'
+            : check.message, check.kind === 'credentials' ? null : check.detail);
+        return;
+    }
+    startSession(result.connection, check.data[0]);
+    session.sso = {settings, discovery: result.discovery, refresh_token: result.tokens.refresh_token, id_token: result.tokens.id_token,
+        expires_in: result.tokens.expires_in, timer: null};
+    scheduleSsoRefresh(session);
+    showLoginNotice('');
+    navigate(parseRoute().next ? componentPath(parseRoute().next) : componentPath('home'), true);
+}
+
+function scheduleSsoRefresh(current, delay) {
+    clearTimeout(current.sso.timer);
+    current.sso.timer = setTimeout(() => refreshSsoToken(current), delay ?? Math.max(10, Number(current.sso.expires_in || 300) * 0.7) * 1000);
+}
+
+async function refreshSsoToken(current) {
+    if (session !== current) return;
+    let response;
+    let tokens;
+    try {
+        response = await fetch(current.sso.discovery.token_endpoint, {method: 'POST', credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15000),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: new URLSearchParams({grant_type: 'refresh_token', client_id: current.sso.settings.client_id, refresh_token: current.sso.refresh_token})});
+        tokens = await response.json().catch(() => ({}));
+    } catch (e) {
+        /// The provider cannot be reached: the current token stays valid until it expires; try again shortly.
+        if (session === current) scheduleSsoRefresh(current, 15000);
+        return;
+    }
+    if (session !== current) return;
+    if (!response.ok || !tokens.access_token) {
+        const reason = tokens.error_description || tokens.error || `HTTP ${response.status}`;
+        endSession();
+        showLoginNotice(`Your ${current.sso.settings.name} session has ended (${reason}): sign in again. All panels were closed.`, true);
+        navigate(loginPath(null), true);
+        return;
+    }
+    current.password = tokens.access_token;
+    if (tokens.refresh_token) current.sso.refresh_token = tokens.refresh_token;
+    if (tokens.id_token) current.sso.id_token = tokens.id_token;
+    current.sso.expires_in = tokens.expires_in;
+    shareCredentials(current);
+    scheduleSsoRefresh(current);
+}
+
+/// Posts new credentials to the native panels of the session, which accept them (`console-credentials`).
+function shareCredentials(current) {
+    for (const entry of frames.values()) {
+        if (entry.component.integration !== 'native' || entry.session !== current || !entry.iframe.contentWindow) continue;
+        entry.iframe.contentWindow.postMessage({type: 'console-credentials', user: current.user, password: current.password}, location.origin);
+    }
+}
+
+/// The address that ends the session with the provider and returns to the sign-in page (RP-initiated logout). The
+/// sign-in page must be a valid post-logout redirect URI of the client.
+function ssoLogoutUrl(current) {
+    const endpoint = current.sso && current.sso.discovery.end_session_endpoint;
+    if (!endpoint) return null;
+    const url = new URL(endpoint);
+    url.searchParams.set('client_id', current.sso.settings.client_id);
+    if (current.sso.id_token) url.searchParams.set('id_token_hint', current.sso.id_token);
+    url.searchParams.set('post_logout_redirect_uri', `${location.origin}${BASE_PATH}/login`);
+    return url.href;
+}
+
+/// How the server accepts these sign-ins: this build of ClickHouse does not check tokens itself, so a token authenticator
+/// (`sso_authenticator.mjs`) does, as an HTTP authentication server. Shows what the sign-in page offers, and the users
+/// identified with an HTTP authentication server.
+function idpServerSideBox(page) {
+    const settings = ssoSettings();
+    const users = h('div', {}, h('span', {className: 'spinner'}));
+    if (session.admin.can.read_users) {
+        adminRows("SELECT name, arraySort(default_roles_list) AS roles FROM system.users WHERE has(auth_type, 'http') ORDER BY name").then(rows => {
+            if (!isCurrent(page)) return;
+            users.replaceChildren(rows.length ? dataTable([
+                {title: 'User', render: r => adminLink(r.name, 'admin-users', r.name)},
+                {title: 'Default roles', render: r => chips(r.roles || [])},
+            ], rows, null, 'Users identified with an HTTP authentication server')
+                : paragraph('No user is identified with an HTTP authentication server yet: the user sync of the authenticator creates them, or CREATE USER … IDENTIFIED WITH http SERVER \'sso\'.'));
+        }, e => { if (!(e instanceof AdminSessionChanged)) users.replaceChildren(errorBox(e)); });
+    } else {
+        users.replaceChildren(paragraph('Your user cannot read the users of the server.'));
+    }
+    return h('div', {className: 'box'}, h('h2', {}, 'Signing in to ClickHouse'),
+        h('p', {}, 'The console sends every query to the server, which authenticates each one. This build of ClickHouse does not check tokens itself, so the '
+            + 'token authenticator (utils/web-console/sso_authenticator.mjs) does, as an HTTP authentication server: users IDENTIFIED WITH http SERVER \'sso\' sign '
+            + 'in with their access token, which it checks with the keys of the provider (signature, issuer, client, audience, expiry, and the user name). '
+            + 'Its user sync creates those users from the groups of the provider and grants the roles of the groups.'),
+        kvList([
+            ['Sign-in page', settings ? [`Offers "Sign in with ${settings.name}", issuer `, h('code', {}, settings.issuer), ', client ', h('code', {}, settings.client_id)]
+                : h('span', {className: 'note'}, 'No single sign-on: set web_console.sso_issuer and web_console.sso_client_id in the server configuration.')],
+            ['This page', 'The providers above are for the tests. The sign-in page uses the server configuration, which it can read before anyone is signed in.'],
+        ]),
+        h('h3', {}, 'Users of single sign-on'), users);
 }
 
 async function createUserDialog() {
@@ -11402,6 +12177,7 @@ function destroyDialog(cluster, resources) {
 /// --- Startup ---
 
 $('logout-button').addEventListener('click', signOut);
+$('login-sso-button').addEventListener('click', ssoSignIn);
 $('switch-button').addEventListener('click', switchConnection);
 $('switch-button').append(icon('switch'));
 $('menu-button').append(icon('menu'));
@@ -11431,9 +12207,15 @@ async function loadConfig() {
     }
 }
 
-loadConfig().then(() => {
-    render();
-});
+/// The sign-in window of an OpenID Connect provider returns here with its answer: hand it to the console page that
+/// opened the window, and close. Nothing else of the console starts in that window.
+if (location.pathname === OIDC_CALLBACK_PATH) {
+    finishOidcCallback();
+} else {
+    loadConfig().then(() => {
+        render();
+    });
+}
 </script>
 </body>
 </html>

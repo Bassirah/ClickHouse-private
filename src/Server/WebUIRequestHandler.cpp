@@ -400,6 +400,14 @@ constexpr ConsoleDestination console_destinations[] =
     /// (`https://*.example.com`, `https://*`, `*`) that the console never matches against internal addresses. Empty: none. The server does not check the endpoint of `BACKUP ... TO S3` against
     /// `remote_url_allow_hosts`, so this list is what keeps the console from pointing backups elsewhere.
     {"backup_s3_endpoints", ""},
+    /// Single sign-on with an OpenID Connect provider (Keycloak) on the sign-in page: the issuer and the public client of
+    /// the console, which the page needs before anyone is signed in. Public values, no secret: the client has none, and
+    /// the server checks the tokens through an HTTP authentication server (`http_authentication_servers`). Empty issuer: off.
+    {"sso_name", "Keycloak"},
+    {"sso_issuer", ""},
+    {"sso_client_id", ""},
+    {"sso_scopes", "openid profile email"},
+    {"sso_username_claim", "preferred_username"},
 };
 
 String getConsoleConfigJSON(const Poco::Util::AbstractConfiguration & config)

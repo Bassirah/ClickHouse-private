@@ -490,6 +490,14 @@
         }
 
         const console_connection = getConsoleConnection();
+        /// The console refreshes short-lived credentials (single sign-on tokens) while this page is open: it posts them to
+        /// this frame only, from its own origin, for the same user.
+        window.addEventListener('message', e => {
+            if (!console_connection || e.source !== window.parent || e.origin !== location.origin) return;
+            if (e.data && e.data.type === 'console-credentials' && e.data.user === user) {
+                password = e.data.password;
+            }
+        });
         if (console_connection) {
             ({url: host, user, password} = console_connection);
             document.querySelector('.connection-params').style.display = 'none';

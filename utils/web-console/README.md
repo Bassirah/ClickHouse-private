@@ -31,8 +31,11 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/k8s_lab.sh` | Creates and deletes the Kubernetes lab: a k3d cluster with cert-manager, the ClickHouse operator, and an expandable storage class. |
 | `utils/web-console/cluster_e2e.mjs` | Browser acceptance checks of Cluster Management against a running agent: provisioning, registration, drift, scaling, failures, and retirement (Playwright; not part of the build). |
 | `utils/web-console/ldap_client.mjs` | A small LDAP v3 client (simple bind, search filters, paged results, over LDAPS or StartTLS only) with which the access policy worker reads user attributes from a directory. |
+| `utils/web-console/sso_authenticator.mjs` | Token authenticator of single sign-on: the HTTP authentication server that checks the Keycloak access tokens of the users `IDENTIFIED WITH http`, and, optionally, the sync of those users and their roles from Keycloak groups (Node.js, no packages; `sso-authenticator` in the tools image). |
+| `utils/web-console/sso_e2e.mjs` | Browser acceptance checks of the Identity Providers pages: the Keycloak settings and their checks, the connection test (including a wrong realm), a test sign-in with Authorization Code and PKCE in a separate window, a refused sign-in, and that no token reaches the server; with `--sign-in`, signing in to the console with Keycloak, the token refresh reaching a panel, a user without a ClickHouse user, signing out of Keycloak, and a user disabled in Keycloak losing access (Playwright; not part of the build). |
+| `utils/web-console/IDENTITY_PROVIDERS.md` | Assessment of identity providers for the console and the server: what the server can check, the ways to accept OpenID Connect sign-ins, what exists, and the next steps. |
 | `utils/web-console/ldap_e2e.mjs` | Browser acceptance checks of directory sign-in: the generated LDAP configuration installed on a server without one, sign-in with the directory password and roles from groups, directory changes after the cooldown, user attributes of Data Access Policies read from the directory, and the users managed with SQL next to the directory (Playwright; not part of the build). |
-| `utils/web-console/run_e2e.sh` | Runs the browser suites against a server of their own, with its own MinIO and cluster agent, started and removed for each run. |
+| `utils/web-console/run_e2e.sh` | Runs the browser suites against a server of their own, with its own MinIO, cluster agent, Vault, OpenLDAP, and Keycloak, started and removed for each run. |
 | `utils/web-console/Dockerfile` | Server image: a locally built binary on top of the official image. |
 | `utils/web-console/Dockerfile.tools`, `tools-entrypoint.sh` | Tools image: the backup worker, the cluster agent (with `docker`, Compose, and `kubectl`), and the access policy worker. |
 | `utils/web-console/build_images.sh` | Builds the images from source, end to end: checks, a Release build of the binary, then `package_images.sh`. |
@@ -143,14 +146,16 @@ node console_e2e.mjs --url http://127.0.0.1:28123 --admin alice:alicepass --limi
 
 The usual way to run the suites is `run_e2e.sh`, which runs them against a server of their own. Every run starts a
 new server with an empty data directory (HTTP 38123, native 39000, Keeper 39181), its own MinIO container (39900),
-and its own cluster agent (lab ports 32000-32999), then stops and removes them. The results depend only on the code:
+and its own cluster agent (lab ports 32000-32999), then stops and removes them. The ldap suite has an OpenLDAP of its own
+(39636), and the sso suite a Keycloak of its own (39080, the image `quay.io/keycloak/keycloak:26.7`) with a realm whose
+client registers the redirect URI of this server. The results depend only on the code:
 not on what a person or an earlier run left on a server, and the development instance is never touched.
 
 ```bash
 cd ~/src/ClickHouse-private
 utils/web-console/run_e2e.sh                                    # all suites, with the page built into the binary
 utils/web-console/run_e2e.sh --page-from-source                 # with programs/server/console.html as it is now
-utils/web-console/run_e2e.sh --suites console,access            # only some: console, access, data_access, backup, cluster, ldap
+utils/web-console/run_e2e.sh --suites console,access            # only some: console, access, data_access, backup, cluster, ldap, sso
 ```
 
 | Option | Meaning |

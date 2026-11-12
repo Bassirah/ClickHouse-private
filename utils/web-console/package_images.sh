@@ -70,7 +70,7 @@ mkdir -p "$STAGE/server" "$STAGE/tools" "$OUT"
 
 # Debug information only: the symbols stay, so that stack traces in the server log keep their function names.
 llvm-strip-22 --strip-debug -o "$STAGE/server/clickhouse" "$BINARY" 2>/dev/null || strip --strip-debug -o "$STAGE/server/clickhouse" "$BINARY"
-cp "$HERE/backup_worker.mjs" "$HERE/server_bundle.mjs" "$HERE/cluster_agent.mjs" "$HERE/access_policy_worker.mjs" "$HERE/ldap_client.mjs" "$HERE/tools-entrypoint.sh" "$STAGE/tools/"
+cp "$HERE/backup_worker.mjs" "$HERE/server_bundle.mjs" "$HERE/cluster_agent.mjs" "$HERE/access_policy_worker.mjs" "$HERE/ldap_client.mjs" "$HERE/sso_authenticator.mjs" "$HERE/tools-entrypoint.sh" "$STAGE/tools/"
 cp "$ROOT/programs/server/console.html" "$STAGE/tools/"
 echo "$VERSION $REVISION" > "$STAGE/tools/VERSION"
 

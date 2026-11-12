@@ -3,7 +3,7 @@
 #
 #   utils/web-console/run_e2e.sh [options]
 #
-#     --suites <list>       comma-separated, from: console, access, data_access, backup, cluster, ldap (default: all of them)
+#     --suites <list>       comma-separated, from: console, access, data_access, backup, cluster, ldap, sso (default: all of them)
 #     --binary <path>       clickhouse binary (default: build/programs/clickhouse)
 #     --page-from-source    serve programs/server/console.html as it is in the working tree, instead of the page built
 #                           into the binary: try a change of the page without rebuilding
@@ -17,14 +17,14 @@
 # server. Everything lives in tmp/console-e2e-run/: the logs stay there after the run; the rest is removed.
 #
 # The backup suite stops and starts the MinIO container and restarts the server; the cluster suite creates Docker lab
-# clusters `e2e-*` and deletes them. If Chromium needs libraries that are not installed, set LD_LIBRARY_PATH.
+# clusters `e2e-*` and deletes them. The sso suite has a Keycloak of its own (39080), with a realm made for this server. If Chromium needs libraries that are not installed, set LD_LIBRARY_PATH.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HERE="$ROOT/utils/web-console"
 BINARY="$ROOT/build/programs/clickhouse"
 E2E_DIR="$HOME/console-e2e"
-SUITES="console,access,data_access,backup,cluster,ldap"
+SUITES="console,access,data_access,backup,cluster,ldap,sso"
 PAGE_FROM_SOURCE=0
 KEEP=0
 
@@ -62,6 +62,11 @@ LDAP_IMAGE=bitnamilegacy/openldap:2.6.8
 LDAP_PORT=39636
 LDAP_STARTTLS_PORT=39389   # the plain port, for StartTLS
 LDAP_ADMIN_PASSWORD=e2e-ldap-admin
+KEYCLOAK_CONTAINER=console-e2e-keycloak
+KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7
+KEYCLOAK_PORT=39080
+SSO_AUTHENTICATOR_PORT=39700
+KEYCLOAK_ADMIN_PASSWORD="e2e-kc-admin-$$"
 MINIO_USER=e2eminio
 MINIO_SECRET=e2eminio-secret-1
 BUCKET=ch-backups
@@ -70,21 +75,24 @@ BASE="http://127.0.0.1:$HTTP_PORT"
 # --- Checks
 
 for suite in ${SUITES//,/ }; do
-    case "$suite" in console|access|data_access|backup|cluster|ldap) ;; *) die "unknown suite: $suite" ;; esac
+    case "$suite" in console|access|data_access|backup|cluster|ldap|sso) ;; *) die "unknown suite: $suite" ;; esac
 done
 [ -x "$BINARY" ] || die "no clickhouse binary at $BINARY"
 command -v node > /dev/null || die "node is not installed"
 [ -d "$E2E_DIR/node_modules/playwright" ] || die "no Playwright in $E2E_DIR (see \"Browser checks\" in $HERE/README.md)"
-if has_suite backup || has_suite cluster || has_suite ldap; then
+if has_suite backup || has_suite cluster || has_suite ldap || has_suite sso; then
     docker info > /dev/null 2>&1 || die "Docker is not running, or this user cannot use it"
 fi
 if has_suite ldap; then
     docker image inspect "$LDAP_IMAGE" > /dev/null 2>&1 || die "the image $LDAP_IMAGE is not on this host (docker pull $LDAP_IMAGE)"
 fi
+if has_suite sso; then
+    docker image inspect "$KEYCLOAK_IMAGE" > /dev/null 2>&1 || die "the image $KEYCLOAK_IMAGE is not on this host (docker pull $KEYCLOAK_IMAGE)"
+fi
 if has_suite backup; then
     docker image inspect "$MINIO_IMAGE" > /dev/null 2>&1 || die "the image $MINIO_IMAGE is not on this host"
 fi
-for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT $LDAP_PORT $LDAP_STARTTLS_PORT; do
+for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT $LDAP_PORT $LDAP_STARTTLS_PORT $KEYCLOAK_PORT $SSO_AUTHENTICATOR_PORT; do
     ! ss -ltn | grep -q ":$port " || die "port $port is in use: is another run still going? (stop it, or remove what --keep left)"
 done
 
@@ -210,6 +218,26 @@ if [ "$PAGE_FROM_SOURCE" = 1 ]; then
 EOF
 fi
 
+if has_suite sso; then
+    # Single sign-on: the token authenticator as the HTTP authentication server sso, and the sign-in page with Keycloak.
+    cat > "$SERVER/config.d/e2e-sso.xml" <<EOF
+<clickhouse>
+    <http_authentication_servers>
+        <sso>
+            <uri>http://127.0.0.1:$SSO_AUTHENTICATOR_PORT/</uri>
+            <receive_timeout_ms>2000</receive_timeout_ms>
+            <max_tries>2</max_tries>
+        </sso>
+    </http_authentication_servers>
+    <web_console>
+        <sso_name>Keycloak</sso_name>
+        <sso_issuer>http://localhost:$KEYCLOAK_PORT/realms/clickhouse</sso_issuer>
+        <sso_client_id>clickhouse-console</sso_client_id>
+    </web_console>
+</clickhouse>
+EOF
+fi
+
 start_server() {
     (cd "$SERVER" && "$BINARY" server --config-file="$SERVER/config.xml" --daemon --pid-file="$SERVER/server.pid")
     for _ in $(seq 120); do
@@ -233,16 +261,18 @@ EOF
 chmod +x "$RUN/restart-server.sh"
 
 AGENT_PID=""
+SSO_PID=""
 cleanup() {
     [ "$KEEP" = 1 ] && return
     [ -n "$AGENT_PID" ] && kill "$AGENT_PID" 2> /dev/null || true
-    docker rm -f "$MINIO_CONTAINER" "$VAULT_CONTAINER" "$LDAP_CONTAINER" > /dev/null 2>&1 || true
+    [ -n "$SSO_PID" ] && kill "$SSO_PID" 2> /dev/null || true
+    docker rm -f "$MINIO_CONTAINER" "$VAULT_CONTAINER" "$LDAP_CONTAINER" "$KEYCLOAK_CONTAINER" > /dev/null 2>&1 || true
     if [ -f "$SERVER/server.pid" ]; then
         pid=$(cat "$SERVER/server.pid")
         kill "$pid" 2> /dev/null || true
         while kill -0 "$pid" 2> /dev/null; do sleep 1; done
     fi
-    rm -rf "$SERVER" "$RUN/agent" "$RUN/suites" "$RUN/keys" "$RUN/staging" "$RUN/ldap"
+    rm -rf "$SERVER" "$RUN/agent" "$RUN/suites" "$RUN/keys" "$RUN/staging" "$RUN/ldap" "$RUN/keycloak"
 }
 trap cleanup EXIT
 
@@ -324,6 +354,46 @@ END_OF_LDIF
     done
 fi
 
+if has_suite sso; then
+    # Keycloak in development mode, without a volume: a realm with the public client of the console (standard flow only, PKCE
+    # S256, the redirect URI and web origin of this server), a group claim without the full path, and an audience mapper.
+    # It starts in the background (about half a minute) and is waited for before the suite.
+    mkdir -p "$RUN/keycloak"
+    cat > "$RUN/keycloak/realm.json" <<EOF
+{
+  "realm": "clickhouse", "enabled": true, "sslRequired": "external", "registrationAllowed": false, "bruteForceProtected": true,
+  "accessTokenLifespan": 60,
+  "groups": [{"name": "clickhouse-developer"}],
+  "users": [{"username": "kara", "enabled": true, "emailVerified": true, "firstName": "Kara", "lastName": "Developer", "email": "kara@example.org",
+             "credentials": [{"type": "password", "value": "Kara-Kc-Pw-1", "temporary": false}], "groups": ["/clickhouse-developer"]},
+            {"username": "pia", "enabled": true, "emailVerified": true, "firstName": "Pia", "lastName": "Outsider", "email": "pia@example.org",
+             "credentials": [{"type": "password", "value": "Pia-Kc-Pw-1", "temporary": false}]},
+            {"username": "service-account-clickhouse-sso-sync", "enabled": true, "serviceAccountClientId": "clickhouse-sso-sync",
+             "clientRoles": {"realm-management": ["view-users", "query-groups"]}}],
+  "clients": [{
+    "clientId": "clickhouse-console", "enabled": true, "publicClient": true, "protocol": "openid-connect",
+    "standardFlowEnabled": true, "implicitFlowEnabled": false, "directAccessGrantsEnabled": false, "serviceAccountsEnabled": false,
+    "redirectUris": ["http://127.0.0.1:$HTTP_PORT/console/oidc-callback", "http://localhost:$HTTP_PORT/console/oidc-callback"],
+    "webOrigins": ["+"], "attributes": {"pkce.code.challenge.method": "S256",
+      "post.logout.redirect.uris": "http://127.0.0.1:$HTTP_PORT/console/login##http://localhost:$HTTP_PORT/console/login"},
+    "protocolMappers": [
+      {"name": "groups", "protocol": "openid-connect", "protocolMapper": "oidc-group-membership-mapper",
+       "config": {"claim.name": "groups", "full.path": "false", "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true"}},
+      {"name": "audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
+       "config": {"included.client.audience": "clickhouse-console", "id.token.claim": "false", "access.token.claim": "true"}}]
+  }, {
+    "clientId": "clickhouse-sso-sync", "enabled": true, "publicClient": false, "secret": "e2e-sso-sync-secret-$$", "serviceAccountsEnabled": true,
+    "standardFlowEnabled": false, "implicitFlowEnabled": false, "directAccessGrantsEnabled": false, "protocol": "openid-connect"
+  }]
+}
+EOF
+    chmod -R a+rX "$RUN/keycloak"
+    docker rm -f "$KEYCLOAK_CONTAINER" > /dev/null 2>&1 || true
+    docker run -d --name "$KEYCLOAK_CONTAINER" -p "127.0.0.1:$KEYCLOAK_PORT:8080" -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+        -e KC_BOOTSTRAP_ADMIN_PASSWORD="$KEYCLOAK_ADMIN_PASSWORD" -e KC_HOSTNAME="http://localhost:$KEYCLOAK_PORT" \
+        -v "$RUN/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro" "$KEYCLOAK_IMAGE" start-dev --import-realm > /dev/null
+fi
+
 if has_suite cluster; then
     (cd "$ROOT" && CLICKHOUSE_URL="$BASE" CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD="$ADMIN_PASSWORD" \
         CLUSTER_AGENT_STATE_DIR="$RUN/agent" AGENT_ID=e2e-agent INTERVAL_SECONDS=5 OBSERVE_SECONDS=20 \
@@ -390,6 +460,24 @@ run_suite backup backup_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" 
     --s3 "http://127.0.0.1:$MINIO_PORT/$BUCKET:$MINIO_USER:$MINIO_SECRET" --minio-container "$MINIO_CONTAINER" \
     --worker "$HERE/backup_worker.mjs" --server-restart "$RUN/restart-server.sh" --server-log "$LOGS/clickhouse-server.log"
 run_suite cluster cluster_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD"
+if has_suite sso; then
+    for _ in $(seq 180); do
+        curl -sf "http://127.0.0.1:$KEYCLOAK_PORT/realms/clickhouse/.well-known/openid-configuration" > /dev/null 2>&1 && break
+        sleep 1
+    done
+fi
+if has_suite sso; then
+    printf '%s' "e2e-sso-sync-secret-$$" > "$RUN/keycloak/sync-secret"
+    chmod 600 "$RUN/keycloak/sync-secret"
+    (cd "$ROOT" && SSO_ISSUER="http://localhost:$KEYCLOAK_PORT/realms/clickhouse" SSO_CLIENT_ID=clickhouse-console SSO_LISTEN="127.0.0.1:$SSO_AUTHENTICATOR_PORT" \
+        SSO_SYNC_CLIENT_ID=clickhouse-sso-sync SSO_SYNC_SECRET_FILE="$RUN/keycloak/sync-secret" SSO_SYNC_INTERVAL_SECONDS=5 \
+        CLICKHOUSE_URL="$BASE" CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD="$ADMIN_PASSWORD" \
+        exec node "$HERE/sso_authenticator.mjs" > "$LOGS/sso-authenticator.log" 2>&1) &
+    SSO_PID=$!
+fi
+run_suite sso sso_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --keycloak-url "http://localhost:$KEYCLOAK_PORT" --realm clickhouse \
+    --client clickhouse-console --keycloak-user kara:Kara-Kc-Pw-1 --role-group clickhouse-developer \
+    --sign-in --keycloak-admin "admin:$KEYCLOAK_ADMIN_PASSWORD" --outsider pia:Pia-Kc-Pw-1 --token-lifespan 60
 # Last: it installs an LDAP directory and restarts the server, and removes the directory again at the end.
 run_suite ldap ldap_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --config-dir "$SERVER/config.d" --server-restart "$RUN/restart-server.sh" \
     --ldap-port "$LDAP_PORT" --ldap-starttls-port "$LDAP_STARTTLS_PORT" --ldap-ca "$RUN/ldap/tls/ca.crt" --ldap-container "$LDAP_CONTAINER" \

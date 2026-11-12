@@ -26,6 +26,11 @@ clickstack_url /clickstack/
 cloud_url https://clickhouse.cloud/
 documentation_url https://clickhouse.com/docs/
 source_code_url https://github.com/ClickHouse/ClickHouse/
+sso_client_id (empty)
+sso_issuer (empty)
+sso_name Keycloak
+sso_scopes openid profile email
+sso_username_claim preferred_username
 website_url https://clickhouse.com/
 --- the embedded pages implement the integration contract of the console
 /dashboard 1

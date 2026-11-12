@@ -1,4 +1,5 @@
-# Image with the helper processes of the web console: the backup worker, the cluster agent, and the access policy worker.
+# Image with the helper processes of the web console: the backup worker, the cluster agent, the access policy worker, and
+# the token authenticator of single sign-on.
 # The first argument chooses the process (see tools-entrypoint.sh); configuration is in environment variables, as for
 # the scripts themselves (see README.md).
 #
@@ -23,7 +24,7 @@ FROM ${NODE_IMAGE}
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="ClickHouse web console tools" \
-      org.opencontainers.image.description="Backup worker, cluster agent, and access policy worker of the ClickHouse web console" \
+      org.opencontainers.image.description="Backup worker, cluster agent, access policy worker, and SSO token authenticator of the ClickHouse web console" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.licenses="Apache-2.0"
@@ -32,7 +33,7 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY --from=kubectl /kubectl /usr/local/bin/kubectl
 
-COPY --chmod=0555 backup_worker.mjs server_bundle.mjs cluster_agent.mjs access_policy_worker.mjs ldap_client.mjs console.html VERSION /opt/clickhouse-console/
+COPY --chmod=0555 backup_worker.mjs server_bundle.mjs cluster_agent.mjs access_policy_worker.mjs ldap_client.mjs sso_authenticator.mjs console.html VERSION /opt/clickhouse-console/
 COPY --chmod=0555 tools-entrypoint.sh /usr/local/bin/clickhouse-console-tools
 
 # The cluster agent keeps its key pair and the generated deployments here; mount a volume to keep them.
