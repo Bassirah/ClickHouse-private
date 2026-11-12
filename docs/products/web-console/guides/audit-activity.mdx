@@ -1,0 +1,94 @@
+---
+description: 'What the Audit Activity page of the web console shows: the console audit log, the access-management statements the server logged, and query-time access decisions.'
+sidebarTitle: 'Audit activity'
+slug: /web-console/guides/audit-activity
+title: 'Audit activity'
+doc_type: 'guide'
+---
+
+The **Audit Activity** page, in the **Administration** category, shows who changed access, when, where, and with what result. It has three tabs, each with its own source:
+
+| Tab | Source | Covers |
+|---|---|---|
+| **Console actions** | The console audit log, `console_admin.audit_log`. | Changes made in the console and by its helper processes. |
+| **Access changes seen by the server** | `system.query_log` of the connected server. | Access-management statements, including those made outside of the console. |
+| **Access decisions** | `system.query_log`, and the access test runs of Data Access Policies. | Queries the server refused, and access test results. |
+
+The page is listed for users who can read the audit log or `system.query_log`. It opens on **Console actions** when you can read the audit log, and on **Access changes seen by the server** otherwise. The **Audit activity** tab of a user shows the console records whose target is that user, and the server statements of the last 30 days that contain its name (see [Users and roles](/products/web-console/guides/users-and-roles)).
+
+The pages always read the current state from the server, so a change made outside of the console is shown on the next load or **Refresh**.
+
+## Filters {#filters}
+
+Each tab has:
+
+- **Search**: on **Console actions**, the actor, target, action, summary, or correlation ID; on the other tabs, the user or the text of the statement.
+- **Period**: **Last day**, **Last 7 days**, **Last 30 days**, or **Last year**. The default is 30 days for **Console actions** and 7 days for the other tabs.
+- **Result**, on **Console actions** only: **Any result**, **Success**, **Partly applied**, or **Failed**.
+
+Each tab shows at most 500 records, the newest first. Times are in UTC.
+
+## Console actions {#console-actions}
+
+After each change, the console writes a record to the audit log, which you set up on the [Component Access](/products/web-console/guides/component-access#setting-up) page. Each record has:
+
+| Field | Content |
+|---|---|
+| **Time (UTC)** | When the record was written. |
+| **Actor** | The user who made the change. |
+| **Action** | The summary, the target type and name, and the action, for example `user alice · suspend_user`. |
+| **Result** | **Success**, **Failed**, or **Partly applied**. |
+| **Where** | The server, and the scope: this server, or `ON CLUSTER` with the cluster name. |
+| **Details** | The correlation ID, a sanitized error, the steps with the outcome of each (and of each server for `ON CLUSTER`), and details of the action, such as the expiry dates a suspension overwrote or the dependencies of a deleted user. |
+
+The actor, the time, and the server are filled in by the server (`MATERIALIZED currentUser()`, `now64()`, and `hostName()`), and `CHECK` constraints reject other values, so a user who can insert into the log cannot write records in another user's name.
+
+Each change has a correlation ID, which the console also sets as the `log_comment` of its statements, as `console-admin:<id>`. The result of a change in the console shows it. Use it to find the statements of a change on the server tab.
+
+The helper processes of the console write to the same log with their own service account as the actor: for example, the user sync of the token authenticator records `sso_create_user`, `sso_grant_roles`, `sso_revoke_roles`, and `sso_drop_user` (see [Helper processes](/products/web-console/reference/helper-processes)).
+
+A change is not recorded in the audit log when the log is not set up or the user cannot write to it (`INSERT` on it). The review dialog says so before the change, and the result gives the correlation ID, so that the statements can still be found in `system.query_log`. If the change succeeds but its record cannot be written, the result says so.
+
+## Access changes seen by the server {#access-changes-seen-by-the-server}
+
+This tab lists the `CREATE`, `ALTER`, and `DROP` statements for users, roles, settings profiles, quotas, row policies, and masking policies, and `GRANT`, `REVOKE`, and `SET DEFAULT ROLE`, from `system.query_log` of the server the console is connected to, including rejected attempts. Each row shows the time, the user, the statement, and the outcome: **Done**, or **Failed** with the error code and message.
+
+The **Origin** column marks statements with a console correlation ID as **Console**, and all others as **Outside the console** (run with SQL directly, or by another tool). Statements of the access policy worker run as `EXECUTE AS <rule author>` and appear here.
+
+This tab does not cover:
+
+- other servers of a cluster: each has its own log;
+- users or sessions with `log_queries` disabled;
+- changes to configuration files;
+- statements older than the `query_log` retention.
+
+The server flushes the log every few seconds, so the newest statements can be missing.
+
+## Access decisions {#access-decisions}
+
+This tab shows query-time authorization decisions, apart from administrative changes:
+
+- reads the server refused with `ACCESS_DENIED`, from `system.query_log`, with the literals of the queries replaced by `?` so that values typed in a query are not shown, and the privilege that was missing;
+- the runs of access tests of [Data Access Policies](/products/web-console/guides/data-access-policies), with their result.
+
+It is readable by users with `SELECT` on `system.query_log` and on the access test runs. Refused queries are kept as long as the `query_log` retention, and test runs for 365 days.
+
+## What is recorded, and what never is {#what-is-recorded-and-what-never-is}
+
+The console never writes passwords, password hashes, or tokens to the audit log, to error messages, or to browser storage:
+
+- Passwords are sent to the server only in the statement that sets them. The review dialog and the audit details replace them with `[HIDDEN]`, as well as any literal after `BY`, `HASH`, `SALT`, or `PASSWORD` in an error message.
+- The server stores a hash and masks the password in `system.query_log` and its logs, so the server tab shows the statement without it.
+- With single sign-on, the access token is kept in the memory of the browser tab only. The connection test of an identity provider checks the tokens and then drops them; they are never stored.
+
+The audit log is an ordinary table on the server the console is connected to, and it is not replicated. Users with `ALTER`, `TRUNCATE`, or `DROP` on it can change or remove records, so it is not tamper-proof: grant only `SELECT` and `INSERT` on it, and keep `ALTER` and `DROP` to the server administrators.
+
+## Retention {#retention}
+
+Records older than the retention chosen at setup (365 days by default) are removed by a TTL. To change the retention later, run:
+
+```sql
+ALTER TABLE console_admin.audit_log MODIFY TTL toDateTime(event_time) + INTERVAL 730 DAY
+```
+
+To keep the records before removing the console data, back up the database, for example with `BACKUP DATABASE console_admin TO Disk('backups', 'console_admin.zip')` on a server with a `backups` disk configured (see [Backup and restore](/operations/backup/overview)).

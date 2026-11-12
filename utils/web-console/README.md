@@ -1,7 +1,7 @@
 # Web console: build, run, test, package
 
-The web console is served by the server at `/console`. User documentation, configuration, security
-model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
+The web console is served by the server at `/console`. Its documentation (quick start, tutorials, user guides, how-to
+guides, and API reference) is the section `docs/products/web-console/` of the documentation site.
 
 ## What is where
 
@@ -37,7 +37,7 @@ model, and limitations: `docs/concepts/features/interfaces/web-console.mdx`.
 | `utils/web-console/ldap_e2e.mjs` | Browser acceptance checks of directory sign-in: the generated LDAP configuration installed on a server without one, sign-in with the directory password and roles from groups, directory changes after the cooldown, user attributes of Data Access Policies read from the directory, and the users managed with SQL next to the directory (Playwright; not part of the build). |
 | `utils/web-console/run_e2e.sh` | Runs the browser suites against a server of their own, with its own MinIO, cluster agent, Vault, OpenLDAP, and Keycloak, started and removed for each run. |
 | `utils/web-console/Dockerfile` | Server image: a locally built binary on top of the official image. |
-| `utils/web-console/Dockerfile.tools`, `tools-entrypoint.sh` | Tools image: the backup worker, the cluster agent (with `docker`, Compose, and `kubectl`), and the access policy worker. |
+| `utils/web-console/Dockerfile.tools`, `tools-entrypoint.sh` | Tools image: the backup worker, the cluster agent (with `docker`, Compose, and `kubectl`), the access policy worker, and the token authenticator. |
 | `utils/web-console/build_images.sh` | Builds the images from source, end to end: checks, a Release build of the binary, then `package_images.sh`. |
 | `utils/web-console/package_images.sh` | Builds, smoke-tests, and packages both images as archives for distribution, from an existing binary. |
 | `utils/web-console/deploy/` | Deployment examples shipped with the archives: Docker Compose, Kubernetes, the service accounts, and their guide. |
@@ -284,7 +284,7 @@ networks without access to a registry:
 | Image | Contents |
 |---|---|
 | `clickhouse-server-console:<version>` | The official `clickhouse/clickhouse-server` image of the same release, with the binary of this build (`Dockerfile`). Everything of the official image applies: its environment variables, `config.d`, `users.d`, and `docker-entrypoint-initdb.d`. |
-| `clickhouse-console-tools:<version>` | Node.js 22 with the three helper processes, `console.html` for the access policy worker, the `docker` CLI with Compose, and `kubectl` (`Dockerfile.tools`). The first argument chooses the process: `backup-worker`, `cluster-agent`, or `access-policy-worker`. |
+| `clickhouse-console-tools:<version>` | Node.js 22 with the four helper processes, `console.html` for the access policy worker, the `docker` CLI with Compose, and `kubectl` (`Dockerfile.tools`). The first argument chooses the process: `backup-worker`, `cluster-agent`, `access-policy-worker`, or `sso-authenticator`. |
 
 The version is `<release of the base image>-console.<commit>`, for example `26.9.8.3-console.a88866202a2`.
 
@@ -347,8 +347,8 @@ access; the Binary visualizer and Jemalloc pages load libraries from public CDNs
   console's own data: `DROP DATABASE console_admin; DROP ROLE console_admin_reader`. Back up the audit log
   first if it must be kept, for example with `BACKUP DATABASE console_admin TO Disk('backups', 'console_admin.zip')`
   on a server with a `backups` disk configured.
-- Recovery: if a policy change hides components from everyone, the Administration pages are not governed
-  by the policy, so a platform administrator can still fix it on the Component Access page; with SQL,
+- Recovery: if a policy change hides components from everyone, the Component Access page is not governed by
+  the policy (the other Administration pages are), so a platform administrator can still fix it there; with SQL,
   `INSERT INTO console_admin.component_policy (subject_type, subject, component, open, view_data, run_queries, administer)
   VALUES ('all', '', 'sql', 1, 1, 1, 0)` allows the SQL Console for everyone again, and dropping the database
   turns the policy off. A user locked out by a suspension is reactivated with

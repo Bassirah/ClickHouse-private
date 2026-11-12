@@ -1,0 +1,207 @@
+---
+description: 'Import the user attributes of Data Access Policies from a JSON feed, an HTTPS URL, or an LDAP directory or Active Directory, with the access policy worker.'
+sidebarTitle: 'Import user attributes'
+slug: /web-console/how-to/import-user-attributes
+title: 'Import user attributes'
+doc_type: 'guide'
+---
+
+Fill the user attributes that the rules of **Data Access Policies** use, such as `department` or `branch`, from a trusted identity source instead of typing them in the console: a JSON feed (a file or an HTTPS URL) exported by an identity provider or HR system, or an LDAP directory or Active Directory. The [access policy worker](/products/web-console/guides/data-access-policies#access-policy-worker) imports the values each cycle, then reconciles the rules, so a change in the source reaches the server's grants and row policies within one interval.
+
+For the trust model of attributes (source, writer, freshness), see [Attributes and classifications](/products/web-console/guides/data-access-policies#attributes).
+
+## Prerequisites {#prerequisites}
+
+- Data Access Policies set up in the admin database (`console_admin` by default): **Set up** on one of the tabs **Access Tests**, **Attributes & Classifications**, **Policy Rules**, or **Policy Deployments**.
+- The service account of the access policy worker, `access_policy_worker`, created with `deploy/service-accounts.sql` (see [Create service accounts](/products/web-console/how-to/create-service-accounts)), including the grant used only for imports:
+
+  ```sql
+  GRANT INSERT ON console_admin.dap_user_attributes TO access_policy_worker;
+  ```
+
+- The worker: the `access-policy-worker` service of the [Docker Compose deployment](/products/web-console/how-to/deploy-with-docker-compose) or of the [Kubernetes deployment](/products/web-console/how-to/deploy-on-kubernetes), or `utils/web-console/access_policy_worker.mjs` run with Node.js 18 or later.
+- The ClickHouse user names of the people in the source: the worker stores each value under the user name the source reports, and rules apply it to the ClickHouse user of that name.
+
+One worker imports from one source: set either `ATTRIBUTE_FEED` or `LDAP_ATTRIBUTES_URL`, not both. With both, the worker stops at start with "Set ATTRIBUTE_FEED or LDAP_ATTRIBUTES_URL, not both: one worker imports from one source."
+
+## Define the attributes {#define-the-attributes}
+
+The worker imports only the attributes defined with its source, so define them first, for either kind of source:
+
+1. Open **Administration → Data Access Policies → Attributes & Classifications** and select **Define attribute**.
+2. Fill in:
+   - **Attribute**: the name rules use, for example `department`.
+   - **Category**: **User**. The worker imports user attributes only.
+   - **Source of truth**: the source name of the worker, `ATTRIBUTE_FEED_SOURCE`. Its default is `feed` for a feed, and `ldap` for a directory.
+   - **Writer**: `access_policy_worker`, the account of the worker. Values written by any other user are then **Not trusted**.
+   - **Owner**: the team responsible for the source.
+   - **Fresh for (seconds)**: the longest outage of the source you accept, for example 86400. Each cycle re-confirms every value the source reports, so a value becomes stale only when the source stops reporting it or cannot be read.
+3. Select **Review**, then **Apply**.
+
+Repeat for each attribute. Define `employment_status` the same way if the source reports it: the values `disabled`, `suspended`, `terminated`, and `inactive` disable the identity for every rule.
+
+## Import from a JSON feed {#import-from-a-json-feed}
+
+<Steps>
+<Step title="Produce the feed">
+
+The feed is a JSON array of users with their attributes:
+
+```json
+[
+    {"user": "alice", "attributes": {"department": "Finance", "employment_status": "active"}},
+    {"user": "bob", "attributes": {"department": "Sales", "employment_status": "active"}}
+]
+```
+
+`user` is the ClickHouse user name. Each value is stored as a string. The worker skips entries without a string `user` or an `attributes` object, values that are `null`, and attributes that are not defined as user attributes with the feed's source.
+
+</Step>
+<Step title="Configure the worker">
+
+Set these environment variables of the worker:
+
+| Variable | Value |
+|---|---|
+| `ATTRIBUTE_FEED` | The path of the JSON file, or an `https://` URL. Other URL schemes are not supported: anything that does not start with `https://` is read as a file path. |
+| `ATTRIBUTE_FEED_SOURCE` | The source name of the attribute definitions. Default: `feed`. |
+| `ATTRIBUTE_FEED_TOKEN` | For an HTTPS feed: sent as `Authorization: Bearer <token>`. Optional. |
+| `INTERVAL_SECONDS` | The time between cycles. Default: 60. |
+
+In the Docker Compose deployment, set them in `.env`: `ATTRIBUTE_FEED`, `ATTRIBUTE_FEED_SOURCE`, `ATTRIBUTE_FEED_TOKEN`, and `ACCESS_POLICY_INTERVAL_SECONDS` for the interval. A file must be inside the container of the worker: mount it into the `access-policy-worker` service (for example with a `volumes` entry in a Compose override file) and set `ATTRIBUTE_FEED` to its path in the container. Then restart the worker:
+
+```bash
+docker compose up -d access-policy-worker
+```
+
+To run the worker directly:
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=access_policy_worker CLICKHOUSE_PASSWORD=... \
+    ATTRIBUTE_FEED=/var/lib/clickhouse-console/hr-feed.json ATTRIBUTE_FEED_SOURCE=hr INTERVAL_SECONDS=60 \
+    node utils/web-console/access_policy_worker.mjs
+```
+
+Add `--once` to run one cycle and exit, which is useful to test the configuration.
+
+</Step>
+<Step title="Keep the feed complete">
+
+Each cycle, the worker writes every reported value with the current time, and removes the values of its source that the feed no longer reports: a user who leaves the feed, or loses an attribute in it, loses the value, and rules on it close for that user.
+
+<Warning>
+A readable feed is applied as it is. An empty array removes every value of the source at the next cycle, and rules then revoke what they gave. Produce the feed so that a failed export makes it unreadable (a missing file, a failed HTTPS response, or invalid JSON) rather than empty.
+</Warning>
+
+</Step>
+</Steps>
+
+## Import from an LDAP directory or Active Directory {#import-from-ldap}
+
+The worker reads the users of the directory and the LDAP attributes you map to console attributes, so that the directory is the trusted source of, for example, the department or branch of each user. It connects over LDAPS, or over `ldap://` with StartTLS, always checks the certificate of the directory, and uses TLS 1.2 or later; plain LDAP is refused, because the bind sends the password of the service account. It uses paged results, so directories that cap a search, such as Active Directory at 1000 entries, return every user.
+
+<Steps>
+<Step title="Prepare a directory account and the certificate">
+
+Create a read-only service account in the directory that can read the users and the mapped attributes. In the Docker Compose deployment, put its password in `ldap/password` (mode 600, readable by the worker's user, 1000) and the certificate authority of the directory in `ldap/ca.crt`, next to `compose.yaml`.
+
+</Step>
+<Step title="Define the attributes with the source ldap">
+
+Define each attribute as in [Define the attributes](#define-the-attributes), with **Source of truth** `ldap` (the default source of a directory import) and **Writer** `access_policy_worker`.
+
+</Step>
+<Step title="Configure the worker">
+
+The worker reads these variables:
+
+| Variable | Value |
+|---|---|
+| `LDAP_ATTRIBUTES_URL` | `ldaps://host[:636]`, or `ldap://host[:389]` with `LDAP_ATTRIBUTES_STARTTLS=1`. |
+| `LDAP_ATTRIBUTES_STARTTLS` | `1` for StartTLS on an `ldap://` URL. |
+| `LDAP_ATTRIBUTES_CA_FILE` | The certificate authority of the directory. Default: the system's. |
+| `LDAP_ATTRIBUTES_BIND_DN` | The DN of the read-only service account. Required. |
+| `LDAP_ATTRIBUTES_PASSWORD_FILE` | A file with its password, readable by the worker only. Or `LDAP_ATTRIBUTES_PASSWORD` with the password itself. A bind without a password is refused. |
+| `LDAP_ATTRIBUTES_BASE_DN` | Where the users are, for example `ou=users,dc=example,dc=org`. Required. |
+| `LDAP_ATTRIBUTES_FILTER` | Which entries are users. Default: `(objectClass=person)`. |
+| `LDAP_ATTRIBUTES_USER` | The LDAP attribute that is the ClickHouse user name. Default: `uid`; `sAMAccountName` for Active Directory. |
+| `LDAP_ATTRIBUTES_MAP` | `<attribute>=<LDAP attribute>`, comma-separated, for example `department=departmentNumber,branch=l`. Required. |
+| `ATTRIBUTE_FEED_SOURCE` | The source name of the definitions. Default with a directory: `ldap`. |
+
+With Docker Compose, set them in `.env`, for an OpenLDAP directory for example:
+
+```bash
+LDAP_ATTRIBUTES_URL=ldaps://ldap.example.com
+LDAP_ATTRIBUTES_STARTTLS=0
+LDAP_ATTRIBUTES_BIND_DN=cn=console-attributes,ou=services,dc=example,dc=org
+LDAP_ATTRIBUTES_BASE_DN=ou=users,dc=example,dc=org
+LDAP_ATTRIBUTES_FILTER=(objectClass=person)
+LDAP_ATTRIBUTES_USER=uid
+LDAP_ATTRIBUTES_MAP=department=departmentNumber,branch=l
+```
+
+`compose.ldap-attributes.yaml` sets the source of the worker, `ATTRIBUTE_FEED_SOURCE`, to `ldap` itself, whatever `.env` says, so define the attributes with the source `ldap`.
+
+For Active Directory, set `LDAP_ATTRIBUTES_USER=sAMAccountName` and map the Active Directory attributes, for example `LDAP_ATTRIBUTES_MAP=department=department`. LDAP attribute names are compared without case.
+
+`compose.ldap-attributes.yaml` passes these variables to the `access-policy-worker` service, clears `ATTRIBUTE_FEED`, and mounts `./ldap` at `/etc/clickhouse-console/ldap` for the password and certificate files. Start the worker with it:
+
+```bash
+docker compose -f compose.yaml -f compose.ldap-attributes.yaml up -d access-policy-worker
+```
+
+</Step>
+</Steps>
+
+Each cycle, the worker binds, searches the base DN with the filter, and turns each entry with the user attribute into a user with the mapped attributes. A multi-valued LDAP attribute gives its first value. A changed attribute changes the value; a user who leaves the directory, or loses an attribute, loses the value, and rules on it close for them. Entries without the user attribute are ignored.
+
+## Fail-closed behavior {#fail-closed-behavior}
+
+The import never grants access from a value it cannot confirm:
+
+- **The source cannot be read** (a missing file, invalid JSON, an HTTPS error, an LDAP connection, TLS, or bind failure): nothing is written, and the cycle goes on to reconcile the rules with the values already stored. The values age: until they pass the freshness limit of their attribute, the access already provisioned stays; after that they are **Not trusted**, and each rule applies its **Missing or stale attribute** setting: **Revoke** removes what the rule gave (row filters show no row), **Keep** holds what was provisioned.
+- **A directory search finds nobody while values exist**: the import is refused, not applied, so that a wrong filter or base DN cannot remove every value at once. The values then age as above. This protection applies to the directory only: an empty JSON feed is applied.
+- **A search finds only some of the users**: the values of the users it does not find are removed, as for users who left.
+- **A value written by another user, or reported with another source**: **Not trusted**, and treated as missing.
+
+## Verify the import {#verify-the-import}
+
+1. Read the log of the worker. It writes one JSON object per line; after a successful import:
+
+   ```json
+   {"time": "2026-11-12T09:00:00.000Z", "worker": "...", "message": "attribute feed imported", "values": 2, "removed": 0}
+   ```
+
+   With a directory, the line also has `"source": "ldap"` and `"from": "ldap"`. `values` is the number of values written, and `removed` the number of values removed.
+2. On **Attributes & Classifications**, **User attribute values** shows each value with the source and `written by access_policy_worker`, the time it was last confirmed, and **Status** **Fresh**. Hover a **Not trusted** badge for the reason.
+3. Query the values directly:
+
+   ```sql
+   SELECT user_name, attribute, value, source, observed_at, updated_by
+   FROM console_admin.dap_user_attributes FINAL
+   WHERE NOT deleted
+   ORDER BY user_name, attribute;
+   ```
+
+4. On **Policy Rules**, select **Explain** on a rule that uses the attribute: the matched users show the imported values. **Policy Deployments → History** shows the `reconcile` entries of the worker.
+
+## Troubleshooting {#troubleshooting}
+
+| Symptom | Cause and fix |
+|---|---|
+| `attribute feed failed: values keep aging and become stale after their freshness limit` in the log | The source could not be read; the `error` field has the reason. Fix the source: the values stay trusted until their freshness limit. |
+| `The attribute feed answered <status>` | The HTTPS feed returned an error status. Check the URL and `ATTRIBUTE_FEED_TOKEN`. |
+| `The attribute feed must be a JSON array` | The feed is JSON, but not an array of users. |
+| The log reports the import with `"values": 0` | The attributes are not defined, are not **User** attributes, or their **Source of truth** differs from the worker's source (`ATTRIBUTE_FEED_SOURCE`; with Docker Compose, check `.env`). |
+| Values show **Not trusted** with "Written by ..." | The **Writer** of the definition is not `access_policy_worker`. Select **Define attribute** again with the same name and the right writer: the new definition replaces the old one. |
+| Values show **Not trusted** with "Last confirmed ... s ago" | The worker has not confirmed them within the freshness limit: the source is unreadable, or the worker is stopped. |
+| `attribute feed failed` with `ACCESS_DENIED` in `error` | The account lacks `INSERT` on `console_admin.dap_user_attributes`, or `SELECT` on `console_admin.*`. |
+| `cycle failed` with an error about a `dap_*` table | Data Access Policies is not set up in the admin database, or `ADMIN_DATABASE` names another database. |
+| `The directory returned no user, and N values exist: refusing to remove them all. Check LDAP_ATTRIBUTES_BASE_DN and LDAP_ATTRIBUTES_FILTER.` | The search matched no entry with the user attribute. Check the base DN, the filter, and `LDAP_ATTRIBUTES_USER` (`sAMAccountName` for Active Directory). |
+| `An ldap:// URL needs StartTLS: the bind would send the password in clear. Use ldaps://, or StartTLS.` | Use an `ldaps://` URL, or set `LDAP_ATTRIBUTES_STARTTLS=1`. |
+| A TLS certificate error | The certificate of the directory is not signed by `LDAP_ATTRIBUTES_CA_FILE` (or the system's authorities), or its name does not match the host of the URL. |
+| `LDAP bind failed: ...` | The bind DN or the password is wrong, or the account is locked. The message has the directory's result. |
+| `LDAP_ATTRIBUTES_MAP is empty`, or `LDAP_ATTRIBUTES_BIND_DN is not set.` | Set the missing variable. |
+| Values exist, but a rule does not match the user | The user name the source reports differs from the ClickHouse user name, or the value differs from the values in the rule's **Users** selector. Values are compared exactly. |
+
+To configure ClickHouse itself to authenticate users against the same directory, see [Configure LDAP](/products/web-console/how-to/configure-ldap) and [LDAP](/operations/external-authenticators/ldap).

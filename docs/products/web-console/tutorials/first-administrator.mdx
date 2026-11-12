@@ -1,0 +1,183 @@
+---
+description: 'Tutorial: set up the web console as its first administrator: create a role from a template and a user with it, decide which components users see, and follow the changes in the audit log.'
+sidebarTitle: 'First administrator'
+slug: /web-console/tutorials/first-administrator
+title: 'Set up the console as its first administrator'
+doc_type: 'guide'
+---
+
+In this tutorial you prepare a ClickHouse server for an analyst, Maria, using only the console. You create a demo
+database, a role that reads it, and a user with that role. Then you decide which components of the console the users
+see, sign in as Maria to check the result, and find every change in the audit log.
+
+It takes about twenty minutes.
+
+## Before you begin {#before-you-begin}
+
+- A server with the console, and its `default` user with access management, as in the
+  [Quick start](/products/web-console/quick-start).
+- The administration pages set up: **Component Access** shows a **Rules** box. If it shows **Set up** instead, follow
+  [Set up the administration pages](/products/web-console/quick-start#set-up-the-administration-pages) first.
+
+Sign in to the console as `default`.
+
+## Create the demo data {#create-the-demo-data}
+
+<Steps>
+<Step title="Open the SQL Console">
+
+Select **SQL Console** in the sidebar.
+
+</Step>
+<Step title="Create a database and a table">
+
+Run:
+
+```sql
+CREATE DATABASE sales;
+
+CREATE TABLE sales.orders
+(
+    order_id UInt64,
+    region LowCardinality(String),
+    amount Decimal(12, 2),
+    created_at DateTime
+)
+ENGINE = MergeTree
+ORDER BY order_id;
+
+INSERT INTO sales.orders
+SELECT number, ['north', 'south', 'east', 'west'][number % 4 + 1], round(rand() % 100000 / 100, 2), now() - number * 60
+FROM numbers(1000);
+```
+
+`SELECT count() FROM sales.orders` returns `1000`.
+
+</Step>
+</Steps>
+
+## Create a role from a template {#create-a-role-from-a-template}
+
+Role templates are starting points that the console offers for common jobs. Each one lists the exact privileges it
+grants before it creates anything.
+
+<Steps>
+<Step title="Open the role templates">
+
+Select **Roles & Permissions**. Below the list of roles, the **Role templates** box lists the templates.
+
+</Step>
+<Step title="Create an analyst role">
+
+In the row **Analyst** ("Reads the tables of the chosen databases"), select **Create role**. Keep the role name
+`analyst`, and enter `sales` in **Databases**. Select **Review**.
+
+The review lists the statements that will run:
+
+```sql
+CREATE ROLE `analyst`;
+GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON `sales`.* TO `analyst`;
+```
+
+Select **Apply**. Each step shows **Done**.
+
+</Step>
+</Steps>
+
+The console runs these statements as you, and the server checks each one: you can only grant privileges you have
+`WITH GRANT OPTION`. See [Users and roles](/products/web-console/guides/users-and-roles#role-templates).
+
+## Create a user with the role {#create-a-user-with-the-role}
+
+<Steps>
+<Step title="Open the user form">
+
+Select **Users**, then **Create user**.
+
+</Step>
+<Step title="Fill it in">
+
+- **Name**: `maria`.
+- Password: select **Generate a temporary password**, and an expiry in **Password expires (optional)** if you want one.
+- **Roles**: select `analyst`. The role `console_admin_reader` is already selected: it lets the console apply its
+  access policy to Maria. Keep **Make the assigned roles default roles (active at login)** selected.
+
+Select **Review**, read the statements, and select **Apply**.
+
+</Step>
+<Step title="Note the password">
+
+The console shows the generated password once. Copy it now: the server stores only its hash, and the console does not
+keep it.
+
+</Step>
+</Steps>
+
+## Decide which components users see {#decide-which-components-users-see}
+
+The setup created a rule that lets all users open every component. Narrow it: everybody keeps the SQL Console and the
+Dashboard, and only analysts get the Schema visualizer.
+
+<Steps>
+<Step title="Narrow the rule for all users">
+
+Select **Component Access**. In **Rules for**, keep **All users**. In the column **Open**, clear every component except
+**SQL Console** and **Dashboard**. Select **Save rules**, review, and apply.
+
+</Step>
+<Step title="Add a rule for the analyst role">
+
+In **Rules for**, choose the role `analyst`. Select **Open** for **Schema visualizer**, save, review, and apply.
+
+</Step>
+</Steps>
+
+A user may open a component when any rule allows it: the rule for all users, a rule for the user, or a rule for one of
+the user's enabled roles. Next to each component, the page shows the native privileges that govern what the user can
+actually do there. The policy only decides what the console lists: see
+[Component access](/products/web-console/guides/component-access).
+
+## Check as Maria {#check-as-maria}
+
+1. Select the **Switch connection** button (two arrows) at the top right, and sign in as `maria` with the generated
+   password.
+2. The home page shows **SQL Console**, **Dashboard**, and **Schema visualizer**, and not the other panels or the
+   administration pages.
+3. In the SQL Console, `SELECT count() FROM sales.orders` returns `1000`.
+4. `DROP TABLE sales.orders` fails with `ACCESS_DENIED`: the role grants only reading. The server enforces this for every
+   client, not only in the console.
+
+Switch back to `default`.
+
+## Follow the changes in the audit log {#follow-the-changes-in-the-audit-log}
+
+Select **Audit Activity**. The console records each change it made: the role, the user, and the rules, with who made
+it, when, the result, and a correlation ID. Passwords are never recorded.
+
+The server's own log lists access-management statements as well, including those made outside the console, when you
+can read `system.query_log`. See [Audit activity](/products/web-console/guides/audit-activity).
+
+## Clean up {#clean-up}
+
+To remove what you created, as `default`:
+
+```sql
+DROP USER maria;
+DROP ROLE analyst;
+DROP DATABASE sales;
+```
+
+Then, in **Component Access**, with **Rules for** set to **All users**, select **Open** for every component again (the
+box at the top of the column selects them all), and save.
+
+## What you learned {#what-you-learned}
+
+- The console builds statements from forms and runs them as you; the server authorizes each one.
+- Role templates give least-privilege roles with the exact grants shown before they are applied.
+- The component access policy decides what the console lists for each user and role; native privileges decide what
+  they can do.
+- Every change is in the audit log.
+
+Next: protect individual columns and rows with
+[Data Access Policies](/products/web-console/tutorials/data-access-policies), or let users sign in with their company
+account through [single sign-on](/products/web-console/tutorials/single-sign-on).

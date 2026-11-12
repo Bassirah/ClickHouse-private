@@ -1,0 +1,231 @@
+---
+description: 'Let the users of an LDAP directory or of Active Directory sign in to the web console and to ClickHouse with their directory password, with roles from their groups.'
+sidebarTitle: 'Configure LDAP'
+slug: /web-console/how-to/configure-ldap
+title: 'Configure an LDAP user directory'
+doc_type: 'guide'
+---
+
+Use this guide to let the users of an LDAP directory (OpenLDAP, Active Directory, or another LDAP server) sign in to
+the console and to ClickHouse with their directory password, with roles given by their LDAP groups. The users are not
+created in ClickHouse; the users of `users.xml` and those created with SQL keep working.
+
+For how directory sign-in works, see [LDAP](/products/web-console/guides/identity-providers#ldap). For every setting of
+the server, see [LDAP](/operations/external-authenticators/ldap).
+
+## Before you begin {#before-you-begin}
+
+- A user of the console with `SELECT` on `system.user_directories`, to open **Identity Providers → LDAP**, and with
+  access management, to create roles.
+- Access to the server configuration (`config.d`), and the right to restart the server.
+- The LDAP server reachable from the ClickHouse host over LDAPS (port 636) or StartTLS (port 389), and the certificate
+  of its certificate authority (CA) as a PEM file.
+- For roles from groups: the base DN of the groups, and a naming convention for the groups that stand for ClickHouse
+  roles. This guide uses the prefix `clickhouse-`: the group `clickhouse-analysts` gives the role `analysts`.
+
+## Generate the configuration {#generate-the-configuration}
+
+1. In the console, under **Identity Providers**, select **LDAP**.
+2. Select **Configure LDAP…**, or **Add a directory…** when a directory already exists.
+3. Fill in the form:
+
+   | Field | Example | Notes |
+   |---|---|---|
+   | **Server name** | `corp` | The name of the entry in `ldap_servers`: letters, digits, `_`, and `-`. |
+   | **Host** | `ldap.example.com` | A name that is in the certificate of the LDAP server. See [the host name localhost](#the-host-name-localhost). |
+   | **Port** | empty | Empty: 636 for LDAPS, 389 for StartTLS. |
+   | **Encryption** | **LDAPS (TLS from the start)** | Or **StartTLS (on the plain port)**. |
+   | **CA certificate file** | `/etc/clickhouse-server/ldap-ca.crt` | The CA of the LDAP server, on the ClickHouse host. |
+   | **Bind DN** | `uid={user_name},ou=users,dc=example,dc=org` | `{user_name}` is replaced by the name the user signs in with. For Active Directory, see [Active Directory](#active-directory). |
+   | **Verification cooldown (seconds)** | `300` | See [Verification cooldown](#verification-cooldown). |
+   | **Default roles** | `console_admin_reader` | Roles every directory user gets, comma-separated. |
+   | **Base DN of the groups** | `ou=groups,dc=example,dc=org` | Empty: no roles from groups. |
+   | **Search filter** | `(&(objectClass=groupOfNames)(member={bind_dn}))` | Must contain `{bind_dn}` or `{user_name}`. |
+   | **Attribute** | `cn` | The attribute of a group that holds the role name. |
+   | **Prefix** | `clickhouse-` | Groups without the prefix are ignored. |
+
+   The role `console_admin_reader`, created when you set up Component Access, lets the console apply its access policy
+   to the users. Leave **Default roles** empty if you do not use it.
+
+4. Select **Copy**. The text is the configuration of an LDAP server and an LDAP user directory, for example:
+
+   ```xml
+   <clickhouse>
+       <ldap_servers>
+           <corp>
+               <host>ldap.example.com</host>
+               <port>636</port>
+               <enable_tls>yes</enable_tls>
+               <tls_minimum_protocol_version>tls1.2</tls_minimum_protocol_version>
+               <tls_require_cert>demand</tls_require_cert>
+               <tls_ca_cert_file>/etc/clickhouse-server/ldap-ca.crt</tls_ca_cert_file>
+               <bind_dn>uid={user_name},ou=users,dc=example,dc=org</bind_dn>
+               <verification_cooldown>300</verification_cooldown>
+               <operation_timeout>40</operation_timeout>
+               <network_timeout>30</network_timeout>
+               <search_timeout>20</search_timeout>
+           </corp>
+       </ldap_servers>
+       <user_directories>
+           <ldap>
+               <server>corp</server>
+               <roles><console_admin_reader/></roles>
+               <role_mapping>
+                   <base_dn>ou=groups,dc=example,dc=org</base_dn>
+                   <scope>subtree</scope>
+                   <search_filter>(&amp;(objectClass=groupOfNames)(member={bind_dn}))</search_filter>
+                   <attribute>cn</attribute>
+                   <prefix>clickhouse-</prefix>
+               </role_mapping>
+           </ldap>
+       </user_directories>
+   </clickhouse>
+   ```
+
+   The certificate of the LDAP server is always checked (`tls_require_cert` `demand`), with TLS 1.2 or later. Keep
+   these settings.
+
+## Create the roles of the groups {#create-the-roles-of-the-groups}
+
+A group gives a role only if the role exists. For each group that stands for a role, create the role, with
+**Roles & Permissions** in the console or with SQL:
+
+```sql
+CREATE ROLE analysts;
+GRANT SELECT ON sales.* TO analysts;
+```
+
+Create the default roles too, if they do not exist. See [Users and roles](/products/web-console/guides/users-and-roles).
+
+## Install the configuration {#install-the-configuration}
+
+1. Save the text as a file in `config.d` of the server, readable by the server, for example
+   `/etc/clickhouse-server/config.d/ldap.xml`, and the CA certificate at the path of **CA certificate file**.
+
+   With the Docker Compose deployment, put both files next to `config.d/web-console.xml`, and mount them in the
+   `clickhouse` service of `compose.yaml`:
+
+   ```yaml
+       volumes:
+         - ./config.d/web-console.xml:/etc/clickhouse-server/config.d/web-console.xml:ro
+         - ./config.d/ldap.xml:/etc/clickhouse-server/config.d/ldap.xml:ro
+         - ./config.d/ldap-ca.crt:/etc/clickhouse-server/ldap-ca.crt:ro
+   ```
+
+   On Kubernetes, add both as keys of the ConfigMap, and mount them like `web-console.xml`.
+
+2. Restart the server: a new user directory is created only when the server starts.
+
+   ```bash
+   docker compose up -d clickhouse        # recreates the container with the new volumes
+   ```
+
+   Later changes of the LDAP server settings (host, TLS, cooldown) take effect with `SYSTEM RELOAD CONFIG`.
+
+<Note>
+Put all the LDAP user directories of a server in one file. A second `<ldap>` element in another file of `config.d` is
+merged into the first one instead of adding a directory. With several directories, give each a `<name>`, which is
+also the name the console and `system.users` show.
+</Note>
+
+## Verify {#verify}
+
+1. Reload **Identity Providers → LDAP**. The **Directory sign-in (LDAP)** box lists the directory, its LDAP server, the
+   default roles, and the group search. A default role that does not exist is marked.
+2. Select **Test sign-in…**, enter the name and the password of a directory user, and select **Sign in**. The result
+   shows **Signed in as**, **Through** (the user directory), and **Roles**. The password is not stored or recorded.
+3. Sign in to the console as that user. They appear on the **Users** page, read-only, and under **Directory users seen
+   since the start** on the LDAP page.
+
+You can also check the server directly:
+
+```sql
+SELECT name, type, precedence FROM system.user_directories;
+```
+
+## Choose the verification cooldown {#verification-cooldown}
+
+The server checks a password with the directory on every request, unless a check succeeded within
+`verification_cooldown` seconds. The console sends a request for every action, about 80 when signing in, so without a
+cooldown each one is a bind to the directory. The trade-off: a user disabled in the directory, or removed from a group,
+keeps access for at most this long. 300 seconds is the recommended value; 0 checks every request.
+
+To offboard a directory user, disable them, or remove them from the groups, in the directory. Directory users cannot be
+suspended or deleted in the console.
+
+## Active Directory {#active-directory}
+
+Active Directory needs three differences from the form's defaults: users bind with their user principal name, the
+server finds the user's DN for the group search, and the group search follows nested groups. Edit the generated file as
+follows:
+
+```xml
+<clickhouse>
+    <ldap_servers>
+        <corp_ad>
+            <host>dc1.ad.example.org</host>
+            <port>636</port>
+            <enable_tls>yes</enable_tls>
+            <tls_minimum_protocol_version>tls1.2</tls_minimum_protocol_version>
+            <tls_require_cert>demand</tls_require_cert>
+            <tls_ca_cert_file>/etc/clickhouse-server/ad-ca.crt</tls_ca_cert_file>
+            <!-- Bind with the user principal name, then find the user's DN, for the group search. -->
+            <bind_dn>{user_name}@ad.example.org</bind_dn>
+            <user_dn_detection>
+                <base_dn>CN=Users,DC=ad,DC=example,DC=org</base_dn>
+                <search_filter>(&amp;(objectClass=user)(sAMAccountName={user_name}))</search_filter>
+            </user_dn_detection>
+            <verification_cooldown>300</verification_cooldown>
+        </corp_ad>
+    </ldap_servers>
+    <user_directories>
+        <ldap>
+            <name>active_directory</name>
+            <server>corp_ad</server>
+            <roles>
+                <console_admin_reader/>
+            </roles>
+            <!-- LDAP_MATCHING_RULE_IN_CHAIN: the groups the user is in directly or through nested groups. -->
+            <role_mapping>
+                <base_dn>CN=Users,DC=ad,DC=example,DC=org</base_dn>
+                <search_filter>(&amp;(objectClass=group)(member:1.2.840.113556.1.4.1941:={user_dn}))</search_filter>
+                <attribute>cn</attribute>
+                <prefix>clickhouse-</prefix>
+            </role_mapping>
+        </ldap>
+    </user_directories>
+</clickhouse>
+```
+
+- **Bind DN.** `{user_name}@ad.example.org` binds with the user principal name of the domain. Users sign in with their
+  account name, for example `sam`.
+- **User DN detection.** After the bind, the server searches for the user with `sAMAccountName={user_name}` under
+  `base_dn`, and uses the DN it finds as `{user_dn}` in the group search.
+- **Nested groups.** The matching rule `1.2.840.113556.1.4.1941` (`LDAP_MATCHING_RULE_IN_CHAIN`) makes
+  `member:1.2.840.113556.1.4.1941:={user_dn}` match the groups that contain the user directly or through other groups.
+  Set `base_dn` to where the groups are; the default scope is `subtree`.
+- **LDAPS.** Connect to the domain controllers on port 636, and set the certificate of the CA that signed their
+  certificates, as a PEM file, in `tls_ca_cert_file`.
+
+The group names are the `cn` of the groups: the group `clickhouse-analysts` gives the role `analysts`.
+
+## Troubleshooting {#troubleshooting}
+
+### The host name localhost {#the-host-name-localhost}
+
+With `<host>localhost</host>`, the TLS check fails although the certificate is for `localhost`. The OpenLDAP client
+library that the server uses replaces the host name `localhost` with the host name of the machine when it checks the
+certificate. Connect by IP address, for example `127.0.0.1`, when the certificate has that address as a subject
+alternative name, or by a name that is in the certificate.
+
+### Other problems {#other-problems}
+
+| Symptom | Cause and fix |
+|---|---|
+| **Test sign-in…** answers `Refused` with an authentication error | Check the bind DN with the directory's own tools, and the password. For Active Directory, check the domain in the bind DN. |
+| The TLS handshake fails | `tls_ca_cert_file` is not the CA that signed the server's certificate, or the host is not a name in the certificate (see above). Keep `tls_require_cert` `demand`. |
+| The user signs in with no role | The groups do not have the prefix, the search filter finds no group, or the roles do not exist. The LDAP page marks default roles that do not exist. For nested groups in Active Directory, use the matching rule above. |
+| The directory is not listed after the change | A new user directory is created only when the server starts: restart it. |
+| A change in the directory shows late | `verification_cooldown`: the server reuses a successful check for that many seconds. |
+| The user signs in as a local user instead | A user of the same name in `users.xml` or created with SQL comes first: the directories are tried in that order. |
+| A second directory replaces the first | Both `<ldap>` elements must be in one file, each with its own `<name>`. |

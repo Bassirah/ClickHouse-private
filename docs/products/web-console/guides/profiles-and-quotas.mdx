@@ -1,0 +1,82 @@
+---
+description: 'How the Profiles & Quotas page of the web console manages settings profiles, setting constraints, and quotas, and where they apply.'
+sidebarTitle: 'Profiles and quotas'
+slug: /web-console/guides/profiles-and-quotas
+title: 'Profiles and quotas'
+doc_type: 'guide'
+---
+
+The **Profiles & Quotas** page, in the **Administration** category, manages the resource limits of the server: settings profiles, with their settings and constraints, and quotas, with their intervals and limits. Its two tabs are **Settings profiles** and **Quotas**.
+
+Resource limits do not replace privileges: a user with a strict quota can still read every table it has `SELECT` on. Each change is a `CREATE`, `ALTER`, or `DROP` statement for a `SETTINGS PROFILE` or `QUOTA`, reviewed and run like every change of the administration pages (see [Users and roles](/products/web-console/guides/users-and-roles#reviewing-and-applying-a-change)). When the server has clusters, **Apply changes to** runs the statements `ON CLUSTER` (see [Applying changes to a cluster](/products/web-console/guides/users-and-roles#applying-changes-to-a-cluster)).
+
+The page is listed for users who can read `system.settings_profiles` and `system.settings_profile_elements`, or `system.quotas` and `system.quota_limits`. Creating, changing, and deleting need `CREATE`, `ALTER`, and `DROP SETTINGS PROFILE` or `QUOTA`. Profiles and quotas defined in configuration files are marked **Read only**.
+
+## Settings profiles {#settings-profiles}
+
+A settings profile is a named set of settings and constraints. Users and roles get profiles assigned, and a profile can inherit other profiles. Changes apply to new sessions; sessions that are already open keep their settings.
+
+The list shows each profile with its source, its settings, and what it is assigned to (users and roles, or all users with exceptions). The actions are **Edit**, **Assign**, and **Delete**.
+
+### Creating and editing a profile {#creating-and-editing-a-profile}
+
+**Create profile** opens a form with one row per setting:
+
+| Field | Meaning |
+|---|---|
+| **Setting** | The name of a setting of the server, with suggestions from `system.settings`. |
+| **Value** | The value. Integer settings accept byte units, such as `10GiB`. |
+| **Minimum**, **Maximum** | Constraints: users cannot set the setting outside of them. |
+| **Users** | **User can change**, **Cannot be changed** (fixes the value), or **Changeable in readonly**. |
+
+**Add setting** adds a row, and **Inherit profiles** chooses profiles to inherit. The form validates each value with the type of the setting, and the server validates it again. Saving an existing profile replaces all of its settings.
+
+For the common resource limits, the form explains what each setting limits:
+
+| Setting | Limits |
+|---|---|
+| `max_execution_time` | Seconds a query may run. |
+| `max_memory_usage` | Memory of one query on one server, in bytes. |
+| `max_memory_usage_for_user` | Memory of all running queries of the user on one server, in bytes. |
+| `max_threads` | Threads of one query. |
+| `max_concurrent_queries_for_user` | Queries of the user running at the same time on one server. |
+| `max_result_rows`, `max_result_bytes` | Rows or bytes in the result of one query. |
+| `max_rows_to_read`, `max_bytes_to_read` | Rows or bytes one query may read. |
+| `max_query_size` | Bytes of the query text. |
+| `readonly` | `1`: only reading queries, and settings cannot be changed; `2`: reading queries, and settings can be changed. |
+
+For every setting, see the [settings reference](/operations/settings/settings).
+
+### Assigning a profile {#assigning-a-profile}
+
+**Assign** on a profile, or **Assign profile** on the **Profiles & quotas** tab of a user or role, adds the profile with `ALTER USER ... ADD PROFILES` or `ALTER ROLE ... ADD PROFILES`. The other settings and profiles of the user or role stay. Only users and roles that can be changed with SQL are offered.
+
+The **Profiles & quotas** tab of a user or role shows the settings and profiles that apply to it, with where each comes from (the user or role itself, or a role it has), and **Remove** for a profile assigned to it directly. Without any setting or profile, the server default profile (`default_profile` in the server configuration) applies.
+
+## Quotas {#quotas}
+
+A quota counts usage per key (by default per user) over time intervals, and rejects queries once a limit is reached, until the interval ends. Each server counts separately. Queries that read no table, such as `SELECT 1`, are not counted.
+
+The list shows each quota with its source, its key, its limits per interval, and what it applies to, with **Edit** and **Delete**. Deleting a quota stops its limits from applying immediately.
+
+### Creating and editing a quota {#creating-and-editing-a-quota}
+
+**Create quota** asks for:
+
+| Field | Meaning |
+|---|---|
+| **Name** | The name of the quota. It cannot be changed later. |
+| **Count usage per** | **User name**, **Client IP address**, **Forwarded IP address**, **Client key**, **Client key, else user name**, **Client key, else IP address**, or **Not keyed (one shared counter)**. |
+| **Every**, **Unit** | The length of an interval: a number of seconds, minutes, hours, days, weeks, months, quarters, or years. **Randomized start** randomizes the start of the interval. **Add interval** adds another interval. |
+| Limits | `queries`, `query selects`, `query inserts`, `errors`, `result rows`, `result bytes`, `read rows`, `read bytes`, `execution time` (in seconds), `written bytes`, and `failed sequential authentications`. An empty limit is not limited; an interval without limits only tracks usage. Byte limits accept units such as `10GiB`. |
+| **Applies to** | **The selected users and roles**, **All users**, **All users except the selected**, or **Nobody yet**. |
+
+When you edit a quota, intervals you remove are removed from the quota, and the usage counted so far is kept for intervals that stay.
+
+The **Profiles & quotas** tab of a user or role lists the quotas that apply to it, directly or through its roles.
+
+## Limitations {#limitations}
+
+- Settings and profile changes apply to new sessions only.
+- Quotas count per server: on a cluster, each server has its own counters.
+- Quotas do not count queries that read no table.

@@ -1,0 +1,456 @@
+---
+description: 'Reference of the helper processes of the web console: the backup worker, the cluster agent, the access policy worker, the token authenticator, the recovery rehearsal, and the tools image, with their arguments, environment variables, files, logs, and exit codes.'
+sidebarTitle: 'Helper processes'
+slug: /web-console/reference/helper-processes
+title: 'Web console helper processes'
+doc_type: 'reference'
+---
+
+The console runs in the browser and can only send queries to the server. What a browser cannot do, such as running
+schedules, deleting backups, creating containers, or checking single sign-on tokens, is done by helper processes in
+`utils/web-console/`. Each is one Node.js script without packages (Node.js 18 or later), configured with environment
+variables, and documented in its header comment. All but the recovery rehearsal are also in the [tools image](#tools-image).
+
+All of them except the token authenticator connect to the HTTP interface of the server with a service account
+(`CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`), send credentials in the `X-ClickHouse-User` and
+`X-ClickHouse-Key` headers, and keep their state in the [console tables](/products/web-console/reference/console-tables).
+The privileges of each account are in [Privileges](/products/web-console/reference/privileges#service-accounts).
+
+| Process | Script | Tools image command | Runs |
+|---|---|---|---|
+| [Backup worker](#backup-worker) | `backup_worker.mjs` (with `server_bundle.mjs`) | `backup-worker` | Continuously, next to the server |
+| [Cluster agent](#cluster-agent) | `cluster_agent.mjs` | `cluster-agent` | Continuously, on the infrastructure host |
+| [Access policy worker](#access-policy-worker) | `access_policy_worker.mjs` | `access-policy-worker` | Continuously |
+| [Token authenticator](#sso-authenticator) | `sso_authenticator.mjs` | `sso-authenticator` | Continuously, reachable only by the server |
+| [Recovery rehearsal](#recovery-rehearsal) | `recovery_rehearsal.mjs` | None | On demand, on the server host |
+
+## Backup worker {#backup-worker}
+
+`utils/web-console/backup_worker.mjs` does what **Backup & Restore** cannot do in the browser. Each cycle it:
+
+- records a heartbeat (a `check` event named `heartbeat` for `worker:<WORKER_ID>` in `backup_events`), shown on the
+  **Overview**;
+- reconciles unfinished operations, after a browser closed or the server restarted;
+- submits due scheduled backups (`BACKUP ... ASYNC`), and restore tests of schedules that ask for them;
+- makes second copies of scheduled full backups at the schedule's second destination;
+- applies retention, and checks the protection (encryption, Object Lock, versioning) of enabled S3 destinations every
+  6 hours;
+- executes requested deletions, tests listing and deleting at destinations, and removes destination test artifacts;
+- with `BUNDLE_KEY_PROVIDER`, makes and restores [server bundles](#server-bundles);
+- calls a schedule's webhook when a scheduled operation fails.
+
+Several workers can run at the same time: a scheduled run has a deterministic operation ID and artifact path, and the
+server refuses a second backup with the same ID or location. For the model, see
+[Backup & Restore](/products/web-console/guides/backup-and-restore#backup-worker).
+
+### Running the backup worker {#running-the-backup-worker}
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=backup_worker CLICKHOUSE_PASSWORD=... \
+PROD_S3_ACCESS_KEY_ID=... PROD_S3_SECRET_ACCESS_KEY=... \
+node utils/web-console/backup_worker.mjs
+```
+
+With the tools image, the command is `backup-worker`. Run it on the server host, or with the server's data directory
+mounted: deleting from a disk destination needs the disk's directory.
+
+### Arguments of the backup worker {#backup-worker-arguments}
+
+| Argument | Meaning |
+|---|---|
+| None | Run cycles every `INTERVAL_SECONDS` until stopped. |
+| `--once` | Run one cycle and exit. |
+| `bundle-key-init --key-file <path>` | Create a master key file for the `file` provider. `--key-file` defaults to `BUNDLE_KEY_FILE`. |
+| `bundle --destination <name>` | Make a server bundle now, to the enabled destination of that name. `--destination` defaults to `BUNDLE_DESTINATION`. |
+| `bundle-restore --bundle <operation ID> --mode compare` | Compare a server bundle with the files of this host. |
+| `bundle-restore --bundle <operation ID> --mode stage` | Write the files of a server bundle into a new staging directory. `--mode` defaults to `compare`. |
+
+The `bundle*` commands are for a person on the worker host. They are the only way to make and restore bundles with the
+`passphrase` provider, which reads the passphrase from a terminal without echoing it.
+
+### Environment variables of the backup worker {#backup-worker-environment}
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLICKHOUSE_URL` | `http://127.0.0.1:8123` | HTTP interface of the server. |
+| `CLICKHOUSE_USER` | `default` | Service account. |
+| `CLICKHOUSE_PASSWORD` | Empty | Its password. |
+| `ADMIN_DATABASE` | `console_admin` | Database of the console tables. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
+| `WORKER_ID` | Host name and process ID | Name in the heartbeat and the logs. |
+| `INTERVAL_SECONDS` | `30` | Time between cycles. |
+| `<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY` | None | S3 credentials of the destinations whose credential reference is `<REF>`. |
+| `<REF>_REGION` | `us-east-1` | Region used to sign the S3 requests of those destinations. |
+| `<NOTIFY_REF>` | None | Webhook URL of the schedules whose failure notification (`notify_ref`) is `<NOTIFY_REF>`. |
+
+### Server bundles {#server-bundles}
+
+`BACKUP` does not copy the server's configuration files, the secrets in them, TLS keys, scripts, or Keeper's own state.
+The worker backs those up as server bundles (`server_bundle.mjs`): it reads the files on its host, encrypts them as one
+stream, stores the ciphertext in a temporary table `server_bundle_<id>`, backs that table up to a destination with
+`BACKUP TABLE`, and drops it. The server and the destination only hold ciphertext. A restore brings the table back
+under another name (`server_bundle_restore_<id>`), checks and decrypts it, and either compares the files with this host
+or writes them to a staging directory; it never writes into the server's configuration.
+
+Format version 1: a clear JSON header (the cipher, the key provider, and the wrapped data key; no file names, sizes, or
+checksums), the AES-256-GCM ciphertext of a gzip stream of records with the header as additional authenticated data,
+and the authentication tag. Each bundle has a new random 256-bit data key, wrapped by the key provider.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BUNDLE_KEY_PROVIDER` | Unset: no bundles | `file`, `vault`, or `passphrase`. |
+| `BUNDLE_KEY_FILE` | None | `file` provider: the master key file, made with `bundle-key-init`. It must be readable by its owner only (mode `600`); a file readable by others is refused. It is never included in a bundle. |
+| `VAULT_ADDR` | None | `vault` provider: address of HashiCorp Vault. |
+| `VAULT_TOKEN` | None | `vault` provider: token that may encrypt and decrypt with the Transit key. |
+| `VAULT_TOKEN_FILE` | None | `vault` provider: file with the token, read when `VAULT_TOKEN` is not set. |
+| `VAULT_TRANSIT_KEY` | None | `vault` provider: name of the Transit key. |
+| `VAULT_TRANSIT_MOUNT` | `transit` | `vault` provider: mount of the Transit secrets engine. |
+| `VAULT_NAMESPACE` | Empty | `vault` provider: Vault namespace. |
+| `BUNDLE_PATHS` | `/etc/clickhouse-server` | Files and directories to include, separated by commas. A file the worker cannot read fails the bundle. |
+| `BUNDLE_KEEPER` | Empty | `host:port` of Keeper: the worker asks it for a new snapshot (`csnp`) and includes it. Needs `BUNDLE_KEEPER_SNAPSHOTS`. |
+| `BUNDLE_KEEPER_SNAPSHOTS` | Empty | Snapshot directory of Keeper. |
+| `BUNDLE_STAGING_DIR` | `/var/lib/clickhouse-console/restore-staging` | Where `stage` restores write files. |
+| `BUNDLE_COMPARE_ROOT` | `/` | Root under which the paths of a bundle are compared with this host. |
+| `BUNDLE_DESTINATION` | Empty | Destination of automatic bundles (not with `passphrase`). |
+| `BUNDLE_EVERY_HOURS` | `0` | Interval of automatic bundles, in hours; `0`: only on request. |
+
+| Provider | Where the master key is | Bundles from the console and on a schedule |
+|---|---|---|
+| `file` | A file on the worker host, readable by its owner only. Keep a copy out of band: without it, no bundle can be decrypted. | Yes |
+| `vault` | The Transit secrets engine of Vault; the key never leaves Vault. | Yes |
+| `passphrase` | Nowhere: derived from a passphrase with scrypt; at least 12 characters. | No: only the `bundle` and `bundle-restore` commands |
+
+`bundle-key-init` refuses to replace an existing file, prints the fingerprint of the key (`sha256:` followed by 16
+hexadecimal characters), and reminds you to copy the key out of band.
+
+### Files of the backup worker {#backup-worker-files}
+
+| File | Access | When |
+|---|---|---|
+| Directories of disk destinations, under the path of the disk in `system.disks` | Read, delete | Deletions, retention, and destination tests of disk destinations. Only under `<disk path>/<prefix>/<artifact>`. |
+| `BUNDLE_PATHS` | Read | Making a bundle. |
+| `BUNDLE_KEY_FILE` | Read; created by `bundle-key-init` | `file` provider. |
+| `VAULT_TOKEN_FILE` | Read | `vault` provider. |
+| `BUNDLE_KEEPER_SNAPSHOTS` | Read | Making a bundle with `BUNDLE_KEEPER`. |
+| `BUNDLE_STAGING_DIR/<time>-<operation ID prefix>/` | Written: directories with mode `700`, files with mode `600`, and a `RESTORE.txt` | `stage` restores. It holds secrets in clear: delete it when done. |
+
+### Logs and exit codes of the backup worker {#backup-worker-logs}
+
+The worker writes one JSON object per line to standard output, without credentials:
+`{"time": "<ISO time>", "worker": "<WORKER_ID>", "message": "...", ...}`, for example the messages `started` and
+`cycle failed`. A failed cycle is logged and the next cycle runs after the interval. The `bundle*` commands print their
+result, and on failure print `error: <message>` to standard error and exit with code `1`.
+
+## Cluster agent {#cluster-agent}
+
+`utils/web-console/cluster_agent.mjs` executes the lifecycle operations of **Clusters** on the infrastructure host. It:
+
+- executes queued operations with checkpoints, one at a time per cluster, after checking on the server that the
+  requester holds the capability (`EXECUTE AS <requester> CHECK GRANT`);
+- provisions and changes clusters through a provider: `docker-compose` (a local lab, always available) and `kubernetes`
+  (with the ClickHouse operator, when `CLUSTER_AGENT_KUBECONFIG` is set);
+- observes every registered cluster and records what it saw;
+- records a heartbeat each cycle (`cluster_events`, kind `heartbeat`, `op_id` `agent:<AGENT_ID>`) with its providers,
+  environments, and public key.
+
+It runs only `docker` and `kubectl`, with fixed argument lists, never through a shell. For the model, see
+[Clusters](/products/web-console/guides/clusters#cluster-agent).
+
+### Running the cluster agent {#running-the-cluster-agent}
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=cluster_agent CLICKHOUSE_PASSWORD=... \
+CLUSTER_AGENT_STATE_DIR=/var/lib/clickhouse-console/clusters CLUSTER_AGENT_ENVIRONMENTS=lab,development \
+node utils/web-console/cluster_agent.mjs
+```
+
+With the tools image, the command is `cluster-agent`. The `docker-compose` provider needs the `docker` CLI with Compose
+v2 and access to the Docker socket, which is equivalent to root on the host;
+`utils/web-console/deploy/compose.cluster-agent.yaml` runs the agent with the host network and the socket.
+
+| Argument | Meaning |
+|---|---|
+| None | Run cycles every `INTERVAL_SECONDS` until stopped. |
+| `--once` | Run one cycle, observing every cluster, and exit. |
+
+### Environment variables of the cluster agent {#cluster-agent-environment}
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLICKHOUSE_URL` | `http://127.0.0.1:8123` | The server with the console tables. |
+| `CLICKHOUSE_USER` | `default` | Service account. |
+| `CLICKHOUSE_PASSWORD` | Empty | Its password. |
+| `ADMIN_DATABASE` | `console_admin` | Database of the console tables. |
+| `AGENT_ID` | Host name and process ID | Name in heartbeats, claims, and logs. |
+| `INTERVAL_SECONDS` | `10` | Time between cycles. |
+| `OBSERVE_SECONDS` | `30` | Time between observations of a cluster. |
+| `CLUSTER_AGENT_STATE_DIR` | Empty | Directory of the generated deployments, their secrets, and the agent's key pair. Required for `docker-compose`. In the tools image: `/var/lib/clickhouse-console/clusters`. |
+| `CLUSTER_AGENT_ENVIRONMENTS` | `lab,development` | Environments the agent may change. Operations on clusters of other environments are rejected. |
+| `CLUSTER_AGENT_PORT_RANGE` | `31000-31999` | Host ports for lab endpoints, bound to `127.0.0.1`. |
+| `CLUSTER_AGENT_IMAGES` | `clickhouse/clickhouse-server,clickhouse/clickhouse-keeper,contentsquareplatform/chproxy` | Image repositories allowed for nodes. |
+| `CLUSTER_AGENT_HOST_ALIAS` | `host.docker.internal` | Name of the Docker host as seen from the containers, for S3 endpoints published on it. |
+| `CLUSTER_AGENT_KUBECONFIG` | Empty | Kubeconfig of the agent. Setting it enables the `kubernetes` provider. |
+| `CLUSTER_AGENT_KUBE_CONTEXT` | The current context of the kubeconfig | Context to use. |
+| `CLUSTER_AGENT_K8S_NAMESPACES` | `chc-*` | Namespaces the agent may use: names, or prefixes followed by `*`, separated by commas. |
+| `CLUSTER_AGENT_OPERATOR_NAMESPACE` | `clickhouse-operator-system` | Namespace of the operator. |
+| `CLUSTER_AGENT_OPERATOR_VERSIONS` | `v0.0.8` | Operator versions the agent accepts. |
+| `CLUSTER_AGENT_K8S_HOST_ALIAS` | `host.k3d.internal` | Name of the agent host as seen from the pods, for S3 endpoints published on it. |
+| `<REF>_USER`, `<REF>_PASSWORD` | None | Credentials of a registered deployment whose credential reference is `<REF>`. |
+| `<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY` | None | Credentials of an S3 backup destination, as for the backup worker. |
+
+### Files of the cluster agent {#cluster-agent-files}
+
+| File | Meaning |
+|---|---|
+| `CLUSTER_AGENT_STATE_DIR/agent-key.pem` | The agent's RSA key pair (3072 bits), mode `600`, created on first use. The console encrypts the administrator password of a new cluster with its public key. Back it up. |
+| `CLUSTER_AGENT_STATE_DIR/chc-<id>/` | One directory per `docker-compose` cluster: `compose.yaml`, the node configuration, `secrets.env` (mode `600`, with `CH_ADMIN_PASSWORD`, `CH_CLUSTER_SECRET`, `CH_INTERSERVER_PASSWORD`, `CH_PROXY_PASSWORD`), `.console-hashes.json`, and `.console-applied-settings.json`. |
+| `CLUSTER_AGENT_STATE_DIR/<resource>/resources.json` | For `kubernetes` clusters: the applied resources, mode `600`. |
+
+The directory is created with mode `700`. Docker objects carry the labels `io.clickhouse.console.cluster` and
+`io.clickhouse.console.managed-by`; the agent stops or deletes only objects with the labels of the cluster it works on.
+
+### Logs and exit codes of the cluster agent {#cluster-agent-logs}
+
+One JSON object per line on standard output: `{"time": "<ISO time>", "agent": "<AGENT_ID>", "message": "...", ...}`,
+for example `started`, `cycle failed`, and `observation failed`. Without `--once`, a failed cycle is logged and the next
+one runs. With `--once`, a failed cycle exits with code `1`.
+
+## Access policy worker {#access-policy-worker}
+
+`utils/web-console/access_policy_worker.mjs` keeps the native access controls in line with the policy rules of **Data
+Access Policies** when nobody has the console open. Each cycle it:
+
+1. imports user attributes from a feed, when one is configured: only attributes defined with the feed's source, and
+   values the feed no longer reports are removed;
+2. computes the desired state of every enabled rule with the same functions as the console, which it loads from
+   `console.html`;
+3. applies the difference: it creates, changes, and removes only entities recorded in `dap_owned`, and never restores
+   an owned entity that was removed outside the platform;
+4. records ownership in `dap_owned`, a `reconcile` deployment in `dap_deployments`, and a `dap_reconcile` audit record.
+
+Each statement runs as `EXECUTE AS <author>`, the author of the current revision of the rule, so the server checks
+that user's privileges. For the model, see
+[Data Access Policies](/products/web-console/guides/data-access-policies#access-policy-worker).
+
+### Running the access policy worker {#running-the-access-policy-worker}
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=access_policy_worker CLICKHOUSE_PASSWORD=... \
+ATTRIBUTE_FEED=/var/lib/clickhouse-console/hr-feed.json ATTRIBUTE_FEED_SOURCE=hr INTERVAL_SECONDS=60 \
+node utils/web-console/access_policy_worker.mjs
+```
+
+With the tools image, the command is `access-policy-worker`.
+
+| Argument | Meaning |
+|---|---|
+| None | Run cycles every `INTERVAL_SECONDS` until stopped. |
+| `--once` | Run one cycle and exit. |
+
+### Environment variables of the access policy worker {#access-policy-worker-environment}
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLICKHOUSE_URL` | `http://127.0.0.1:8123` | HTTP interface of the server. |
+| `CLICKHOUSE_USER` | `default` | Service account. |
+| `CLICKHOUSE_PASSWORD` | Empty | Its password. |
+| `ADMIN_DATABASE` | `console_admin` | Database of the console tables. |
+| `CLUSTER` | Empty: this server only | Apply the statements `ON CLUSTER` this cluster. |
+| `INTERVAL_SECONDS` | `60` | Time between cycles. |
+| `CONSOLE_HTML` | `programs/server/console.html` of the repository (relative to the script) | Path of `console.html`. In the tools image: `/opt/clickhouse-console/console.html`. |
+| `ATTRIBUTE_FEED` | Empty: no import | A JSON file, or an `https://` URL, of `[{"user": "...", "attributes": {"department": "..."}}]`. |
+| `ATTRIBUTE_FEED_SOURCE` | `feed` | Name of the feed's source, as in the attribute definitions. |
+| `ATTRIBUTE_FEED_TOKEN` | Empty | Bearer token for an `https://` feed. |
+
+### LDAP attributes {#ldap-attributes}
+
+The attributes can come from an LDAP directory instead of `ATTRIBUTE_FEED`. Setting both `ATTRIBUTE_FEED` and
+`LDAP_ATTRIBUTES_URL` is refused: one worker imports from one source.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LDAP_ATTRIBUTES_URL` | Empty: no LDAP import | `ldaps://host[:636]`, or `ldap://host[:389]` with `LDAP_ATTRIBUTES_STARTTLS=1`. Plain LDAP is refused. |
+| `LDAP_ATTRIBUTES_STARTTLS` | Empty | `1`: use StartTLS on an `ldap://` URL. |
+| `LDAP_ATTRIBUTES_CA_FILE` | The system's certificate authorities | Certificate authority of the LDAP server. The certificate is always checked. |
+| `LDAP_ATTRIBUTES_BIND_DN` | Required | A read-only service account of the directory. |
+| `LDAP_ATTRIBUTES_PASSWORD_FILE` | None | File with its password, readable by the worker only. |
+| `LDAP_ATTRIBUTES_PASSWORD` | Empty | Its password, when `LDAP_ATTRIBUTES_PASSWORD_FILE` is not set. |
+| `LDAP_ATTRIBUTES_BASE_DN` | Required | Where the users are, for example `ou=users,dc=example,dc=org`. |
+| `LDAP_ATTRIBUTES_FILTER` | `(objectClass=person)` | Which entries are users. |
+| `LDAP_ATTRIBUTES_USER` | `uid` | LDAP attribute that is the ClickHouse user name (`sAMAccountName` for Active Directory). |
+| `LDAP_ATTRIBUTES_MAP` | Required | `<attribute>=<LDAP attribute>` pairs, separated by commas, for example `department=departmentNumber,branch=l`. |
+| `ATTRIBUTE_FEED_SOURCE` | `ldap` when `LDAP_ATTRIBUTES_URL` is set | Source of the attribute definitions the directory fills. |
+
+A multi-valued LDAP attribute gives its first value. A user who leaves the directory, or loses an LDAP attribute, loses
+the value. A search that finds no user while values exist is refused, not applied, so that a wrong filter or base DN
+cannot remove every value at once; the values then become stale.
+
+### Files and logs of the access policy worker {#access-policy-worker-files}
+
+| File | Access |
+|---|---|
+| `CONSOLE_HTML` | Read at startup: the model functions are extracted from it. |
+| `ATTRIBUTE_FEED`, when it is a file | Read every cycle. |
+| `LDAP_ATTRIBUTES_CA_FILE`, `LDAP_ATTRIBUTES_PASSWORD_FILE` | Read, with the LDAP attribute import. |
+
+One JSON object per line on standard output: `{"time": "<ISO time>", "worker": "<host>-<pid>", "message": "...", ...}`,
+for example `started`, `reconciled` (with the deployment ID, the result, the number of changes, and the keys that
+failed), and `cycle failed`. With `--once`, a failed cycle sets the exit code to `1`.
+
+## Token authenticator {#sso-authenticator}
+
+`utils/web-console/sso_authenticator.mjs` is the HTTP authentication server of single sign-on. The ClickHouse server
+asks it to check the sign-ins of the users `IDENTIFIED WITH http SERVER '<SSO_SERVER_NAME>'`; it accepts the sign-in
+when the password is a valid access token of the provider for that user. Optionally, its user sync creates, changes,
+and drops those users from the members of the provider's groups. The HTTP contract, the checks, and the sync are in the
+[token authenticator API](/products/web-console/reference/token-authenticator-api).
+
+### Running the token authenticator {#running-the-token-authenticator}
+
+```bash
+SSO_ISSUER=https://keycloak.example.com/realms/clickhouse SSO_CLIENT_ID=clickhouse-console SSO_LISTEN=127.0.0.1:29700 \
+node utils/web-console/sso_authenticator.mjs
+```
+
+With the tools image, the command is `sso-authenticator`. Only the ClickHouse server should reach it. The server
+points to it with [`http_authentication_servers`](/products/web-console/reference/configuration#http-authentication-servers).
+
+| Argument | Meaning |
+|---|---|
+| None | Listen on `SSO_LISTEN`, and run the user sync every `SSO_SYNC_INTERVAL_SECONDS` when it is configured. |
+| `--check-config` | Fetch the provider's keys, print the configuration as JSON (issuer, client ID, audience, user name claim, token type, number of keys, and the sync settings or `null`), and exit. |
+| `--sync-once` | Run one user sync, print each change on a line, and exit. Refused when the sync is not configured. |
+
+### Environment variables of the token authenticator {#sso-authenticator-environment}
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SSO_ISSUER` | Required | Issuer of the provider, for example `https://keycloak.example.com/realms/clickhouse`. HTTPS; plain HTTP only on `localhost`, `127.0.0.1`, or `[::1]`. |
+| `SSO_CLIENT_ID` | Required | Client of the console: the tokens must be issued to it (`azp`). |
+| `SSO_AUDIENCE` | `SSO_CLIENT_ID` | Audience the access token must name. Set to empty: not checked. |
+| `SSO_USERNAME_CLAIM` | `preferred_username` | Claim that is the ClickHouse user name. |
+| `SSO_TOKEN_TYPE` | `Bearer` | Value of the claim `typ` of access tokens, as in Keycloak. Set to empty: not checked. |
+| `SSO_LISTEN` | `127.0.0.1:29700` | Address to listen on, `host:port`. |
+| `SSO_SYNC_CLIENT_ID` | Empty | Confidential client of the provider with a service account that can read users and groups (Keycloak: the roles `view-users` and `query-groups` of `realm-management`). |
+| `SSO_SYNC_SECRET_FILE` | None | File with its client secret. |
+| `SSO_SYNC_SECRET` | Empty | The client secret, when `SSO_SYNC_SECRET_FILE` is not set. |
+| `CLICKHOUSE_URL` | `http://127.0.0.1:8123` | HTTP interface of the server, for the sync. |
+| `CLICKHOUSE_USER` | Empty | Service account of the sync (`sso_sync`). |
+| `CLICKHOUSE_PASSWORD` | Empty | Its password. |
+| `SSO_SERVER_NAME` | `sso` | Name of this service in `http_authentication_servers`. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
+| `SSO_ROLE_PREFIX` | `clickhouse-` | Prefix of the groups that give roles. |
+| `SSO_DEFAULT_ROLES` | Empty | Roles every synced user gets, separated by commas. |
+| `SSO_SYNC_INTERVAL_SECONDS` | `60` | Time between syncs. |
+| `ADMIN_DATABASE` | `console_admin` | Database of the console tables, for the audit records. Set to empty: no audit records. |
+
+The sync is turned on by `SSO_SYNC_CLIENT_ID` or a secret, and then needs all of `SSO_SYNC_CLIENT_ID`, the secret, and
+`CLICKHOUSE_USER`.
+
+### Files, logs, and exit codes of the token authenticator {#sso-authenticator-logs}
+
+It reads `SSO_SYNC_SECRET_FILE` at startup, and writes nothing to disk. It logs one JSON object per line on standard
+output: `{"time": "<ISO time>", "authenticator": "<host>-<pid>", "message": "...", ...}`; the messages are listed in the
+[token authenticator API](/products/web-console/reference/token-authenticator-api#log-format).
+
+| Exit | When |
+|---|---|
+| `2` | A configuration error, printed as `sso_authenticator: <message>` on standard error: `SSO_ISSUER` or `SSO_CLIENT_ID` missing, a URL that is not HTTPS, an invalid `SSO_SERVER_NAME`, `ADMIN_DATABASE`, or role in `SSO_DEFAULT_ROLES`, an incomplete sync configuration, or `--sync-once` without a sync. |
+| `0` | `--check-config` or `--sync-once` finished. |
+
+## Recovery rehearsal {#recovery-rehearsal}
+
+`utils/web-console/recovery_rehearsal.mjs` proves that a whole server can be recovered from its backups, and from a
+staged server bundle when one is given, on an isolated server that it starts for the rehearsal and removes after it.
+Production is only read, and receives the result. The rehearsal server:
+
+- listens on `127.0.0.1` only, on its own ports, with its own data directory and embedded Keeper;
+- starts from the staged configuration with `--staged`, with the storage, Keeper, clusters, named collections storage,
+  `openSSL` section, and paths replaced, so that it cannot write to production;
+- restores each backup from its real destination, which it only reads, into its own disk (`storage_policy = 'default'`,
+  `allow_non_empty_tables = 0`);
+- compares every table that has recorded values: the row count and the fingerprint (`groupBitXor(cityHash64(*))`).
+
+The result is recorded as a `check` event named `rehearsal` of each backup (**Recovery rehearsed** in the inventory) and
+as a `recovery_rehearsal` audit record. See [Recover a server](/products/web-console/how-to/recover-a-server).
+
+### Running the recovery rehearsal {#running-the-recovery-rehearsal}
+
+```bash
+node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user <admin> --password <password> \
+    --binary /usr/bin/clickhouse [--staged <staging directory of a server bundle>]
+```
+
+Run it on the server host, or on a host that mounts the backups: a disk destination is read from its path on this host.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--url <url>` | `CLICKHOUSE_URL`, or `http://127.0.0.1:8123` | The production server. |
+| `--user <user>` | `CLICKHOUSE_USER`, or `default` | User with `SELECT` on the console tables and `INSERT` on `backup_events` and `audit_log`. |
+| `--password <password>` | `CLICKHOUSE_PASSWORD`, or empty | Its password. |
+| `--backup <operation ID>` | The latest successful backup of each database | A backup to rehearse; repeat for several. |
+| `--staged <directory>` | None | Staging directory of a server bundle that includes `/etc/clickhouse-server`: the rehearsal server starts from `<directory>/etc/clickhouse-server/config.xml`. |
+| `--binary <path>` | `clickhouse` | The `clickhouse` binary of the rehearsal server. |
+| `--work-dir <directory>` | `tmp/recovery-rehearsal-<milliseconds>` under the current directory | Directory of the rehearsal server: its configuration, data, and logs. |
+| `--keep` | Off | Keep the work directory at the end. |
+
+### Environment variables of the recovery rehearsal {#recovery-rehearsal-environment}
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` | As the arguments | Used when the argument is not given. |
+| `ADMIN_DATABASE` | `console_admin` | Database of the console tables. |
+| `REHEARSAL_HTTP_PORT`, `REHEARSAL_TCP_PORT`, `REHEARSAL_KEEPER_PORT`, `REHEARSAL_RAFT_PORT` | A free port chosen by the system | Ports of the rehearsal server. |
+| `<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY` | None | Credentials to read the S3 destinations whose credential reference is `<REF>`. |
+
+### Files, logs, and exit codes of the recovery rehearsal {#recovery-rehearsal-logs}
+
+The work directory holds `config/` (the configuration, with `config.d/zz-rehearsal.xml` and `users.d/zz-rehearsal.xml`
+for a user `rehearsal` with a random password), `data/`, `server.log`, and `server.err.log`. It is removed at the end,
+unless `--keep` is given.
+
+The rehearsal prints progress lines as `[HH:MM:SS] <message>` on standard output, and ends with
+`Recovery rehearsal: <n> of <m> backups restored and matched`, or `Recovery rehearsal failed: <reason>`.
+
+| Exit | When |
+|---|---|
+| `0` | Every chosen backup was restored and matched. |
+| `1` | A backup failed, the rehearsal server did not start, or another error occurred (printed as `error: <message>` on standard error). |
+
+## Tools image {#tools-image}
+
+The image `clickhouse-console-tools:<version>` (`utils/web-console/Dockerfile.tools`) runs one helper process, chosen by
+its first argument. It is built by `package_images.sh`; see
+[Build and package the images](/products/web-console/how-to/build-and-package-images).
+
+| Part | Value |
+|---|---|
+| Base | `node:22.22.0-bookworm-slim` |
+| Tools | The `docker` CLI and its Compose plugin from `docker:28.5.2-cli`; `kubectl` `v1.31.5` (linux/amd64), checked against its SHA-256 |
+| Files | `/opt/clickhouse-console/`: `backup_worker.mjs`, `server_bundle.mjs`, `cluster_agent.mjs`, `access_policy_worker.mjs`, `sso_authenticator.mjs`, `console.html`, and `VERSION` |
+| Entry point | `clickhouse-console-tools` (`tools-entrypoint.sh`), default command `help` |
+| User | `node` |
+| Working directory | `/opt/clickhouse-console` |
+| Environment | `CONSOLE_HTML=/opt/clickhouse-console/console.html`, `CLUSTER_AGENT_STATE_DIR=/var/lib/clickhouse-console/clusters` |
+| State directory | `/var/lib/clickhouse-console`, owned by `node`: mount a volume there to keep the agent's key pair and deployments |
+| Labels | `org.opencontainers.image.title`, `description`, `version`, `revision`, and `licenses` (`Apache-2.0`) |
+
+### Commands of the tools image {#tools-image-commands}
+
+Further arguments are passed to the process, for example `backup-worker --once`.
+
+| Command | Runs |
+|---|---|
+| `backup-worker [arguments]` | `node /opt/clickhouse-console/backup_worker.mjs [arguments]` |
+| `cluster-agent [arguments]` | `node /opt/clickhouse-console/cluster_agent.mjs [arguments]` |
+| `access-policy-worker [arguments]` | `node /opt/clickhouse-console/access_policy_worker.mjs [arguments]` |
+| `sso-authenticator [arguments]` | `node /opt/clickhouse-console/sso_authenticator.mjs [arguments]` |
+| `version` | Prints `VERSION`: the version and the commit. |
+| `help` (default) | Prints the usage. |
+| Anything else | Prints `Unknown process '<name>'. Choose backup-worker, cluster-agent, access-policy-worker, or sso-authenticator.` and exits with code `2`. |
+
+```bash
+docker run --rm clickhouse-console-tools:<version> version
+docker run -d --name backup-worker -e CLICKHOUSE_URL=http://clickhouse:8123 -e CLICKHOUSE_USER=backup_worker \
+    -e CLICKHOUSE_PASSWORD=... clickhouse-console-tools:<version> backup-worker
+```
+
+The recovery rehearsal is not in the image: it starts a `clickhouse` server, so it runs on a host with the binary.

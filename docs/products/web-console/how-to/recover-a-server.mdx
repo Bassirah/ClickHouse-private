@@ -1,0 +1,114 @@
+---
+description: 'How to recover a whole ClickHouse server with the web console from its server bundle and database backups, and how to rehearse the recovery on an isolated server.'
+sidebarTitle: 'Recover a server'
+slug: /web-console/how-to/recover-a-server
+title: 'Recover a whole server'
+doc_type: 'guide'
+---
+
+This guide rebuilds a lost server from its backups: the configuration and Keeper state from a [server bundle](/products/web-console/guides/backup-and-restore#server-bundles), and the databases from the backups of [Backup & Restore](/products/web-console/guides/backup-and-restore). It also shows how to rehearse the procedure without touching production.
+
+## Prerequisites {#prerequisites}
+
+Prepare these before you need them, and keep the list with the master key of the server bundles:
+
+- the version of the images (`CONSOLE_VERSION`) and of the server;
+- the master key of the server bundles, stored out of band: the key file, access to Vault, or the passphrase (see [Protect backups](/products/web-console/how-to/protect-backups));
+- the credentials of at least one destination, readable without the lost server;
+- server bundles made by the [backup worker](/products/web-console/guides/backup-and-restore#backup-worker), and database backups at that destination.
+
+<Note>
+The worker finds a bundle and its destination in the console tables of the server it connects to (`CLICKHOUSE_URL`). `bundle-restore --bundle <ID>` therefore works only against a server whose console tables record that bundle; on a server whose console tables are empty, it reports `No server bundle <ID>`.
+</Note>
+
+## Recover {#recover}
+
+1. **Start a new server** from the same images, with an empty data volume: see [Deploy with Docker Compose](/products/web-console/how-to/deploy-with-docker-compose) or [Deploy on Kubernetes](/products/web-console/how-to/deploy-on-kubernetes).
+
+2. **Restore the configuration.** On the new host, run the worker with the same key settings (`BUNDLE_KEY_PROVIDER` and `BUNDLE_KEY_FILE`, or the Vault variables), and stage the latest server bundle:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker backup-worker bundle-restore --bundle <ID> --mode stage
+   ```
+
+   Without Compose, run `node utils/web-console/backup_worker.mjs bundle-restore --bundle <ID> --mode stage`. The bundle IDs are on the **Server state** tab of a console that still sees the destination, or in the destination under `server/`. The command prints the staging directory:
+
+   ```text
+   bundle_restore <operation ID>: succeeded, staged in <BUNDLE_STAGING_DIR>/<time>-<ID>
+   ```
+
+   The directory, readable by its owner only, holds the files under their original paths and a `RESTORE.txt`. Stop the server, copy the staged configuration into place, restore the owners and modes of the files, and start the server.
+
+3. **Restore Keeper**, if the bundle includes a Keeper snapshot: stop Keeper, move its snapshots and logs aside, put the staged snapshot into its snapshot directory, and start it.
+
+4. **Restore the databases.** In the console:
+   1. On **Administration** → **Backup & Restore**, select **Set up** if the page offers it.
+   2. On **Destinations**, add the destinations again with the same names, then test and enable them.
+   3. For the latest backup of each database, select **Restore…**. In **Names and options**, replace the suggested target `restore_<database>_<time>` with the database's own name. Select **Also restore the access entities**, and **Also restore the functions, workloads, and resources**, when the backup contains them. On **Confirm**, type the target name and select **Start restore**.
+
+   The restore fails on existing objects instead of adding data to them: on a new server, the databases and access entities do not exist yet.
+
+5. **Check.** On **Server state**, select **Compare** on the bundle: every file should be the same as on the host. Then run a restore test of the latest backups: **Test restore** on their rows in **Backups**.
+
+6. **Clean up.** Delete the staging directory: it holds secrets in clear.
+
+## Rehearse the recovery {#rehearse-the-recovery}
+
+`utils/web-console/recovery_rehearsal.mjs` proves the procedure without touching production. It:
+
+- starts an isolated server that listens on `127.0.0.1` only, on its own ports, with its own data directory and its own embedded Keeper;
+- with `--staged`, starts it from the staged configuration of a server bundle, with its storage, Keeper, clusters, and paths replaced, so that it can never write to production; this checks that the configuration of the bundle starts;
+- restores each backup from its real destination, which it only reads, into the rehearsal server's own disk;
+- compares every table that has recorded values: row count and fingerprint (`groupBitXor(cityHash64(*))`);
+- records the result with each backup, shown as **Recovery rehearsed** (or **Rehearsal failed**) in the inventory, and in the audit log, then stops the rehearsal server and removes its directory.
+
+Production is read (destinations, backups, and the values recorded when they were made) and receives only the result.
+
+1. **Choose the host.** Run the rehearsal on the server host, or a host that mounts the backups: a disk destination is read from its path on this host. It needs Node.js 18 or later and a `clickhouse` binary.
+
+2. **Prepare the account and the credentials.** The user needs `SELECT` on the console tables and `INSERT` on `backup_events` and `audit_log`. For S3 destinations, export the worker's credentials: `<REF>_ACCESS_KEY_ID` and `<REF>_SECRET_ACCESS_KEY`.
+
+3. **Optional: stage a bundle.** Select **Stage…** on the latest bundle on **Server state**, or run `bundle-restore --mode stage`. `--staged` needs a bundle that includes `/etc/clickhouse-server` (the default of `BUNDLE_PATHS`).
+
+4. **Run it**, for example monthly:
+
+   ```bash
+   node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user <admin> --password <password> \
+       --binary /usr/bin/clickhouse [--staged <staging directory of a server bundle>]
+   ```
+
+   | Argument | Meaning |
+   |---|---|
+   | `--url`, `--user`, `--password` | The production server and its account (default `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, then `http://127.0.0.1:8123` and `default`). |
+   | `--backup <operation ID>` | A backup to rehearse; repeat for several. Default: the latest successful backup of each database. |
+   | `--staged <directory>` | The staging directory of a server bundle, to start from its configuration. |
+   | `--binary <path>` | The `clickhouse` binary (default `clickhouse`). |
+   | `--work-dir <directory>` | The directory of the rehearsal server (default `tmp/recovery-rehearsal-<time>` in the current directory). |
+   | `--keep` | Keep the work directory after the rehearsal. |
+
+   The ports are chosen free by the system, or set with `REHEARSAL_HTTP_PORT`, `REHEARSAL_TCP_PORT`, `REHEARSAL_KEEPER_PORT`, and `REHEARSAL_RAFT_PORT`. `ADMIN_DATABASE` names the database of the console tables (default `console_admin`).
+
+## Verify {#verify}
+
+The rehearsal prints a line per backup, then a summary, and exits with code 0 only when every backup was restored and matched:
+
+```text
+Recovery rehearsal: 2 of 2 backups restored and matched
+```
+
+In the console, the backups show **Recovery rehearsed**; its tooltip names the time and whether the staged configuration was used. The audit log has a `recovery_rehearsal` record.
+
+## Troubleshooting {#troubleshooting}
+
+| Message | Cause and fix |
+|---|---|
+| `There is no successful backup to rehearse.` | No successful backup with an existing destination is recorded. Make a backup first. |
+| `No successful backup <ID> with an existing destination.` | The ID given with `--backup` is not a successful backup, or its destination was removed. |
+| `The backups of the disk <name> are not readable here (<path>): run the rehearsal on the server host.` | Run it where the disk's path exists. |
+| `Set <REF>_ACCESS_KEY_ID and _SECRET_ACCESS_KEY to read the destination <name>.` | Export the worker's credentials of that S3 destination. |
+| `<directory>/config.xml does not exist: --staged is the staging directory of a server bundle that includes /etc/clickhouse-server.` | Stage a bundle that includes `/etc/clickhouse-server`, or omit `--staged`. |
+| `The rehearsal server did not start with the staged configuration: …` | The configuration of the bundle does not start: fix it before you need it. `--keep` keeps `server.log` and `server.err.log` in the work directory. |
+| `No server bundle <ID>: give --bundle <operation ID>.` | The worker's server has no record of the bundle: see the note under [Prerequisites](#prerequisites). |
+| `The bundle was encrypted with the master key …; this worker has ….` | Use the key the bundle was made with. |
+
+For the restore itself, see [Restores](/products/web-console/guides/backup-and-restore#restores); for the helper processes, [Helper processes](/products/web-console/reference/helper-processes#recovery-rehearsal).

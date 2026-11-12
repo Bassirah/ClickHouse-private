@@ -2,7 +2,7 @@
 -- Run it as an administrator after selecting Set up on the pages that create the console tables (Component Access,
 -- Backup & Restore, Clusters, and the Data Access Policies tabs), with the passwords of `.env`:
 --
---   clickhouse-client --user default --password ... --param_backup_pw=... --param_policy_pw=... --param_agent_pw=... --param_sso_pw=... \
+--   clickhouse-client --user default --password ... --param_backup_pw=... --param_policy_pw=... --param_agent_pw=... \
 --       --multiquery < service-accounts.sql
 --
 -- Replace the placeholders in angle brackets first; lines that contain one are commented out, so that nothing is
@@ -32,14 +32,15 @@ GRANT SHOW USERS, SHOW ROLES, SHOW ROW POLICIES ON *.* TO access_policy_worker;
 -- GRANT IMPERSONATE ON <each rule author> TO access_policy_worker;
 
 -- SSO token authenticator, for its user sync only (checking tokens needs no account): creates, changes, and drops the users
--- identified with it, grants the roles of their groups, and records each change in the audit log.
-CREATE USER IF NOT EXISTS sso_sync IDENTIFIED WITH sha256_password BY {sso_pw:String};
-GRANT CREATE USER, ALTER USER, DROP USER ON *.* TO sso_sync;
-GRANT SHOW USERS, SHOW ROLES ON *.* TO sso_sync;
-GRANT SELECT ON system.users TO sso_sync;
-GRANT SELECT ON system.roles TO sso_sync;
-GRANT SELECT ON system.role_grants TO sso_sync;
-GRANT INSERT ON console_admin.audit_log TO sso_sync;
+-- identified with it, grants the roles of their groups, and records each change in the audit log. Only with single
+-- sign-on (compose.sso.yaml): uncomment these lines and add --param_sso_pw="$SSO_SYNC_PASSWORD" to the command above.
+-- CREATE USER IF NOT EXISTS sso_sync IDENTIFIED WITH sha256_password BY {sso_pw:String};
+-- GRANT CREATE USER, ALTER USER, DROP USER ON *.* TO sso_sync;
+-- GRANT SHOW USERS, SHOW ROLES ON *.* TO sso_sync;
+-- GRANT SELECT ON system.users TO sso_sync;
+-- GRANT SELECT ON system.roles TO sso_sync;
+-- GRANT SELECT ON system.role_grants TO sso_sync;
+-- GRANT INSERT ON console_admin.audit_log TO sso_sync;
 -- The roles the groups give, with the admin option, so that it can grant only those (or ROLE ADMIN for every role):
 -- GRANT <role> TO sso_sync WITH ADMIN OPTION;
 

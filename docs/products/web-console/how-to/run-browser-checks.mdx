@@ -1,0 +1,158 @@
+---
+description: 'Run the browser acceptance suites of the web console with run_e2e.sh, against a server, MinIO, cluster agent, OpenLDAP, and Keycloak started for the run.'
+sidebarTitle: 'Run browser checks'
+slug: /web-console/how-to/run-browser-checks
+title: 'Run the browser acceptance checks'
+doc_type: 'guide'
+---
+
+Run the browser acceptance suites of the web console with `utils/web-console/run_e2e.sh`. Every run starts from
+nothing: a new server with an empty data directory, and its own MinIO, cluster agent, Vault, OpenLDAP, Keycloak, and
+token authenticator as the suites need them, which it stops and removes at the end. The results depend only on the
+code, not on what a person or an earlier run left on a server, and no other server on the machine is touched.
+
+## Prerequisites {#prerequisites}
+
+- A `clickhouse` binary built from the repository, by default `build/programs/clickhouse`. With `--page-from-source`, the
+  page comes from the working tree instead of the binary.
+- Node.js (`node`).
+- A Playwright workspace outside of the repository, by default `~/console-e2e`, with `node_modules/playwright` and
+  Chromium. Playwright is a development tool only:
+
+  ```bash
+  mkdir -p ~/console-e2e && cd ~/console-e2e
+  npm init -y && npm install playwright@1.48.2 && npx playwright install chromium
+  # If Chromium reports missing libraries: sudo npx playwright install-deps chromium
+  ```
+
+- `curl`, `ss`, and, for the `ldap` suite, `openssl`.
+- For the `backup`, `cluster`, `ldap`, and `sso` suites: Docker, running and usable by your user.
+- These images on the host (the script does not pull them):
+
+  | Suite | Image |
+  |---|---|
+  | `backup` | `minio/minio:RELEASE.2025-07-23T15-54-02Z` |
+  | `backup` (optional) | `hashicorp/vault:1.17.6`: without it, the bundle checks use a stand-in of its API |
+  | `cluster` | `clickhouse/clickhouse-server:26.9.8.3` and `contentsquareplatform/chproxy:v1.30.0`, for the lab clusters |
+  | `ldap` | `bitnamilegacy/openldap:2.6.8` |
+  | `sso` | `quay.io/keycloak/keycloak:26.7` |
+
+  ```bash
+  docker pull minio/minio:RELEASE.2025-07-23T15-54-02Z
+  docker pull bitnamilegacy/openldap:2.6.8
+  docker pull quay.io/keycloak/keycloak:26.7
+  ```
+
+- The [ports](#ports) free.
+
+## Steps {#steps}
+
+<Steps>
+<Step title="Run the suites">
+
+From the repository root:
+
+```bash
+utils/web-console/run_e2e.sh                                    # all suites, with the page built into the binary
+utils/web-console/run_e2e.sh --page-from-source                 # with programs/server/console.html as it is now
+utils/web-console/run_e2e.sh --suites console,access            # only some suites
+```
+
+The script prints, for each suite, `Running <suite>` and then the last line of its log with its exit status.
+
+</Step>
+<Step title="Read the result">
+
+The script ends with `All suites passed` and exit code `0`, or with `Failed:` followed by the failed suites and exit
+code `1`. Open the log of a failed suite in `tmp/console-e2e-run/logs/` (see [Logs](#logs)).
+
+</Step>
+<Step title="Inspect what a suite left, if needed">
+
+With `--keep`, the server, MinIO, and the cluster agent stay running at the end, and the script prints the address of
+the server (`http://127.0.0.1:38123`, user `default`). Stop them before the next run: a run refuses to start while its
+ports are in use.
+
+</Step>
+</Steps>
+
+## Options {#options}
+
+| Option | Meaning |
+|---|---|
+| `--suites <list>` | Suites to run, separated by commas: `console`, `access`, `data_access`, `backup`, `cluster`, `ldap`, `sso`. Default: all of them. An unknown name is refused. |
+| `--binary <path>` | The `clickhouse` binary. Default: `build/programs/clickhouse`. |
+| `--page-from-source` | Serve `programs/server/console.html` from the working tree, instead of the page built into the binary, with the headers of the built-in handler: try a change of the page without rebuilding. The other pages and `/console/config.json` come from the binary. |
+| `--e2e-dir <dir>` | The Playwright workspace with `node_modules/playwright`. Default: `~/console-e2e`. |
+| `--keep` | Leave the server, MinIO, and the agent running at the end, for inspection. |
+| `-h`, `--help` | Print the usage. |
+
+## Suites {#suites}
+
+The suites run in this order:
+
+| Suite | Script | What it checks | What it starts |
+|---|---|---|---|
+| `console` | `console_e2e.mjs` | The console: sign-in, home page, panels, routes, and the restrictions of a limited user (`limited`, without `SELECT ON system.part_log` and `INTROSPECTION`). | The server |
+| `access` | `access_e2e.mjs` | The Administration pages, including a partly applied `ON CLUSTER` change on the cluster `console_test`, whose second shard is a port where nothing listens. | The server |
+| `data_access` | `data_access_e2e.mjs` | Data Access Policies with synthetic users and data, over HTTP and with the native client, including the access policy worker; the clusters `dap_secret` (with an interserver secret) and `console_test`. | The server |
+| `backup` | `server_bundle_test.mjs`, then `backup_e2e.mjs` | The server bundle module alone (`bundle_module`), then Backup & Restore, including server bundles with a key file, a server restart (`kill -9` of the server and its watchdog), and an unavailable destination (MinIO stopped and started). | MinIO with the bucket `ch-backups`; Vault with a Transit key when its image is present |
+| `cluster` | `cluster_e2e.mjs` | Cluster Management against a running agent: provisioning, registration (with the credential reference `PLATFORM`), drift, scaling, failures, and retirement. It creates Docker lab clusters `e2e-*` and deletes them. | The cluster agent |
+| `sso` | `sso_e2e.mjs` | **Identity Providers → SSO (Keycloak)**, the test sign-in, and signing in to the console with Keycloak: the token refresh, a user without a ClickHouse user, sign-out, and a user disabled in Keycloak. | Keycloak with the realm `clickhouse`; the token authenticator with its user sync |
+| `ldap` | `ldap_e2e.mjs` | Directory sign-in: the generated LDAP configuration installed on the server, sign-in with roles from groups, directory changes, and users managed with SQL next to the directory. It restarts the server and removes the directory at the end, so it runs last. | OpenLDAP with LDAPS and a certificate authority of the run |
+
+The server is configured with an embedded Keeper, the clusters `console_test`, `dap_nosecret`, and `dap_secret`, a disk
+`backups` allowed in `backups.allowed_disk`, `remote_url_allow_hosts` for `127.0.0.1` and `localhost`, and
+`web_console.backup_s3_endpoints` with the MinIO endpoint and the patterns `https://*.example.com` and `http://*:29999`.
+The user `default` has `access_management` and `named_collection_control`. For the `sso` suite, the server also gets
+`http_authentication_servers.sso` pointing to the token authenticator, and the `web_console` keys `sso_name`,
+`sso_issuer`, and `sso_client_id`.
+
+Each suite can also run alone against another server, as described in `utils/web-console/README.md`; its checks then
+depend on that server's state, for example its component access policy.
+
+## Ports {#ports}
+
+All services listen on `127.0.0.1`. The script checks the ports before it starts, and stops when one is in use.
+
+| Port | Service |
+|---|---|
+| `38123` | HTTP of the server |
+| `39000` | Native protocol of the server |
+| `39181` | Embedded Keeper |
+| `39234` | Raft of the embedded Keeper |
+| `39099` | Nothing: the unavailable second shard of `console_test` |
+| `39900` | MinIO |
+| `39200` | Vault |
+| `39636` | OpenLDAP (LDAPS) |
+| `39080` | Keycloak |
+| `39700` | Token authenticator |
+| `32000-32999` | Endpoints of the lab clusters of the cluster agent |
+
+## Logs {#logs}
+
+Everything of a run lives in `tmp/console-e2e-run/` in the repository. The logs stay there after the run; the rest is
+removed. In `tmp/console-e2e-run/logs/`:
+
+| File | Contents |
+|---|---|
+| `<suite>.log` | Output of a suite. |
+| `screenshots-<suite>/` | Screenshots of a suite. |
+| `bundle_module.log` | Output of `server_bundle_test.mjs`. |
+| `clickhouse-server.log`, `clickhouse-server.err.log` | Logs of the server. |
+| `cluster-agent.log` | Log of the cluster agent. |
+| `sso-authenticator.log` | Log of the token authenticator. |
+
+## Troubleshooting {#troubleshooting}
+
+| Message | Cause and fix |
+|---|---|
+| `no clickhouse binary at <path>` | Build the binary, or pass `--binary`. |
+| `node is not installed` | Install Node.js. |
+| `no Playwright in <dir>` | Create the workspace (see [Prerequisites](#prerequisites)), or pass `--e2e-dir`. |
+| `Docker is not running, or this user cannot use it` | Needed for `backup`, `cluster`, `ldap`, and `sso`. |
+| `the image <image> is not on this host` | Pull the image named in the message. |
+| `port <port> is in use: is another run still going?` | Stop the other run, or what `--keep` left. |
+| `the server did not start` | Read `tmp/console-e2e-run/logs/clickhouse-server.err.log`. |
+| `cannot create the bucket ch-backups in MinIO` | MinIO did not start: check `docker logs console-e2e-minio`. |
+| Chromium reports missing libraries | Run `sudo npx playwright install-deps chromium` in the workspace, or set `LD_LIBRARY_PATH` to a directory with the libraries before running the script. |

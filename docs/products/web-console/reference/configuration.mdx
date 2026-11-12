@@ -1,0 +1,283 @@
+---
+description: 'Every server configuration key that the web console reads or relies on: the web_console section, the console handler of http_handlers, HTTP authentication servers, and related settings.'
+sidebarTitle: 'Configuration'
+slug: /web-console/reference/configuration
+title: 'Web console configuration reference'
+doc_type: 'reference'
+---
+
+The web console is configured in the ClickHouse server configuration, in files under `config.d/`. This page lists the
+`web_console` section, the `console` handler type of `http_handlers` with the default response headers, and the other
+server settings the console and its helper processes depend on. For the procedures, see
+[Configure LDAP](/products/web-console/how-to/configure-ldap) and
+[Configure Keycloak single sign-on](/products/web-console/how-to/configure-keycloak-sso).
+
+## The `web_console` section {#web-console}
+
+The section is read by `ConsoleWebUIRequestHandler` (`src/Server/WebUIRequestHandler.cpp`) on every request to
+[`/console/config.json`](/products/web-console/reference/http-endpoints#config-json). Every key is a string. A key that
+is not set has its default; a key set to an empty value is empty, which turns off what the key controls. The values are
+public: the page reads them before anyone signs in, so no key may hold a secret.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `source_code_url` | `https://github.com/ClickHouse/ClickHouse/` | Destination of **Source code** under **Resources**. |
+| `documentation_url` | `https://clickhouse.com/docs/` | Destination of **Documentation** under **Resources**. |
+| `website_url` | `https://clickhouse.com/` | Destination of **Website** under **Resources**. |
+| `cloud_url` | `https://clickhouse.cloud/` | Destination of **Cloud** under **Resources**. |
+| `clickstack_url` | `/clickstack/` | Address of ClickStack. A path on this server is embedded as a panel; an absolute URL of another origin is opened in a new tab, as a separate deployment with its own sign-in. |
+| `admin_database` | `console_admin` | Database of the [console tables](/products/web-console/reference/console-tables). It must match `^[A-Za-z_][A-Za-z0-9_]{0,63}$`; otherwise the console reports that the setting is not a valid database name and the pages that need the tables are off. |
+| `backup_s3_endpoints` | Empty | S3-compatible endpoints allowed as backup destinations, separated by commas. See [`backup_s3_endpoints`](#backup-s3-endpoints). Empty: no S3 endpoint is allowed by the configuration. |
+| `sso_name` | `Keycloak` | Name of the identity provider on the sign-in page: **Sign in with** followed by this name. See [Single sign-on keys](#sso-keys). |
+| `sso_issuer` | Empty | Issuer of the OpenID Connect provider. Empty: no single sign-on. |
+| `sso_client_id` | Empty | Public client of the console at the provider. Empty: no single sign-on. |
+| `sso_scopes` | `openid profile email` | Scopes the console requests. |
+| `sso_username_claim` | `preferred_username` | Claim of the ID token that is the ClickHouse user name. |
+
+### Destinations {#destinations}
+
+`source_code_url`, `documentation_url`, `website_url`, `cloud_url`, and `clickstack_url` accept:
+
+| Value | Effect |
+|---|---|
+| A path on this server that starts with `/`, not with `//`, and contains no backslash | Opened in the console (for `clickstack_url`, embedded as a panel). |
+| An absolute `http://` or `https://` URL | Opened in a new tab, with `noopener` and `noreferrer`. |
+| Empty | The destination is marked **not configured**. |
+| Anything else, such as `javascript:` or `//host` | Rejected: the destination is shown as not configured, with the reason that the address is not a valid HTTP(S) URL or server path. |
+
+For example, in a network without Internet access, point the documentation to an internal mirror and remove the other
+external links:
+
+```xml
+<clickhouse>
+    <web_console>
+        <documentation_url>https://docs.example.internal/clickhouse/</documentation_url>
+        <source_code_url></source_code_url>
+        <website_url></website_url>
+        <cloud_url></cloud_url>
+    </web_console>
+</clickhouse>
+```
+
+### `backup_s3_endpoints` {#backup-s3-endpoints}
+
+The server does not check the endpoint of `BACKUP ... TO S3` against `remote_url_allow_hosts`, so this list, together
+with the endpoints allowed in the console (the `backup_endpoints` table), is what restricts the S3 destinations of
+**Backup & Restore**. Each entry is one of:
+
+| Entry | Allows |
+|---|---|
+| `https://minio.example.com:9000` | Exactly this endpoint. |
+| `https://*.example.com` | Any subdomain of `example.com`, on the default port. Add `:port` to allow another port. |
+| `https://*` or `http://*:9000` | Any host with this scheme (and port). |
+| `*` | Any HTTP or HTTPS endpoint. |
+
+Patterns never match internal addresses: `localhost`, loopback and private network addresses, link-local addresses
+including `169.254.169.254`, and names ending in `.internal` or `.local`; allow such an endpoint exactly. Link-local and
+metadata addresses (`169.254.0.0/16`, `fe80::/10`, `metadata.google.internal`, `instance-data`) and patterns for any host
+(`https://*`, `*`) can be allowed only here, not in the console. Invalid entries are ignored, and the destination form
+lists them.
+
+```xml
+<clickhouse>
+    <web_console>
+        <backup_s3_endpoints>http://10.0.4.20:9000, https://*.amazonaws.com</backup_s3_endpoints>
+    </web_console>
+</clickhouse>
+```
+
+For the destinations themselves, see [Backup & Restore](/products/web-console/guides/backup-and-restore#destinations).
+
+### Single sign-on keys {#sso-keys}
+
+The sign-in page offers **Sign in with** `sso_name` when both `sso_issuer` and `sso_client_id` are not empty. The values
+are public: the client of the console is a public client without a secret, and the server checks the access tokens
+through an HTTP authentication server (see [`http_authentication_servers`](#http-authentication-servers)).
+
+| Key | Default | Meaning | When empty |
+|---|---|---|---|
+| `sso_name` | `Keycloak` | Label of the button and of the messages of the sign-in page. | The console uses `single sign-on`. |
+| `sso_issuer` | Empty | Issuer URL of the provider, for example `https://keycloak.example.com/realms/clickhouse`. The console reads `<sso_issuer>/.well-known/openid-configuration`. HTTPS; plain HTTP only for `localhost`, `127.0.0.1`, or `[::1]`. A trailing `/` is removed. | Single sign-on is off. |
+| `sso_client_id` | Empty | Client ID of the console at the provider. The provider must register the redirect URI `<console origin>/console/oidc-callback` and the post-logout redirect URI `<console origin>/console/login` for it. | Single sign-on is off. |
+| `sso_scopes` | `openid profile email` | The `scope` of the authorization request. | The console uses `openid profile email`. |
+| `sso_username_claim` | `preferred_username` | Claim of the verified ID token used as the ClickHouse user name. The token authenticator must use the same claim (`SSO_USERNAME_CLAIM`). | The console uses `preferred_username`. |
+
+```xml
+<clickhouse>
+    <web_console>
+        <sso_name>Keycloak</sso_name>
+        <sso_issuer>https://keycloak.example.com/realms/clickhouse</sso_issuer>
+        <sso_client_id>clickhouse-console</sso_client_id>
+    </web_console>
+</clickhouse>
+```
+
+The deployment examples set these keys from the environment of the server container (`utils/web-console/deploy/config.d/sso.xml`):
+
+```xml
+<clickhouse>
+    <web_console>
+        <sso_name from_env="SSO_NAME"/>
+        <sso_issuer from_env="SSO_ISSUER"/>
+        <sso_client_id from_env="SSO_CLIENT_ID"/>
+    </web_console>
+</clickhouse>
+```
+
+## The `console` handler of `http_handlers` {#http-handlers}
+
+The server serves the console by default for `GET` and `HEAD` requests to `/console`, and to any URI that starts with
+`/console/`, `/console?`, or `/console#`. To change its response headers, add a rule with the handler type `console` to
+[`http_handlers`](/interfaces/http). The handler answers `/console/config.json` with the JSON document and every other
+path with the page, so the rule must match every path under `/console`:
+
+```xml
+<clickhouse>
+    <http_handlers>
+        <rule>
+            <url>regex:^/console(/.*)?$</url>
+            <methods>GET,HEAD</methods>
+            <handler>
+                <type>console</type>
+                <http_response_headers>
+                    <X-Frame-Options>SAMEORIGIN</X-Frame-Options>
+                </http_response_headers>
+            </handler>
+        </rule>
+        <defaults/>
+    </http_handlers>
+</clickhouse>
+```
+
+Keep `<defaults/>`, so that the other web UIs and the HTTP interface stay available.
+
+| Element of `handler` | Meaning |
+|---|---|
+| `type` | `console`. |
+| `http_response_headers` | Headers to set, one element per header. A header set here replaces the default of the same name below. |
+| `content_type` | `Content-Type` of the page. Default `text/html; charset=UTF-8`. `/console/config.json` is always `application/json; charset=UTF-8`. |
+
+Headers in `http_handlers.common_http_response_headers` apply to the `console` handler as to the other handlers.
+
+### Default response headers {#default-response-headers}
+
+Both the page and `/console/config.json` are sent with these headers, unless the handler configuration sets a header
+of the same name:
+
+| Header | Value |
+|---|---|
+| `Cache-Control` | `no-store` |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `no-referrer` |
+| `Content-Security-Policy` | See below. |
+
+The `Content-Security-Policy` is:
+
+```text
+default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self' http: https:; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+```
+
+| Directive | Effect |
+|---|---|
+| `default-src 'none'` | Nothing is loaded unless another directive allows it. |
+| `script-src 'unsafe-inline'`, `style-src 'unsafe-inline'` | Only the inline script and styles of the page run; no external script or stylesheet. |
+| `img-src data:` | Only images embedded as `data:` URLs. |
+| `connect-src 'self' http: https:` | Requests to this server, to other ClickHouse servers, and to the identity provider. |
+| `frame-src 'self'` | Only frames of the same origin: the embedded panels. |
+| `frame-ancestors 'none'` | No page may frame the console. |
+| `base-uri 'none'`, `form-action 'none'` | No `<base>` element and no form submission. |
+
+These headers apply to the console only. The embedded pages (`/dashboard`, `/merges`, and the others) are served by
+their own handlers; do not set `X-Frame-Options: DENY` or `frame-ancestors 'none'` on them, or the console cannot embed
+them.
+
+## Related server configuration {#related-server-configuration}
+
+### `http_authentication_servers` {#http-authentication-servers}
+
+Single sign-on needs an HTTP authentication server that points to the
+[token authenticator](/products/web-console/reference/helper-processes#sso-authenticator). The users that sign in with
+single sign-on are created `IDENTIFIED WITH http SERVER '<name>' SCHEME 'BASIC'`, where `<name>` is the element name
+under `http_authentication_servers` (`sso` in the examples, and the default `SSO_SERVER_NAME` of the authenticator). See
+also [HTTP authentication](/operations/external-authenticators/http).
+
+The keys of one server, as parsed by `parseHTTPAuthParams` (`src/Access/ExternalAuthenticators.cpp`):
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `uri` | String | Required | URL the server sends the `GET` request to, for example `http://127.0.0.1:29700/`. Its path and query are the path of the request. |
+| `connection_timeout_ms` | Integer | `1000` | Connection timeout, in milliseconds. |
+| `receive_timeout_ms` | Integer | `1000` | Receive timeout, in milliseconds. |
+| `send_timeout_ms` | Integer | `1000` | Send timeout, in milliseconds. |
+| `max_tries` | Integer | `3` | Attempts per sign-in. Only a network error (an exception while sending or receiving) is retried; an answer such as `401` is final. |
+| `retry_initial_backoff_ms` | Integer | `50` | Wait before the second attempt, in milliseconds. The wait doubles after each attempt. |
+| `retry_max_backoff_ms` | Integer | `1000` | Longest wait between attempts, in milliseconds. |
+| `forward_headers` | List of elements | None | Names of request headers of the client to forward to the authentication server, one element per header, for example `<forward_headers><name>X-Request-Id</name></forward_headers>`. Names are compared without case. A forwarded value that contains CR, LF, or NUL makes the sign-in fail with `BAD_ARGUMENTS`. |
+
+The configuration used by the deployment examples (`utils/web-console/deploy/config.d/sso.xml`):
+
+```xml
+<clickhouse>
+    <http_authentication_servers>
+        <sso>
+            <uri>http://sso-authenticator:29700/</uri>
+            <connection_timeout_ms>1000</connection_timeout_ms>
+            <receive_timeout_ms>2000</receive_timeout_ms>
+            <send_timeout_ms>1000</send_timeout_ms>
+            <max_tries>2</max_tries>
+        </sso>
+    </http_authentication_servers>
+</clickhouse>
+```
+
+The HTTP contract between the server and the authenticator is in the
+[token authenticator API](/products/web-console/reference/token-authenticator-api).
+
+### `user_directories.ldap` {#user-directories-ldap}
+
+Directory sign-in uses an LDAP server in `ldap_servers` and an `ldap` user directory in `user_directories`. The
+**Identity Providers → LDAP** page generates this configuration, but does not install or change it. For the keys, see
+[LDAP](/operations/external-authenticators/ldap); for the procedure, see
+[Configure LDAP](/products/web-console/how-to/configure-ldap).
+
+### `backups.allowed_disk` {#backups-allowed-disk}
+
+A disk destination of **Backup & Restore** must be a disk of the server that is listed in `backups.allowed_disk`:
+
+```xml
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <backups>
+                <type>local</type>
+                <path>/var/lib/clickhouse/backups/</path>
+            </backups>
+        </disks>
+    </storage_configuration>
+    <backups>
+        <allowed_disk>backups</allowed_disk>
+    </backups>
+</clickhouse>
+```
+
+See [Backup and restore](/operations/backup/overview).
+
+### `enable_webterminal` {#enable-webterminal}
+
+`enable_webterminal` (Bool, default `true`) enables the Web Terminal at `/webterminal`. When it is `false`, `/webterminal`
+answers `403 Forbidden`, and the console shows the Web Terminal as unavailable with the reason that it is disabled on
+this server by the `enable_webterminal` server setting. The former name `allow_experimental_webterminal` is honored when
+`enable_webterminal` is not set.
+
+## Reload behavior {#reload-behavior}
+
+| Change | Takes effect |
+|---|---|
+| The `web_console` section | After a configuration reload (`SYSTEM RELOAD CONFIG`, or the automatic reload): the server reads the section on every request to `/console/config.json`. The page reads `/console/config.json` once when it loads, so open pages apply the change when they are loaded again. |
+| `http_authentication_servers` | After a configuration reload: the server parses the HTTP authentication servers again with the external authenticators. |
+| A new `ldap` user directory | After a restart of the server: user directories are created when the server starts. Later changes of the LDAP server settings take effect with `SYSTEM RELOAD CONFIG`. |
+| A change of `programs/server/console.html` or another embedded page | After a rebuild of the `clickhouse` binary: the pages are embedded into it with `#embed`. |
+
+Remove the `web_console` section before downgrading to a server that does not know it: older servers reject unknown
+sections.

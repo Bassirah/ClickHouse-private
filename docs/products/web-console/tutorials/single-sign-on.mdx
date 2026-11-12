@@ -1,0 +1,340 @@
+---
+description: 'Tutorial: run Keycloak in Docker on a test machine, set up a realm for the web console, and sign in to the console and to ClickHouse with Keycloak.'
+sidebarTitle: 'Single sign-on'
+slug: /web-console/tutorials/single-sign-on
+title: 'Sign in with Keycloak'
+doc_type: 'guide'
+---
+
+In this tutorial you set up single sign-on for the web console on one test machine. You run Keycloak in Docker, create
+a realm with the client of the console, a group, and a user, and start a ClickHouse server and the token authenticator
+next to it. The authenticator creates the ClickHouse user from the Keycloak group. Then you sign in to the console with
+Keycloak, and test the provider on the **SSO (Keycloak)** page.
+
+It takes about thirty minutes. Everything runs on `localhost` over plain HTTP, which the console and the authenticator
+accept only for a provider on `localhost`. For a production setup, see
+[Configure single sign-on with Keycloak](/products/web-console/how-to/configure-keycloak-sso).
+
+## Before you begin {#before-you-begin}
+
+- Docker 24 or later, and a browser on the same machine.
+- The images `clickhouse-server-console:<version>` and `clickhouse-console-tools:<version>`, loaded with `docker load`
+  (see [Deploy with Docker Compose](/products/web-console/how-to/deploy-with-docker-compose#load-and-verify-the-images)).
+- The image of Keycloak: `docker pull quay.io/keycloak/keycloak:26.7`.
+- The ports 8080 and 8123 free on `127.0.0.1`. If the server of the [Quick start](/products/web-console/quick-start)
+  still runs, remove it: `docker rm -f clickhouse-console`.
+
+Work in a new, empty directory. In the commands, replace `<version>` with the version of the images.
+
+### How the containers connect {#how-the-containers-connect}
+
+The browser, the server, and the token authenticator must all reach Keycloak at the same address, because the address
+is part of the issuer that every token carries. In this tutorial that address is `http://localhost:8080`. The server
+and the authenticator therefore run in the network namespace of the Keycloak container (`--network container:...`):
+inside it, `localhost` is the same for all three, and the ports 8080 (Keycloak) and 8123 (ClickHouse) are published on
+`127.0.0.1` of your machine by the Keycloak container.
+
+## Start Keycloak {#start-keycloak}
+
+<Steps>
+<Step title="Write the realm">
+
+Save this file as `realm.json`. It describes the realm `clickhouse`:
+
+- the public client of the console, `clickhouse-console`: the standard flow only, PKCE with S256, the redirect URI
+  `http://localhost:8123/console/oidc-callback`, the post logout redirect URI `http://localhost:8123/console/login`,
+  the web origin `http://localhost:8123`, a Group Membership mapper `groups` without the full path, and an Audience
+  mapper that adds `clickhouse-console` to the access token;
+- the group `clickhouse-analysts`, and the user `sam` in it, with the password `Sam-Kc-Pw-1`;
+- the confidential client `clickhouse-sso-sync` of the user sync, with only a service account, which has the roles
+  `view-users` and `query-groups` of `realm-management`.
+
+```json
+{
+  "realm": "clickhouse", "enabled": true, "sslRequired": "external", "registrationAllowed": false, "bruteForceProtected": true,
+  "groups": [{"name": "clickhouse-analysts"}],
+  "users": [
+    {"username": "sam", "enabled": true, "emailVerified": true, "firstName": "Sam", "lastName": "Analyst", "email": "sam@example.org",
+     "credentials": [{"type": "password", "value": "Sam-Kc-Pw-1", "temporary": false}], "groups": ["/clickhouse-analysts"]},
+    {"username": "service-account-clickhouse-sso-sync", "enabled": true, "serviceAccountClientId": "clickhouse-sso-sync",
+     "clientRoles": {"realm-management": ["view-users", "query-groups"]}}
+  ],
+  "clients": [
+    {
+      "clientId": "clickhouse-console", "enabled": true, "publicClient": true, "protocol": "openid-connect",
+      "standardFlowEnabled": true, "implicitFlowEnabled": false, "directAccessGrantsEnabled": false, "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:8123/console/oidc-callback"],
+      "webOrigins": ["http://localhost:8123"],
+      "attributes": {"pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "http://localhost:8123/console/login"},
+      "protocolMappers": [
+        {"name": "groups", "protocol": "openid-connect", "protocolMapper": "oidc-group-membership-mapper",
+         "config": {"claim.name": "groups", "full.path": "false", "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true"}},
+        {"name": "audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
+         "config": {"included.client.audience": "clickhouse-console", "id.token.claim": "false", "access.token.claim": "true"}}
+      ]
+    },
+    {
+      "clientId": "clickhouse-sso-sync", "enabled": true, "publicClient": false, "secret": "tutorial-sync-secret",
+      "serviceAccountsEnabled": true, "standardFlowEnabled": false, "implicitFlowEnabled": false, "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect"
+    }
+  ]
+}
+```
+
+The same settings can be made by hand in the Keycloak admin console; the file makes them exact and repeatable.
+
+</Step>
+<Step title="Run Keycloak">
+
+Run Keycloak in development mode, with the realm imported at the start. `KC_HOSTNAME` fixes the address in the issuer,
+and both ports are published on `127.0.0.1` only:
+
+```bash
+docker run -d --name sso-keycloak \
+    -p 127.0.0.1:8080:8080 -p 127.0.0.1:8123:8123 \
+    -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD='choose-an-admin-password' \
+    -e KC_HOSTNAME=http://localhost:8080 \
+    -v "$PWD/realm.json:/opt/keycloak/data/import/realm.json:ro" \
+    quay.io/keycloak/keycloak:26.7 start-dev --import-realm
+```
+
+Keycloak takes about half a minute to start. Then:
+
+```bash
+curl -s http://localhost:8080/realms/clickhouse/.well-known/openid-configuration | head -c 120; echo
+```
+
+The answer starts with `{"issuer":"http://localhost:8080/realms/clickhouse"`. The Keycloak admin console is at
+`http://localhost:8080/admin`, as `admin`.
+
+</Step>
+</Steps>
+
+## Start the server {#start-the-server}
+
+<Steps>
+<Step title="Configure single sign-on">
+
+Save this file as `sso.xml`. It declares the token authenticator as the HTTP authentication server `sso`, and makes the
+sign-in page of the console offer Keycloak:
+
+```xml
+<clickhouse>
+    <http_authentication_servers>
+        <sso>
+            <uri>http://127.0.0.1:29700/</uri>
+            <connection_timeout_ms>1000</connection_timeout_ms>
+            <receive_timeout_ms>2000</receive_timeout_ms>
+            <send_timeout_ms>1000</send_timeout_ms>
+            <max_tries>2</max_tries>
+        </sso>
+    </http_authentication_servers>
+    <web_console>
+        <sso_name>Keycloak</sso_name>
+        <sso_issuer>http://localhost:8080/realms/clickhouse</sso_issuer>
+        <sso_client_id>clickhouse-console</sso_client_id>
+    </web_console>
+</clickhouse>
+```
+
+</Step>
+<Step title="Run the server">
+
+Run the server in the network namespace of Keycloak, with the file in `config.d`:
+
+```bash
+docker run -d --name sso-clickhouse --network container:sso-keycloak \
+    -e CLICKHOUSE_PASSWORD='choose-a-password' -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+    --ulimit nofile=262144:262144 \
+    -v "$PWD/sso.xml:/etc/clickhouse-server/config.d/sso.xml:ro" \
+    clickhouse-server-console:<version>
+```
+
+`curl http://127.0.0.1:8123/ping` answers `Ok.`.
+
+</Step>
+<Step title="Set up the administration pages">
+
+Open `http://localhost:8123/console` (with `localhost`, which is the origin the Keycloak client allows) and sign in as
+`default`. The sign-in page already shows **Sign in with Keycloak**, below **or**: do not use it yet.
+
+Under **Administration**, select **Component Access**, then **Set up**, **Review**, and **Apply**, as in
+[Set up the administration pages](/products/web-console/quick-start#set-up-the-administration-pages). This creates the
+database `console_admin`, with the audit log, and the role `console_admin_reader`, which the sync gives every SSO user.
+
+</Step>
+<Step title="Create the role and the account of the sync">
+
+The group `clickhouse-analysts` stands for the role `analysts`, which must exist on the server. The user sync signs in
+to the server as `sso_sync`, which may create and drop users and grant only the roles of the groups. Run:
+
+```bash
+docker exec -i sso-clickhouse clickhouse-client --password 'choose-a-password' --multiquery <<'EOF'
+CREATE ROLE analysts;
+GRANT SELECT ON default.* TO analysts;
+
+CREATE USER sso_sync IDENTIFIED WITH sha256_password BY 'choose-a-sync-password';
+GRANT CREATE USER, ALTER USER, DROP USER ON *.* TO sso_sync;
+GRANT SHOW USERS, SHOW ROLES ON *.* TO sso_sync;
+GRANT SELECT ON system.users TO sso_sync;
+GRANT SELECT ON system.roles TO sso_sync;
+GRANT SELECT ON system.role_grants TO sso_sync;
+GRANT INSERT ON console_admin.audit_log TO sso_sync;
+GRANT analysts, console_admin_reader TO sso_sync WITH ADMIN OPTION;
+EOF
+```
+
+These are the privileges of `sso_sync` in `service-accounts.sql`; see
+[Create the service accounts](/products/web-console/how-to/create-service-accounts).
+
+</Step>
+</Steps>
+
+## Run the token authenticator {#run-the-token-authenticator}
+
+<Steps>
+<Step title="Start it with the user sync">
+
+```bash
+docker run -d --name sso-authenticator --network container:sso-keycloak \
+    -e SSO_ISSUER=http://localhost:8080/realms/clickhouse \
+    -e SSO_CLIENT_ID=clickhouse-console \
+    -e SSO_LISTEN=127.0.0.1:29700 \
+    -e SSO_SYNC_CLIENT_ID=clickhouse-sso-sync -e SSO_SYNC_SECRET=tutorial-sync-secret \
+    -e SSO_ROLE_PREFIX=clickhouse- -e SSO_DEFAULT_ROLES=console_admin_reader \
+    -e CLICKHOUSE_URL=http://127.0.0.1:8123 -e CLICKHOUSE_USER=sso_sync -e CLICKHOUSE_PASSWORD='choose-a-sync-password' \
+    clickhouse-console-tools:<version> sso-authenticator
+```
+
+In production, keep the secret of the sync client in a file (`SSO_SYNC_SECRET_FILE`) instead of the environment.
+
+</Step>
+<Step title="Check its log">
+
+```bash
+docker logs sso-authenticator
+```
+
+The log is one JSON object per line. You see `keys loaded` with the issuer, `listening` with `"sync":true`, and
+`users synced` with `"members":1`.
+
+</Step>
+<Step title="Check the user it created">
+
+```bash
+docker exec sso-clickhouse clickhouse-client --password 'choose-a-password' --query "SHOW CREATE USER sam"
+```
+
+The statement contains `IDENTIFIED WITH http SERVER 'sso'`: the password of `sam` is checked by the token
+authenticator. `SHOW GRANTS FOR sam` lists the roles `analysts` and `console_admin_reader`.
+
+</Step>
+</Steps>
+
+## Sign in with Keycloak {#sign-in-with-keycloak}
+
+<Steps>
+<Step title="Sign out">
+
+In the console, select **Sign out**. The sign-in page shows **Sign in with Keycloak**.
+
+</Step>
+<Step title="Sign in as sam">
+
+Select **Sign in with Keycloak**. A window opens with the sign-in page of the realm `clickhouse`. Sign in as `sam` with
+the password `Sam-Kc-Pw-1`. The window closes, and the console opens its home page, signed in as `sam`.
+
+If nothing opens, the browser blocked the window: allow pop-ups for `http://localhost:8123`, and try again.
+
+</Step>
+<Step title="Look at what sam may do">
+
+Open the **SQL Console** and run `SELECT currentUser()`: it returns `sam`. The console sent the access token of Keycloak
+as the password, and the server accepted it through the token authenticator.
+
+`docker logs sso-authenticator` shows no `refused` line for `sam`.
+
+</Step>
+<Step title="Sign out again">
+
+Select **Sign out**. The console also ends the session with Keycloak, and returns to its sign-in page.
+
+</Step>
+</Steps>
+
+## Test the provider on the SSO page {#test-the-provider-on-the-sso-page}
+
+<Steps>
+<Step title="Set up the page">
+
+Sign in as `default`. Under **Identity Providers**, select **SSO (Keycloak)**. The page shows **Set up single sign-on**:
+select **Set up**, then **Apply**. This creates the table `console_admin.idp_providers`.
+
+</Step>
+<Step title="Add Keycloak">
+
+Select **Add Keycloak…** and enter:
+
+- **Keycloak URL**: `http://localhost:8080`
+- **Realm**: `clickhouse`
+
+Keep the other fields: **Client ID** `clickhouse-console`, **User name claim** `preferred_username`, **Group claim**
+`groups`, **Role prefix** `clickhouse-`. The issuer below the fields reads `http://localhost:8080/realms/clickhouse`.
+Select **Add**, review the statement, and select **Apply**.
+
+</Step>
+<Step title="Test the connection">
+
+On the provider, select **Test connection**. The report lists **Discovery document**, **Issuer**, **Authorization Code
+flow**, **PKCE**, **Endpoints**, **Signing keys**, and **Roles for groups**, each **OK**.
+
+</Step>
+<Step title="Test a sign-in">
+
+Select **Test sign-in…**, then **Sign in with Keycloak**, and sign in as `sam` in the window. Keycloak asks for the
+password even if you are still signed in there. The result shows **Signed in as** `sam`, the group
+`clickhouse-analysts`, **Roles it would get** `analysts`, the existing **ClickHouse user**, and an **Access token** that
+is valid, with the audience `clickhouse-console`.
+
+</Step>
+<Step title="Find the user of single sign-on">
+
+In the **Signing in to ClickHouse** box, **Sign-in page** shows the issuer and the client from `sso.xml`, and **Users
+of single sign-on** lists `sam`.
+
+</Step>
+<Step title="Remove access in Keycloak">
+
+In the Keycloak admin console (`http://localhost:8080/admin`), in the realm `clickhouse`, remove `sam` from the group
+`clickhouse-analysts`. Within a minute, the sync drops the user: `docker logs sso-authenticator` shows `users synced`
+with a change, and **Users of single sign-on** no longer lists `sam` after **Refresh**. Select **Audit Activity** to
+find the records of the sync.
+
+</Step>
+</Steps>
+
+## Clean up {#clean-up}
+
+Remove the containers, Keycloak last, because the others use its network:
+
+```bash
+docker rm -f sso-authenticator sso-clickhouse sso-keycloak
+```
+
+## What you learned {#what-you-learned}
+
+- The console signs users in with Keycloak as a public client, with the Authorization Code flow and PKCE, and uses the
+  access token as the password of the session.
+- The server does not check tokens itself: the token authenticator does, as the HTTP authentication server `sso`, for
+  the users `IDENTIFIED WITH http SERVER 'sso'`.
+- The user sync creates those users from the groups `clickhouse-<role>`, grants the roles, and drops the users who
+  leave.
+- The **SSO (Keycloak)** page tests the provider and a sign-in, without storing any token.
+
+Next:
+
+- [Identity providers](/products/web-console/guides/identity-providers#sso): the model and the limits of single sign-on.
+- [Configure single sign-on with Keycloak](/products/web-console/how-to/configure-keycloak-sso): the production setup,
+  with Docker Compose, and troubleshooting.
+- [Token authenticator API](/products/web-console/reference/token-authenticator-api): every check and setting.

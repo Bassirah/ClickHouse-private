@@ -1,0 +1,160 @@
+---
+description: 'Build the server image and the tools image of the web console from source, and package them as archives for distribution, with build_images.sh and package_images.sh.'
+sidebarTitle: 'Build and package images'
+slug: /web-console/how-to/build-and-package-images
+title: 'Build and package the Docker images'
+doc_type: 'guide'
+---
+
+Build the two Docker images of the web console from the repository, smoke-test them, and package them as archives that
+can be copied to any environment, including networks without access to a registry.
+
+| Image | Contents |
+|---|---|
+| `clickhouse-server-console:<version>` | The official `clickhouse/clickhouse-server` image of the same release, with the `clickhouse` binary of this build (`utils/web-console/Dockerfile`). Everything of the official image applies: its environment variables, `config.d`, `users.d`, and `docker-entrypoint-initdb.d`. |
+| `clickhouse-console-tools:<version>` | Node.js 22 with the helper processes, `console.html` for the access policy worker, the `docker` CLI with Compose, and `kubectl` (`utils/web-console/Dockerfile.tools`). See [Tools image](/products/web-console/reference/helper-processes#tools-image). |
+
+The version is `<tag of the base image>-console.<commit>`, with an 11-character commit hash, for example
+`26.9.8.3-console.a88866202a2`, and the suffix `-dirty` when uncommitted changes were allowed.
+
+## Prerequisites {#prerequisites}
+
+- A clone of the repository, with your changes committed. The scripts refuse uncommitted changes in `programs/`, `src/`,
+  or `utils/web-console/`, because the version would not identify what the images contain.
+- Docker, running and usable by your user, and Git.
+- To build the binary: CMake, Ninja, and Clang. The script uses `CC` and `CXX` when they are set, otherwise `clang-22` and
+  `clang++-22` when installed, otherwise `clang` and `clang++`.
+- About 60 GB free in the build directory.
+- For `--with-rust` only: `rustup` with the toolchain named in `contrib/corrosion-cmake/CMakeLists.txt`.
+- The official server image of the same release as the binary, by default `clickhouse/clickhouse-server:26.9.8.3`. The
+  script pulls it when it is not on the host.
+
+## Steps {#steps}
+
+<Steps>
+<Step title="Build the images from source">
+
+Run from the repository root:
+
+```bash
+utils/web-console/build_images.sh
+```
+
+The script runs four steps:
+
+1. **Checks**: the tools, Docker, the free space, and uncommitted changes. Everything that would otherwise fail after
+   hours of compiling is checked first.
+2. **Configure** a `Release` build in `build_release/`, once, with `-DENABLE_TESTS=0` and `-DENABLE_RUST=OFF` (or `ON` with
+   `--with-rust`). The output is in `build_release/cmake.log`. An existing build directory must be a `Release` build
+   with the same Rust choice, or the script stops.
+3. **Build** the `clickhouse` binary with Ninja, with the output in `build_release/ninja_release.log`. The first build
+   takes several hours (about 6 on 22 cores); later builds compile only what changed. An interrupted build resumes where
+   it stopped when you run the script again.
+4. **Package** the images with `package_images.sh` (a few minutes).
+
+To follow the build from another terminal:
+
+```bash
+tail -c 300 build_release/ninja_release.log | tr '\r' '\n' | grep -o '\[[0-9]*/[0-9]*\]' | tail -1
+```
+
+</Step>
+<Step title="Or package an existing binary">
+
+To package a binary that is already built, without building:
+
+```bash
+utils/web-console/build_images.sh --package-only
+```
+
+or call `package_images.sh` directly with any `Release` or `RelWithDebInfo` binary:
+
+```bash
+utils/web-console/package_images.sh --binary build_release/programs/clickhouse
+```
+
+</Step>
+<Step title="Find the archives">
+
+The output directory, by default `tmp/dist/<version>/` in the repository, contains:
+
+| File | Contents |
+|---|---|
+| `clickhouse-server-console-<version>-amd64.tar.gz` | The server image, to load with `docker load -i`. |
+| `clickhouse-console-tools-<version>-amd64.tar.gz` | The tools image, to load with `docker load -i`. |
+| `MANIFEST.txt` | The version, the commit, the build time, the platform (`linux/amd64`), the base image digest, the server binary version and build type, the image IDs, and the commands to load, verify, and deploy. |
+| `SHA256SUMS` | Checksums of the two archives and `MANIFEST.txt`. |
+| `deploy/` | A copy of `utils/web-console/deploy/`: the Docker Compose files, `kubernetes.yaml`, `.env.example`, `config.d/`, `service-accounts.sql`, and `README.md`, the guide for the operators of each environment. `CONSOLE_VERSION` in `.env.example` and the image tags in `kubernetes.yaml` are set to this version. |
+
+</Step>
+</Steps>
+
+### Options of `build_images.sh` {#build-images-options}
+
+| Option | Meaning |
+|---|---|
+| `--build-dir <dir>` | Build directory. Default: `build_release` in the repository. |
+| `--with-rust` | Also build the Rust components: the PRQL dialect, fuzzy history search in `clickhouse-client` (skim), WebAssembly UDFs (wasmtime), and polyglot. Default: without them. |
+| `--package-only` | Do not build: package the binary already in the build directory. |
+| `--base-image <image>` | The official server image of the same release. Default: that of `package_images.sh`, `clickhouse/clickhouse-server:26.9.8.3`. |
+| `--out <dir>` | Output directory. Default: `tmp/dist/<version>`. |
+| `--allow-dirty` | Allow uncommitted changes; the version gets the suffix `-dirty`. |
+| `-h`, `--help` | Print the usage. |
+
+### Options of `package_images.sh` {#package-images-options}
+
+| Option | Meaning |
+|---|---|
+| `--binary <path>` | The `clickhouse` binary. Default: `build_release/programs/clickhouse`. |
+| `--base-image <image>` | The official server image of the same release. Default: `clickhouse/clickhouse-server:26.9.8.3`. |
+| `--out <dir>` | Output directory. Default: `tmp/dist/<version>`. |
+| `--allow-dirty` | Allow uncommitted changes; the version gets the suffix `-dirty`. |
+
+`package_images.sh`:
+
+1. refuses a binary whose `CMakeCache.txt` is not a `Release` or `RelWithDebInfo` build, and a binary whose release
+   differs from the tag of the base image;
+2. strips the debug information of the binary (`llvm-strip-22 --strip-debug`, or `strip --strip-debug`); the symbols stay,
+   so that stack traces in the server log keep their function names;
+3. builds both images with the labels `org.opencontainers.image.version` and `org.opencontainers.image.revision`;
+4. smoke-tests them, then saves them with `docker save` and `gzip`.
+
+## Verify {#verify}
+
+The script prints `MANIFEST.txt` and the content of the output directory at the end. Before it saves the images, it
+checks that:
+
+- the server image starts, reports the release of the binary (`SELECT version()`), answers `200` on `/console`, and
+  serves the page of this build;
+- each of `backup-worker`, `cluster-agent`, and `access-policy-worker` starts in the tools image and fails only on the
+  connection to a server, not on a syntax error or a missing module or file;
+- `docker`, `docker compose`, `kubectl`, and `node` are present in the tools image.
+
+On the target host, verify the archives and load them:
+
+```bash
+cd tmp/dist/<version>
+sha256sum -c SHA256SUMS
+docker load -i clickhouse-server-console-<version>-amd64.tar.gz
+docker load -i clickhouse-console-tools-<version>-amd64.tar.gz
+docker run --rm clickhouse-console-tools:<version> version
+```
+
+Then deploy with [Docker Compose](/products/web-console/how-to/deploy-with-docker-compose) or
+[Kubernetes](/products/web-console/how-to/deploy-on-kubernetes).
+
+## Troubleshooting {#troubleshooting}
+
+| Message | Cause and fix |
+|---|---|
+| `the working tree has uncommitted changes in programs/, src/, or utils/web-console/` | Commit the changes, or pass `--allow-dirty`. |
+| `Docker is not running, or this user cannot use it` | Start Docker, or add your user to the group that may use its socket. |
+| `only <n> GB free in <dir>; the build needs about 60 GB` | Free space, or choose another `--build-dir`. The check is skipped when the binary is already built. |
+| `<dir> is a <type> build: use another --build-dir` | The build directory is not a `Release` build: a Debug binary is several gigabytes and slow. Use another directory. |
+| `<dir> was configured with ENABLE_RUST=<value>` | The Rust choice differs from the configured one: use another `--build-dir`, or add or remove `--with-rust`. |
+| `--with-rust needs the Rust toolchain <toolchain>` | Install it with `rustup toolchain install <toolchain>`. |
+| `the build failed; the full output is in <dir>/ninja_release.log` | The script prints the first errors. Fix them and run the script again: the build resumes. |
+| `the binary comes from a <type> build` | `package_images.sh` packages only `Release` or `RelWithDebInfo` builds. |
+| `the binary is version <x>, the base image <y>` | Pass the official image of the binary's release with `--base-image`. |
+| `/console answered: ...` or `/console does not serve the page of this build` | The binary is not a build with the console: check that the binary is the one you built. |
+| `<process> does not start: ...` | A helper process of the tools image has a syntax error or a missing file. |

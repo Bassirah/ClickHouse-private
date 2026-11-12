@@ -1,0 +1,378 @@
+---
+description: 'How the Data Access Policies page of the web console controls which columns and rows each user can read, with native grants, row policies, and attribute-driven rules.'
+sidebarTitle: 'Data Access Policies'
+slug: /web-console/guides/data-access-policies
+title: 'Data Access Policies'
+doc_type: 'guide'
+---
+
+The **Data Access Policies** page of the **Administration** category controls which columns and rows of tables each user can read, explains the effective access of a user, and provisions native controls from trusted user attributes. Everything it enforces is a native ClickHouse control: column grants and row policies, which the server applies to every client that reaches it, including the SQL Console, BI tools, drivers, the HTTP interface, and the native protocol. Hiding a component in the console is not data authorization: only the server controls on this page are (see [Security model](/products/web-console/guides/console#security-model)).
+
+To try the page on a demo table, follow the tutorial [Protect a table of salaries](/products/web-console/tutorials/data-access-policies). To fill user attributes from an identity source, see [Import user attributes](/products/web-console/how-to/import-user-attributes).
+
+## Five mechanisms {#mechanisms}
+
+The page keeps five mechanisms apart:
+
+| Mechanism | What it is | Enforced by | Tabs |
+|---|---|---|---|
+| Column permissions | Native `GRANT SELECT(column) ON db.table` | The server, for every query | **Column Permissions**, **Effective Access** |
+| Row policies | Native `CREATE ROW POLICY ... USING <filter>` | The server, for every `SELECT` | **Row Policies**, **Effective Access** |
+| Attribute-driven provisioning | Rules on user attributes, translated into native roles, grants, and row policies | The server, after a deployment or reconciliation | **Attributes & Classifications**, **Policy Rules**, **Policy Deployments** |
+| Dynamic, request-time ABAC | A decision per query from attributes of the request (purpose, device, time, network) | Not provided | Rules on such attributes are refused |
+| Column masking | Returning a transformed value instead of the stored one | Not provided: native masking policies are refused by this build | Not offered |
+
+Attribute-driven provisioning is not per-query ABAC: a change of an attribute takes effect when the rules are deployed or reconciled, not on the next query. The console does not present views as masking policies.
+
+## The page {#the-page}
+
+The page has seven tabs: **Column Permissions**, **Row Policies**, **Effective Access**, **Access Tests**, **Attributes & Classifications**, **Policy Rules**, and **Policy Deployments**. The header has:
+
+- **Apply changes to**, shown when the server has clusters and no replicated user directory: **This server** or `ON CLUSTER <cluster>`. Statements of grants, row policies, and deployments run with this scope. With a replicated user directory, the header says that changes reach every server that shares it through Keeper.
+- **Refresh**, which reads the state from the server again.
+- **Audit records**, which opens **Audit Activity** filtered on `dap_`, when you can read the audit log.
+
+The console shows the page to users who can read `system.grants` and `system.role_grants`. The first three tabs read only system tables and need no console table. **Access Tests**, **Attributes & Classifications**, **Policy Rules**, and **Policy Deployments** need the data access tables in the admin database: until they exist, these tabs show **Set up Data Access Policies** with a **Set up** button, which creates them with `CREATE TABLE IF NOT EXISTS` and changes no grant or policy. **Set up** needs `CREATE TABLE` on the admin database.
+
+Each button is enabled by a privilege that the console checks with the server (`CHECK GRANT`); the server still authorizes every statement:
+
+| Action | Needs |
+|---|---|
+| Read the tabs that use console tables | `SELECT` on every `dap_*` table |
+| **Define attribute** | `INSERT` on `dap_attributes` |
+| **Set value**, **Remove** a value | `INSERT` on `dap_user_attributes` |
+| **Classify column** | `INSERT` on `dap_classifications` |
+| **New rule**, **Edit**, **Enable**, **Disable**, **Delete** | `INSERT` on `dap_rules` |
+| **Deploy**, **Verify**, **Adopt** | `INSERT` on `dap_owned` |
+| **Add test**, **Remove** a test | `INSERT` on `dap_access_tests` |
+
+The full list of privileges per page is in [Privileges](/products/web-console/reference/privileges#pages). Every change opens a review dialog that lists the steps and the statements; **Apply** runs them. The statements run as the signed-in user, so the server checks that user's own privileges, including the grant option for `GRANT`.
+
+## Column permissions {#column-permissions}
+
+**Column Permissions** shows, for a table chosen with **Database** and **Table**, who can read each of its columns, from `system.grants` and `system.role_grants`:
+
+- **Users** and **Roles**: a matrix of users and roles against columns. ✓ marks a column grant, ● a grant on the whole table, the database, or every database, and parentheses, for example (✓), a grant through a role that is not a default role, active only after `SET ROLE`. A dash means no access. Hovering a mark shows its source and role path.
+- **Broader grants**: grants that give every column of the table, with the role path (**Through**), whether they also cover objects created later (**Covers future objects**), and whether they override column grants of the same user or role (**Overrides column grants**).
+- **Direct column grants to users**, with **Revoke**. Prefer granting columns to a role and the role to users.
+- **Grants on columns that no longer exist**, with **Revoke**: left behind by a renamed or dropped column. They give nothing today, but apply again to a new column of the same name.
+
+**Grant columns** opens a dialog with **To** (a role, or a user for a direct grant) and the **Columns** to grant. It runs `GRANT SELECT(<columns>) ON db.table TO <grantee>`. The review warns when the grantee already reads every column through a broader grant, so that the grant changes nothing until that grant is revoked, and when `SELECT *` will fail for the grantee.
+
+Column grants are positive: a narrow grant never cancels a grant on the whole table or a wider one, which still gives every column. To restrict a user to some columns, revoke the broader grant (or add a partial revoke), then grant the columns, preferably to a role. The behavior on this server version, also listed on the tab under **How column grants behave**:
+
+- `SELECT` of granted columns works; `SELECT` of any other column fails with `ACCESS_DENIED`.
+- `SELECT *` fails unless every column of the table is granted: it does not return only the granted columns.
+- A filter, `ORDER BY`, or join on a column that is not granted fails too, so its values cannot be probed through `WHERE`.
+- `count()` works with a grant on any one column, so the number of rows is visible.
+- A column added later is not covered by existing column grants; table, database, and global grants cover it, and tables created later too.
+- A renamed column keeps its grants only under the old name.
+
+See [`GRANT`](/sql-reference/statements/grant) for the syntax.
+
+## Row policies {#row-policies}
+
+A row policy is a read filter that the server adds to every `SELECT` of the table by the users it applies to, from any client. Permissive policies are joined with `OR`, restrictive ones with `AND`; policies on a whole database (`ON db.*`) combine with those of the table. A row policy does not restrict `INSERT`, `ALTER UPDATE`, or `ALTER DELETE`, nor reads through views that run as their definer.
+
+The **Row policies** box lists every row policy of the server from `system.row_policies`, with **Policy** and its source, **On**, **Kind** (**Permissive (OR)** or **Restrictive (AND)**), **Filter**, and **Applies to**. Policies stored with SQL have **Edit** and **Remove**; policies from configuration files are read-only.
+
+**Create row policy** opens a dialog with:
+
+| Field | Meaning |
+|---|---|
+| **Name** | The short name of the policy. |
+| **Database**, **Table** | The table. **Every table of the database (ON db.\*)** creates the policy on `db.*` instead. |
+| **Kind** | **Permissive: joined with OR with other permissive policies**, or **Restrictive: joined with AND**. |
+| **Applies to** | **These users and roles** (chosen below), **All users**, or **All users except** (chosen below). |
+| **Filter** | **Conditions (joined with AND)**, or **Expression (advanced)**. |
+
+A condition has a **Column**, a **Condition** (`=`, `≠`, **is one of**, **is none of**, or **= the user name (currentUser())**), and **Values**, separated by commas. Values are quoted for the type of the column. **Add condition** adds a condition; for columns named like `branch`, `company`, `tenant`, `tenant_id`, `region`, `country`, or `department`, a preset button (for example **+ department**) adds a condition on that column.
+
+An expression can be typed only by administrators who can create and alter row policies on every table (`CREATE ROW POLICY, ALTER ROW POLICY ON *.*`). It is checked with the server's parser (`EXPLAIN AST`, `EXPLAIN QUERY TREE`) and refused when it contains subqueries, table functions, or references to other tables.
+
+The dialog writes `CREATE ROW POLICY <name> ON db.table USING <filter> AS permissive|restrictive TO <targets>`, or `ALTER ROW POLICY` for an edit. The review lists the affected users with their combined filter before and after the change. Removing a policy runs `DROP ROW POLICY`: the users it applied to see the rows it allowed no more, or, when it was their only policy, every row of the table.
+
+### Effect on a table {#effect-on-a-table}
+
+**Effect on a table** shows, for a chosen table, each user who can read it or to whom a policy applies, with the roles the user has at login (default roles):
+
+| Column | Meaning |
+|---|---|
+| **Can read the table** | **Yes**, or **No SELECT** when a policy applies but the user has no `SELECT` on the table. |
+| **Rows visible** | **All rows** (no row policy exists on the table), **All rows: no policy applies** (policies exist, but none applies to the user), **No rows**, or **Filtered**. |
+| **Combined filter** | The permissive policies joined with `OR`, and the restrictive ones with `AND`. |
+| **From policies** | The policies that make up the filter. |
+
+The combined filter assumes the server default `access_control_improvements.users_without_row_policies_can_read_rows = true`, under which a user to whom no policy of the table applies reads every row. SQL cannot read this setting: confirm it with an access test.
+
+Below the users, the box lists:
+
+- **Paths that can undermine the filter** (bypass paths): views that run as their definer (`SQL SECURITY DEFINER` or `NONE`), materialized views, and `Distributed`, `Merge`, and `Buffer` tables whose definition names the table. A match by name is a candidate for review, not a proof.
+- **Users who can change rows**: users with `INSERT`, `ALTER UPDATE`, `ALTER DELETE`, or wider grants, who can write rows outside their filter.
+
+### Row policies on a cluster {#row-policies-on-a-cluster}
+
+Row policies are evaluated by the server that reads the table. Create them `ON CLUSTER` (choose the cluster in **Apply changes to**) or in a replicated user directory, so that every shard has them, and configure an interserver `<secret>` for the cluster so that the shards know the initial user. Shards apply their own row policies for the connecting user and those of the initial user, if a user of that name exists on the shard. Column grants are checked on the `Distributed` table, not on the shard's table.
+
+## Effective access {#effective-access}
+
+**Effective Access** explains, for a **User**, a **Database** and **Table**, and an **Operation** (**Read (SELECT)** or **Write (INSERT)**), what the user can do and why:
+
+- **Identity**: the user, its source (SQL, configuration, LDAP), state, and default roles.
+- **Roles**: the roles granted to the user with their paths, whether each is active at login (**Active**) or only after `SET ROLE` (**After SET ROLE**), and their source.
+- Per column: **At login (configured)**, **With all granted roles**, and **Given by**, the grant that gives the column, directly or through which role path.
+- **Rows**: the row filter at login and with all granted roles, and the policies with their sources.
+- **Conflicts**: column grants made ineffective by a broader grant, several permissive policies, a filter that changes with `SET ROLE`, and column clearance rules whose intent other grants contradict.
+- **Verification**: **Verify with the server**, and the recent access tests of the user.
+
+The tab shows the state of the server the console is connected to only. Other servers keep their own users, grants, and policies unless the user directory is replicated.
+
+## Verification with the server {#verification-with-the-server}
+
+Inspecting grants is not a proof. The page distinguishes the configured entitlement (what the grants say), the access in the default-role context (**At login**), the result verified by the server, and what is unknown.
+
+**Verify with the server** asks the server as the user, with `EXECUTE AS`:
+
+- `EXECUTE AS <user> CHECK GRANT <operation>(<column>) ON db.table` for every column: **Allowed** or **Denied**, marked "Verified at runtime";
+- for `SELECT`, `EXECUTE AS <user> SELECT count() FROM db.table`: the number of rows visible with the user's grants, default roles, and row policies.
+
+`EXECUTE AS` needs the server setting `allow_impersonate_user` (enabled in the default `config.xml` of this build) and `IMPERSONATE ON <user>` granted to the signed-in user. Grant `IMPERSONATE` only on dedicated test users: it lets the grantee act as that user. Without it the result is **Unknown**, with the server's message.
+
+## Access tests {#access-tests}
+
+**Access Tests** stores approved positive and negative tests in `dap_access_tests`. **Add test** opens a dialog with:
+
+| Field | Meaning |
+|---|---|
+| **Name** | A name for the test. |
+| **As user** | The user who reads. Use a dedicated synthetic user: running the test needs `IMPERSONATE` on it. |
+| **Database**, **Table** | The table to read. |
+| **Columns** | Comma-separated columns. Empty: count the rows only. |
+| **Expected** | **Allowed**, or **Denied (ACCESS_DENIED)**. |
+| **Expected rows** | For an allowed read, the number of rows the user must see. Empty: any. |
+
+**Run** runs one test and **Run all** runs every test. A run reads the table as the user, with `EXECUTE AS <user> SELECT count() FROM (SELECT <columns> FROM db.table)`, so the server applies that user's grants, default roles, and row policies as for a direct connection. The outcome is:
+
+- **Pass**: the read was allowed with the expected number of rows (or any number), or denied with `ACCESS_DENIED` when **Denied** was expected;
+- **Fail**: the read was allowed when it should be denied, returned another number of rows, or was denied when it should be allowed;
+- **Error**: any other error, including a missing `IMPERSONATE` grant. An error is never a pass.
+
+A run records the outcome and the number of rows in `dap_test_runs`, never the data. Runs are kept for 365 days. The browser acceptance checks (`utils/web-console/data_access_e2e.mjs`) repeat the checks over HTTP and with the native client, as the synthetic users themselves.
+
+## Attributes and classifications {#attributes}
+
+**Attributes & Classifications** holds the inputs of the policy rules: attribute definitions, attribute values of users, and labels of columns.
+
+### Attribute definitions {#attribute-definitions}
+
+**Define attribute** opens the dialog **Define an attribute**:
+
+| Field | Meaning |
+|---|---|
+| **Attribute** | The name: letters, digits, and underscores, for example `department`. |
+| **Category** | **User**, **Resource**, **Operation**, or **Environment**. Only user attributes select users in rules. |
+| **Evaluated per request** | The value changes per query (purpose, device, time, network). Native controls cannot follow it, so rules on it are refused. |
+| **Source of truth** | The name of the source that reports the values, for example `hr-feed` or `ldap`. A value counts only when its source is this one. |
+| **Writer** | The database user whose writes are trusted, typically the account of the identity import. Empty: any administrator who can write values. |
+| **Owner** | Who is responsible for the attribute. |
+| **Fresh for (seconds)** | How long a value stays fresh after it was last confirmed. Default 86400; 0: never stale. |
+| **Description** | Free text. |
+
+The **Attributes** table shows each definition, with a **Per request** badge for attributes evaluated per request, and **Fresh for**: **Always** for 0.
+
+### Attribute values {#attribute-values}
+
+**User attribute values** lists the values of `dap_user_attributes` with their user, source and writer, the time they were last confirmed, and a **Status**:
+
+- **Fresh**: the value is trusted.
+- **Not trusted**: the attribute is not defined; the value was reported by another source than the definition's; it was written by another user than the definition's writer; or it is older than the freshness limit. Hovering the badge shows the reason. A value that is not trusted is treated as missing.
+
+The server records who wrote each value (`updated_by`, `MATERIALIZED currentUser()`), so the writer of a value cannot be forged with the value. ClickHouse does not read identity provider claims itself: values reach it only through this table, and nothing a browser sends is taken as evidence.
+
+**Set value** sets a value of a user attribute whose writer is you or empty (any administrator); attributes written by an import are set by the import (see [Import user attributes](/products/web-console/how-to/import-user-attributes)). **Remove** marks a value deleted: rules that need the attribute treat the user as missing it at the next deployment. Rules use a new or removed value at the next deployment or reconciliation, not immediately.
+
+The reserved user attribute `employment_status` disables an identity for every rule when its fresh value is `disabled`, `suspended`, `terminated`, or `inactive`.
+
+### Data classifications {#data-classifications}
+
+**Data classifications** labels columns (for example `pii`, `financial`, or `secret`) with their source and owner. **Classify column** opens a dialog with **Database**, **Table**, **Column**, **Label** (letters, digits, dashes, and underscores), **Source** (default `console`), and **Owner**. A label does not hide a column by itself: column clearance rules give access to the columns of a label through a generated role, and a change of the labels changes the grants of that role at the next deployment.
+
+## Policy rules {#policy-rules}
+
+**Policy Rules** lists the rules with their kind, revision, author, a **Business rule** in plain words, and a **Status**: the number of users the rule matches (hover for the number excluded), **Disabled**, **Deleted**, or **Not representable** with the reason. Each rule has **Explain**, **Edit**, **Disable** or **Enable**, and **Delete**.
+
+**New rule** opens the dialog **New policy rule**:
+
+| Field | Meaning |
+|---|---|
+| **Name** | The name of the rule. |
+| **Kind** | **Grant a role**, **Filter rows by an attribute**, or **Columns of a label need a clearance**. |
+| **Users** | The selector: one condition per line, `attribute = value, value`. All conditions must hold; a condition holds when the user's value is one of the listed values. |
+| **Role** | For **Grant a role**: an existing role. The rule grants it; it never changes the role's privileges. |
+| **Database**, **Table**, **Column**, **Attribute** | For **Filter rows by an attribute**: each user reads the rows whose column equals the user's value of the attribute. |
+| **Label**, **Clearance attribute**, **Values that clear** | For **Columns of a label need a clearance**: users whose clearance attribute has one of the values read the columns of the label. |
+| **Missing or stale attribute** | **Revoke what the rule gave (fail closed)** (default), or **Keep what was provisioned until the value is fresh again**. |
+| **Exceptions** | Comma-separated users the rule never provisions. |
+| **Enabled** | Whether deployments include the rule. |
+
+The review shows how the rule resolves now: the users matched, the users excluded, and the number of generated controls. Saving a rule changes nothing on the server: the rules take effect when they are deployed or reconciled by the [access policy worker](#access-policy-worker).
+
+### Generated native controls {#generated-native-controls}
+
+Each kind translates into native controls. `<rule>` is the first 8 hexadecimal digits of the rule ID, and `<value hash>` a stable hash of an attribute value:
+
+| Kind | Example | Generated native controls |
+|---|---|---|
+| **Grant a role** | Analysts in department Finance get the role `finance_reports` | `GRANT finance_reports TO <user>` per matched user |
+| **Filter rows by an attribute** | Branch staff read only the rows of their branch | One permissive row policy per value, `dap_<rule>_<value hash>`, `USING branch = '<value>' TO <users>`; and `dap_<rule>_none`, `USING 0`, for users in scope without a trusted value and for disabled identities |
+| **Columns of a label need a clearance** | Users without clearance `secret` cannot read columns labeled `secret` | A role `dap_<rule>_cleared` with `SELECT(<column>)` on every column of the label, granted to the cleared users |
+
+### Who a rule selects {#who-a-rule-selects}
+
+For each user of the server, a rule decides:
+
+- A user whose fresh `employment_status` disables the identity is excluded, but stays in scope: a row filter rule gives it the policy that shows no row.
+- A user listed in **Exceptions** gets nothing from the rule, not even the policy that shows no row.
+- A user who has none of the selector's attributes, or whose fresh values do not satisfy the selector, is not in scope.
+- A user in scope whose attribute is missing or not trusted is excluded. With **Revoke**, what the rule gave is removed, and a row filter rule gives the user the policy that shows no row, because without any policy the user would read every row. With **Keep**, what was provisioned from the last known value stays until the value is fresh again; nothing new is provisioned from a stale value, and a missing value is not held.
+- Every other user in scope is matched.
+
+<Warning>
+A rule with an empty **Users** selector has every user of the server in scope. For a row filter rule, every user without a trusted value of the attribute, including administrators and service accounts, gets the policy `dap_<rule>_none` and reads no row of the table. Select the users with a condition, for example `department = Finance, Sales`.
+</Warning>
+
+### Rules add access {#rules-add-access}
+
+Rules only add access. A rule never removes a grant made outside the platform, so this is not deny-overrides: a user who lacks a clearance still reads the classified columns through a broader grant. **Effective Access** and **Verify** report such conflicts.
+
+A rule is refused, not approximated with a permanent grant, when it uses an attribute that is not defined, an attribute evaluated per request, or an attribute that is not a user attribute, or when a field of its kind is missing. Such a rule is shown as **Not representable** and contributes nothing to deployments.
+
+### Revisions and explanation {#revisions-and-explanation}
+
+Every change of a rule, including **Enable**, **Disable**, and **Delete**, is a new revision in `dap_rules` with its author, recorded by the server (`created_by`). The author of the current revision matters: the access policy worker applies the rule with that user's privileges.
+
+**Explain** shows the business rule, the resolved attributes of each matched user, the excluded users with the reason and the effect (**Keeps what was provisioned**, **Sees no row (fail closed)**, or **Gets nothing from this rule**), the generated controls with their state on this server (**Deployed**, **Exists, not owned**, or **Not deployed**), and the last deployment with its scope and verification.
+
+## Policy deployments {#policy-deployments}
+
+**Policy Deployments** computes the difference between the desired state of every enabled rule and the server, and shows it before anything changes. The **Deploy the rules** box shows when the state was observed, the scope (this server, or `ON CLUSTER <cluster>` from **Apply changes to**), and the number of enabled and not representable rules, then:
+
+- **Planned changes**: the steps, in order (roles, grants, role grants, row policies, then removals in reverse order), or "None: the server matches the rules."
+- **Deploy**: reviews and runs the steps.
+- **Verify**: checks the result (see [Verification of a deployment](#verification-of-a-deployment)).
+- **Left alone**: entities that exist but were not created by the platform, with **Adopt** for generated names, and role grants that a user already has from elsewhere.
+- **Removed outside the platform**: owned entities that no longer exist.
+- **Rules not deployed**: rules that are not representable, with the reason.
+- **Readers outside the rules**: users who can read a table filtered by a rule, are not in the rule's scope, and have no other policy on it, so they see every row.
+- **Disabled identities**: users whose `employment_status` disables them.
+
+The generated statements are idempotent: `CREATE ROLE IF NOT EXISTS`, `CREATE ROW POLICY OR REPLACE`, `DROP ROLE IF EXISTS`, `DROP ROW POLICY IF EXISTS`, `GRANT`, and `REVOKE`, with `ON CLUSTER` for a cluster scope. Deploying again repairs a partial deployment. With a cluster scope, the result shows each server, and a server that did not answer within 30 seconds is shown as unfinished.
+
+**History** lists the deployments, reconciliations by the worker, verifications, and adoptions of `dap_deployments`, with the time, kind, author, scope, result, rules with their revisions, and the steps and verification in **Steps and verification**.
+
+### Ownership {#ownership}
+
+Only entities the platform owns, recorded by stable key in `dap_owned`, are changed or removed:
+
+- An entity that exists but was not created by the platform is left alone and listed. Remove or rename it, or **Adopt** it to record it as owned, so that the platform changes or removes it as the rules require.
+- A role that a rule grants and that a user already has from a grant made outside the platform is reported and kept when the rule stops applying.
+- An owned entity that was removed outside the platform is reported and not restored, unless **Restore entities that were removed outside the platform** is chosen. To revoke an entitlement on purpose, add an exception to the rule instead.
+- An owned entity that no rule wants any more is removed; one that no longer exists is forgotten.
+
+Only steps that took effect become owned: the ownership records are written after the statements, from the outcome of each step.
+
+### Verification of a deployment {#verification-of-a-deployment}
+
+**Verify** checks, on the server the console is connected to, that every generated control is present; for role and clearance rules, that no user known to the identity sources keeps the access through another grant; and, when you can read `system.processes`, which affected users still have running queries. It is recorded in `dap_deployments` as a `verify` entry. A revocation is reported complete only when these checks pass; other servers of a cluster are covered by the per-server results of the deployment.
+
+## Access policy worker {#access-policy-worker}
+
+`utils/web-console/access_policy_worker.mjs` keeps the server in line with the rules when nobody has the console open. Each cycle it imports the attribute feed (when configured), computes the desired state with the same functions as the console, which it loads from `console.html`, applies the difference, and records ownership, the deployment (kind `reconcile`), and an audit record (action `dap_reconcile`). It runs in the tools image as `access-policy-worker`, or directly with Node.js 18 or later:
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=access_policy_worker CLICKHOUSE_PASSWORD=... \
+    ATTRIBUTE_FEED=/var/lib/clickhouse-console/hr-feed.json ATTRIBUTE_FEED_SOURCE=hr INTERVAL_SECONDS=60 \
+    node utils/web-console/access_policy_worker.mjs
+```
+
+`--once` runs one cycle and exits. The environment variables are listed in [Helper processes](/products/web-console/reference/helper-processes#access-policy-worker).
+
+The worker is not an escalation path: it holds no privilege to grant anything. Each statement runs as `EXECUTE AS <author>`, the user who wrote the current revision of the rule, so the server checks that user's own privileges, including the grant option and `CLUSTER` for `ON CLUSTER`. Its account needs:
+
+```sql
+GRANT SELECT ON console_admin.* TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_owned TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_deployments TO access_policy_worker;
+GRANT INSERT ON console_admin.audit_log TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_user_attributes TO access_policy_worker;  -- only with an attribute feed
+GRANT SELECT ON system.users TO access_policy_worker;
+GRANT SELECT ON system.roles TO access_policy_worker;
+GRANT SELECT ON system.role_grants TO access_policy_worker;
+GRANT SELECT ON system.grants TO access_policy_worker;
+GRANT SELECT ON system.row_policies TO access_policy_worker;
+GRANT SHOW USERS, SHOW ROLES, SHOW ROW POLICIES ON *.* TO access_policy_worker;
+GRANT IMPERSONATE ON <each rule author> TO access_policy_worker;
+```
+
+`deploy/service-accounts.sql` creates this account (see [Create service accounts](/products/web-console/how-to/create-service-accounts)). Replace `console_admin` if the admin database has another name.
+
+Like **Policy Deployments**, the worker changes only owned entities, and never restores an owned entity that was removed outside the platform: that needs a deployment with **Restore entities that were removed outside the platform**. A rule whose author is unknown fails its steps: there is no user to act as.
+
+### Revocation latency {#revocation-latency}
+
+An attribute change reaches the server within one interval after it is written or the feed reports it (`INTERVAL_SECONDS`, 60 seconds by default), plus the delay of the feed itself. Without the worker, it reaches the server at the next **Deploy**. Grants and row policies are checked when a query starts: a running query finishes with the access it started with, and new queries of open sessions use the new access.
+
+### Identity source outage {#identity-source-outage}
+
+When the feed cannot be read, nothing is written and the values age. Until they pass the freshness limit of their attribute, the access already provisioned stays active. After that, each rule applies its setting: **Revoke** removes the access (row filters show no row), **Keep** holds what was provisioned. Set the freshness limit to the longest outage you accept.
+
+### Disabled identities {#disabled-identities}
+
+A ClickHouse user authenticates with its own credentials, not with the identity provider. Disabling the identity (`employment_status`) removes what rules gave and makes row filter rules show no row, but the user can still sign in and use grants made outside the platform until the account is suspended on the **Users** page (see [Suspending a user](/products/web-console/guides/users-and-roles#suspending-a-user)) or dropped.
+
+## Verified behavior {#verified-behavior}
+
+These are the behaviors of the server version the page was built for, checked on it with synthetic users and data. Confirm them on another release with access tests.
+
+| Requirement | Existing capability | Enforcement point | Added by the console | Version limitation |
+|---|---|---|---|---|
+| Read only some columns | `GRANT SELECT(col, ...)` | Query analysis on the server that runs the query | Column matrix, grant and revoke with review, broader-grant detection | `SELECT *` fails unless every column is granted; `count()` works with any column grant |
+| Read only some rows | `CREATE ROW POLICY ... AS permissive / restrictive` on a table or `db.*` | Every `SELECT` on the server that reads the table | Structured filter editor, combined filter per user, bypass paths | Filters reads only; not `INSERT`, `ALTER UPDATE`, or `ALTER DELETE` |
+| Users without a matching policy | `access_control_improvements.users_without_row_policies_can_read_rows` (default `true`) | Server configuration | Flagged per user as **All rows: no policy applies** | The setting cannot be read with SQL: the console assumes the default |
+| Explain effective access | `system.grants`, `system.role_grants`, `system.row_policies`, `SHOW GRANTS ... FINAL` | — | Role paths, default and activatable roles, conflicts, sources | Shows one server; sessions of other users are not observable |
+| Verify access at runtime | `EXECUTE AS <user>` with `IMPERSONATE ON <user>` | The server, with the target user's grants, default roles, and row policies | **Verify with the server**, access tests | Needs `allow_impersonate_user` and `IMPERSONATE` per target user |
+| Distributed reads | Shards apply their own row policies for the connecting user and those of the initial user, if a user of that name exists on the shard | Each shard | `Distributed` tables listed as bypass paths | Column grants are checked on the `Distributed` table, not on the shard's table |
+| Reads through views | `SQL SECURITY DEFINER` and `NONE` views read as their definer | The view | Listed as bypass paths | Row policies of the reader on the base table do not apply inside the view; `currentUser()` inside still returns the reader |
+| Masking | `CREATE MASKING POLICY` | — | Not offered | Refused: "Masking Policies are available only in ClickHouse Cloud" |
+
+## Dynamic access and masking {#dynamic-access-and-masking}
+
+Request-time ABAC and column masking need an enforcement boundary that sees every query. Findings on this server version:
+
+- **Native masking** is refused in this build (`SUPPORT_IS_DISABLED`: "Masking Policies are available only in ClickHouse Cloud"). The statement is parsed, so its syntax is no evidence of support. While checking it, `CREATE MASKING POLICY ... TO NONE` raised a logical error (inconsistent AST formatting of `TO NONE`): an exception in a release build.
+- **Controlled views** with `SQL SECURITY DEFINER` read the base table as the definer while `currentUser()` returns the reader, so a view can decide per user, for example `if(currentUser() IN (SELECT user_name FROM <entitled users>), ssn, concat('***-', right(ssn, 2)))`. Checked on synthetic data: the entitled reader gets the value and the others the mask; a filter on the real value through the view matches nothing, because filters, joins, grouping, and ordering operate on the masked value; but whatever the mask leaves visible can be probed (`LIKE '***-1%'` matched), and the base table's row policies do not apply inside the view (the reader saw 2 rows instead of 1), so they must be repeated in the view. Such a view is safe only when the readers have no grant on the base table, and no other path (another view, a `Distributed` or `Merge` table, a dictionary, a materialized view, `remote` with other credentials) reaches it. Hashing is not anonymization: a hash of a low-entropy value, such as a national identifier, is reversed by enumerating the values.
+- **A query gateway** enforces only if no client can reach the server directly; ClickHouse has no mechanism that confines users to a gateway except network rules and the users' allowed hosts. Rewriting SQL needs the server's parser, not regular expressions.
+- **An engine enhancement** (planner-level masking and request attributes) is the only option that covers every protocol and distributed execution; it is upstream work.
+
+Keep authorization in native controls: column grants, row policies, and attribute-driven provisioning. For masking, use controlled definer views only for named tables whose base-table access is revoked for all readers, and verify the absence of other paths with **Paths that can undermine the filter** on **Row Policies** and with access tests. The console does not provide request-time ABAC or masking, and nothing on the page is presented as such.
+
+## Performance {#performance}
+
+A row policy adds its filter to every query of the users it applies to, as if they had written it: on 50 million rows, `sum(v)` took 0.15 s with a policy `branch = 'north'` against 0.17 s with the same `WHERE` written by hand (median of 5 runs, on the development server). A policy disables the answer of `count()` from the table's metadata: `count()` took 0.10 s with the policy against 0.01 s without. Index the columns used in filters (the primary key or a skip index) on large tables.
+
+## Console tables and audit {#console-tables-and-audit}
+
+The page keeps attribute definitions (`dap_attributes`), attribute values (`dap_user_attributes`), classifications (`dap_classifications`), rule revisions (`dap_rules`), ownership (`dap_owned`), deployments (`dap_deployments`), access tests (`dap_access_tests`), and test runs (`dap_test_runs`) in the admin database. Their columns are in [Console tables](/products/web-console/reference/console-tables#data-access-tables). As for the other console tables, the writer and time of each row are filled in by the server. Grant `SELECT` on them to the readers of the page, `INSERT` on the tables of each task to its administrators, and keep `ALTER` and `DROP` to the server administrators.
+
+Administrative changes are recorded in the console audit log with actions `dap_*`: search for `dap_` on [Audit Activity](/products/web-console/guides/audit-activity). Query-time decisions are kept apart: **Audit Activity → Access decisions** shows reads the server refused (`ACCESS_DENIED` in `system.query_log`, with the literals of queries replaced by `?`) and the runs of access tests.
+
+## Runbooks {#runbooks}
+
+- **A user reads columns it should not.** Open **Effective Access** for the user and table: **Given by** names the grant and role path. Revoke the broader grant; a column grant does not narrow it.
+- **A user sees every row.** **Row Policies → Effect on a table** shows **All rows: no policy applies**: add the user (or a role it has at login) to a policy, or to the scope of a rule.
+- **A user sees no row.** **Effective Access → Rows** names the policies. A `dap_<rule>_none` policy means the user is in the scope of a row filter rule without a trusted value: check **Status** of the value on **Attributes & Classifications**, and the selector of the rule.
+- **A deployment is partly applied.** **History** shows the failed step and the servers. Fix the cause (often the author's missing grant option or `CLUSTER` privilege), then deploy again: the statements are idempotent.
+- **An entity is reported as existing but not owned.** Remove or rename it, or **Adopt** it to let the platform manage it.
+- **Revocation is not complete.** **Verify** lists the other grants that still give the access, and running queries. Revoke the other grants, or suspend the user.
+- **The worker reports a failure.** The audit record names the step and the server's message; the worker acts as the rule author, so the author needs the privileges for every generated statement, and the worker needs `IMPERSONATE` on the author.
+- **To migrate or recover**, back up the admin database with the other console tables. The native entities (roles, grants, row policies) are backed up with the access entities of the server (see [Backup and restore](/operations/backup/overview)). After a restore, run **Verify**: drift between `dap_owned` and the server is reported, not silently repaired.

@@ -1,0 +1,238 @@
+---
+description: 'Protect a table of salaries with the Data Access Policies page of the web console: column grants, a row policy, access tests, and a policy rule on a user attribute.'
+sidebarTitle: 'Protect a table of salaries'
+slug: /web-console/tutorials/data-access-policies
+title: 'Tutorial: protect a table of salaries'
+doc_type: 'guide'
+---
+
+In this tutorial you protect a table of salaries so that two employees, `alice` in Finance and `bob` in Sales, read the salaries of their own department and never the bank accounts. You start with native controls (a column grant and a row policy), check them with **Effective Access** and access tests, then replace the hand-made row policy with a policy rule on the user attribute `department`, deploy it, and verify it as the users. At the end you remove everything you created.
+
+The tutorial takes about 20 minutes. Every control you create is a native ClickHouse grant or row policy: the server enforces it for every client, not only for the console.
+
+## Prerequisites {#prerequisites}
+
+- A running web console that you can sign in to as an administrator who can create databases, users, roles, and row policies, and grant `SELECT` with the grant option, for example `default` in the [Docker Compose deployment](/products/web-console/how-to/deploy-with-docker-compose).
+- Data Access Policies set up: on **Administration → Data Access Policies**, the tabs **Access Tests**, **Attributes & Classifications**, **Policy Rules**, and **Policy Deployments** show their content, not **Set up Data Access Policies**. If they show it, select **Set up** and **Apply** on one of them.
+- A way to run SQL: the **SQL Console** panel of the console, or `clickhouse-client`.
+- For the steps that read as another user (**Verify with the server** and access tests), your administrator user needs `IMPERSONATE` on `alice` and `bob`. An administrator with `ALL` on `*.*`, such as `default` with access management, has it. The server setting `allow_impersonate_user` is enabled in the default `config.xml` of this build.
+
+If the [access policy worker](/products/web-console/guides/data-access-policies#access-policy-worker) runs, it may apply your rule before you select **Deploy**: **History** then shows a `reconcile` entry instead of your `deploy`. The result is the same.
+
+## Protect the table {#protect-the-table}
+
+<Steps>
+<Step title="Create the demo database, table, users, and role">
+
+As your administrator, run:
+
+```sql
+CREATE DATABASE hr_demo;
+
+CREATE TABLE hr_demo.salaries
+(
+    employee String,
+    department String,
+    salary UInt32,
+    bank_account String
+)
+ENGINE = MergeTree
+ORDER BY (department, employee);
+
+INSERT INTO hr_demo.salaries VALUES
+    ('Ann', 'Finance', 5200, 'DE00 1111'),
+    ('Carl', 'Finance', 4800, 'DE00 2222'),
+    ('Dina', 'Sales', 4500, 'DE00 3333'),
+    ('Ed', 'Sales', 4700, 'DE00 4444'),
+    ('Fay', 'Engineering', 6100, 'DE00 5555'),
+    ('Gus', 'Engineering', 5900, 'DE00 6666');
+
+CREATE USER alice IDENTIFIED WITH sha256_password BY 'Alice-demo-1';
+CREATE USER bob IDENTIFIED WITH sha256_password BY 'Bob-demo-1';
+CREATE ROLE salary_readers;
+GRANT salary_readers TO alice, bob;
+```
+
+If your user does not have `IMPERSONATE` through `ALL`, also run `GRANT IMPERSONATE ON alice TO <your user>` and `GRANT IMPERSONATE ON bob TO <your user>`.
+
+New users have all granted roles as default roles, so `salary_readers` is active when `alice` and `bob` sign in. The role has no privilege yet.
+
+</Step>
+<Step title="Grant the columns">
+
+1. Open **Administration → Data Access Policies**. The page opens on **Column Permissions**.
+2. Choose **Database** `hr_demo` and **Table** `salaries`. The **Users** matrix lists the users who can already read the table, such as your administrator, with ● in every column (a grant on the whole table or wider). `alice` and `bob` are not listed: they cannot read the table yet.
+3. Select **Grant columns**. In **To**, choose `role salary_readers`, and check `employee`, `department`, and `salary`. Leave `bank_account` unchecked.
+4. Select **Review**. The review shows the `GRANT SELECT` statement and warns that `SELECT *` will fail for this grantee, because it needs every column.
+5. Select **Apply**, then **Close**.
+
+The **Roles** matrix now shows `salary_readers` with ✓ under the three columns and — under `bank_account`. `alice` and `bob` appear in the **Users** matrix with the same marks: hover a ✓ to see that the grant comes through `salary_readers`. They have no grant of their own, so **Direct column grants to users** stays empty.
+
+</Step>
+<Step title="Add a row policy for alice">
+
+1. Select the **Row Policies** tab, then **Create row policy**.
+2. Fill in **Name** `finance_only`, **Database** `hr_demo`, **Table** `salaries`, **Kind** **Permissive: joined with OR with other permissive policies**, and **Applies to** **These users and roles**, then check `user alice`.
+3. Under **Filter**, keep **Conditions (joined with AND)**. In the condition, choose **Column** `department`, **Condition** `=`, and type `Finance` in **Values**.
+4. Select **Review**. The warning lists the affected users with their filter before and after: `alice` goes from every row to `department = 'Finance'`.
+5. Select **Apply**, then **Close**.
+
+The **Row policies** list shows `finance_only` on `hr_demo.salaries`, **Permissive (OR)**, applied to `alice`.
+
+</Step>
+<Step title="Check the effect on the table">
+
+In **Effect on a table**, choose **Database** `hr_demo` and **Table** `salaries`. The table shows:
+
+- `alice`: **Rows visible** **Filtered**, with the combined filter `department = 'Finance'` from `finance_only`.
+- `bob` and your administrator: **All rows: no policy applies**.
+
+This is the default behavior of ClickHouse: once a table has row policies, a user to whom none of them applies still reads every row. `bob` reads the salaries of every department. You fix this with a policy rule later.
+
+</Step>
+<Step title="Explain the access of alice">
+
+1. Select the **Effective Access** tab. Choose **User** `alice`, **Database** `hr_demo`, **Table** `salaries`, and **Operation** **Read (SELECT)**.
+2. Under **Roles**, `salary_readers` is **Active**: it is a default role.
+3. In the per-column table, `employee`, `department`, and `salary` are **Yes** under **At login (configured)**, and **Given by** names the `SELECT` grant and the role `salary_readers`. `bank_account` is **No**.
+4. Under **Rows**, **At login** shows `department = 'Finance'`.
+5. Select **Verify with the server**. The console runs `EXECUTE AS alice CHECK GRANT` for each column and counts the rows as `alice`: three columns are **Allowed**, `bank_account` is **Denied**, and **Visible rows** is 2.
+
+If the results are **Unknown**, your user lacks `IMPERSONATE` on `alice`: the evidence column shows the server's message.
+
+</Step>
+<Step title="Add access tests">
+
+1. Select the **Access Tests** tab, then **Add test**, and add these three tests. For each, fill in the fields, select **Review**, then **Apply** and **Close**.
+
+   | Name | As user | Database, Table | Columns | Expected | Expected rows |
+   |---|---|---|---|---|---|
+   | `alice reads Finance salaries` | `alice` | `hr_demo`, `salaries` | `employee, salary` | **Allowed** | 2 |
+   | `alice cannot read bank accounts` | `alice` | `hr_demo`, `salaries` | `bank_account` | **Denied (ACCESS_DENIED)** | empty |
+   | `bob reads Sales salaries` | `bob` | `hr_demo`, `salaries` | `employee, salary` | **Allowed** | 2 |
+
+2. Select **Run all**.
+
+The first two tests show **Pass**. The third shows **Fail** with `allowed, 6 rows`: `bob` reads every row, as **Effect on a table** showed. The test records the number of rows, never the data.
+
+</Step>
+<Step title="Define the attribute department and set its values">
+
+1. Select the **Attributes & Classifications** tab, then **Define attribute**.
+2. Fill in **Attribute** `department`, **Category** **User**, **Source of truth** `console`, and **Owner** `HR`. Leave **Writer** empty (any administrator who can write values), **Fresh for (seconds)** at 86400, and **Evaluated per request** unchecked.
+3. Select **Review**, then **Apply** and **Close**. The **Attributes** table lists `department`, fresh for one day.
+4. Under **User attribute values**, select **Set value**. Choose **User** `alice` and **Attribute** `department (console)`, type **Value** `Finance`, then **Review**, **Apply**, and **Close**.
+5. Set the value `Sales` for `bob` the same way.
+
+Both values show **Status** **Fresh**. In production, an identity provider or HR import writes these values with its own account (see [Import user attributes](/products/web-console/how-to/import-user-attributes)), and the definition names that account as its **Writer**.
+
+</Step>
+<Step title="Create a policy rule that limits rows by department">
+
+1. Select the **Policy Rules** tab, then **New rule**.
+2. Fill in:
+   - **Name**: `Salaries by department`
+   - **Kind**: **Filter rows by an attribute**
+   - **Users**: `department = Finance, Sales`
+   - **Database** `hr_demo`, **Table** `salaries`, **Column** `department`, **Attribute** `department`
+   - **Missing or stale attribute**: **Revoke what the rule gave (fail closed)**
+   - **Exceptions**: empty, and **Enabled** checked
+3. Select **Review**. The warning shows how the rule resolves now: 2 users matched (`alice, bob`), and 2 generated controls. Select **Apply**, then **Close**.
+
+The rule is listed with the business rule `Users with department ∈ {Finance, Sales} read the rows of hr_demo.salaries where department equals their department.` and the status **2 users**.
+
+The **Users** selector matters: it puts only users with a department of Finance or Sales in the scope of the rule. With an empty selector, every user without a department, including your administrator, would get a policy that shows no row.
+
+Select **Explain** to see the matched users with their values and the two generated row policies, both **Not deployed**. Saving the rule changed nothing on the server yet.
+
+</Step>
+<Step title="Remove the hand-made policy">
+
+The rule replaces `finance_only`. On **Row Policies**, select **Remove** on `finance_only`, then **Apply** and **Close**. Until you deploy the rule, `alice` reads every row again.
+
+</Step>
+<Step title="Deploy the rule">
+
+1. Select the **Policy Deployments** tab. **Planned changes** lists two steps, one row policy per department, named `dap_<rule>_<value hash>`:
+
+   ```text
+   Create the row policy dap_…_… on hr_demo.salaries: `department` = 'Finance', for alice
+   Create the row policy dap_…_… on hr_demo.salaries: `department` = 'Sales', for bob
+   ```
+
+   **Readers outside the rules** may list your administrator: it reads the table, is not in the scope of the rule, and has no policy on it, so it sees every row. That is expected here.
+2. Select **Deploy**, review the statements (`CREATE ROW POLICY OR REPLACE ... AS permissive TO ...`), then **Apply**. Both steps show **Done**. Select **Close**.
+3. **Planned changes** now shows "None: the server matches the rules.", and **History** shows a `deploy` entry with the result `success`.
+4. Select **Verify**. The dialog reports "Every generated control is present, and no excluded user keeps the access elsewhere." Select **Close**. **History** shows a `verify` entry.
+
+The two policies are recorded in `dap_owned`: the platform owns them, and changes or removes them as the rule requires.
+
+</Step>
+<Step title="Verify as the users">
+
+1. On **Access Tests**, select **Run all**. All three tests show **Pass**: `bob` now reads 2 rows.
+2. Read as the users themselves, with their own credentials. With `clickhouse-client` (in the Docker Compose deployment, run it with `docker compose exec clickhouse clickhouse-client`):
+
+   ```bash
+   clickhouse-client --user bob --password 'Bob-demo-1' \
+       --query "SELECT employee, department, salary FROM hr_demo.salaries"
+   ```
+
+   ```text
+   Dina	Sales	4500
+   Ed	Sales	4700
+   ```
+
+3. Try the column that is not granted, and `SELECT *`:
+
+   ```bash
+   clickhouse-client --user bob --password 'Bob-demo-1' --query "SELECT bank_account FROM hr_demo.salaries"
+   clickhouse-client --user bob --password 'Bob-demo-1' --query "SELECT * FROM hr_demo.salaries"
+   ```
+
+   Both fail with `ACCESS_DENIED`: `SELECT *` needs every column. The same query as `alice` returns the two Finance rows.
+
+</Step>
+<Step title="Change an attribute and deploy again">
+
+Move `bob` to Finance: on **Attributes & Classifications**, select **Set value** for `bob`, attribute `department`, value `Finance`, then **Review**, **Apply**, and **Close**.
+
+On **Policy Deployments**, **Planned changes** now updates the Finance policy for `alice, bob` and drops the Sales policy, which no rule wants any more. Select **Deploy**, then **Apply** and **Close**. `bob` now reads the Finance rows and no Sales row. With the access policy worker, the same change reaches the server within one interval, without anyone opening the console.
+
+</Step>
+</Steps>
+
+## Clean up {#clean-up}
+
+Remove the generated policies before the users, so that the platform's ownership records stay consistent:
+
+1. On **Policy Rules**, select **Delete** on `Salaries by department`, then **Apply** and **Close**. The rule is now **Deleted**, but its policies still exist.
+2. On **Policy Deployments**, **Planned changes** lists `Drop the row policy ...` for the owned policies. Select **Deploy**, then **Apply** and **Close**.
+3. On **Access Tests**, select **Remove** on each of the three tests, then **Apply**. The runs stay in `dap_test_runs`.
+4. On **Attributes & Classifications**, select **Remove** on the values of `alice` and `bob`, then **Apply**. The page has no button to remove an attribute definition; to remove `department`, insert a row that marks it deleted (replace `console_admin` if your admin database has another name):
+
+   ```sql
+   INSERT INTO console_admin.dap_attributes (attribute, category, dynamic, source, writer, owner, max_age_seconds, description, deleted)
+   VALUES ('department', 'user', false, 'console', '', 'HR', 86400, '', true);
+   ```
+
+5. Drop the demo entities:
+
+   ```sql
+   DROP USER alice, bob;
+   DROP ROLE salary_readers;
+   DROP DATABASE hr_demo;
+   ```
+
+## What you learned {#what-you-learned}
+
+- A column grant is positive: it restricts a user to some columns only when no broader grant gives the whole table, and `SELECT *` fails without every column.
+- A row policy filters reads only for the users it applies to: once a table has policies, other users with `SELECT` still read every row.
+- **Effective Access** explains configured access, and **Verify with the server** and access tests confirm it with `EXECUTE AS` as the user.
+- A policy rule turns trusted user attributes into native row policies. Saving it changes nothing; a deployment or the access policy worker applies it, changing only the entities the platform owns.
+
+Read more:
+
+- [Data Access Policies](/products/web-console/guides/data-access-policies): every tab, the rule kinds, ownership, and limits.
+- [Policy rules](/products/web-console/guides/data-access-policies#policy-rules) and [Attributes and classifications](/products/web-console/guides/data-access-policies#attributes).
+- [Import user attributes](/products/web-console/how-to/import-user-attributes) from a feed or an LDAP directory.

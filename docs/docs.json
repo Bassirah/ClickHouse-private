@@ -114,6 +114,9 @@
               },
               {
                 "$ref": "./products/kubernetes-operator/navigation.json"
+              },
+              {
+                "$ref": "./products/web-console/navigation.json"
               }
             ],
             "tab": "Solutions"

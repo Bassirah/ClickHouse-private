@@ -1,0 +1,151 @@
+---
+description: 'How the web console shell works: signing in, the home page, the sidebar and its categories, panels and their states, the connection status, and the security model.'
+sidebarTitle: 'The console'
+slug: /web-console/guides/console
+title: 'The console: sign-in, navigation, and panels'
+doc_type: 'guide'
+---
+
+The web console is a single entry point for the web UIs built into the ClickHouse server. Every HTTP port of the server serves it at `/console`, for example `http://localhost:8123/console`. You sign in once with a ClickHouse user, and the console opens the SQL Console, the dashboards, the diagnostic pages, and its own administration pages next to a common sidebar, without a separate sign-in for each of them.
+
+This page explains the shell of the console: how you sign in and out, what the home page and the sidebar show, how panels open and which states they can be in, and what the console does and does not protect. For the architecture and the list of components, see the [overview](/products/web-console/overview#components).
+
+## Signing in and out {#signing-in-and-out}
+
+### The sign-in form {#the-sign-in-form}
+
+The sign-in page, **ClickHouse Console**, asks for a **Username** (prefilled with `default`) and a **Password**, and signs in when you select **Connect**. The console always signs in to the server that serves it, at the address of the page. If that address uses plain HTTP and is not `localhost`, the form warns that the password is sent to the server in clear text.
+
+The console checks the credentials with `SELECT currentUser(), version(), hostName()`, which needs no privileges. When the check fails, the form tells these cases apart:
+
+- The username or password is incorrect.
+- The user is not allowed to connect from your network address.
+- The user does not have the required permissions.
+- The server cannot be reached. Where the browser allows it, the message also tells a blocked HTTPS-to-HTTP request (mixed content), a CORS refusal, and an untrusted TLS certificate apart.
+
+If you open the address of a panel, for example `/console/merges`, without being signed in, the form shows **Sign in to open** followed by the panel name, and opens that panel after the sign-in.
+
+### Single sign-on {#single-sign-on}
+
+When the server configuration sets `web_console.sso_issuer` and `web_console.sso_client_id`, the form also shows a **Sign in with** button for the identity provider, for example **Sign in with Keycloak** (the provider name comes from `sso_name`). See the [configuration reference](/products/web-console/reference/configuration#sso-keys) for these keys.
+
+Selecting the button opens the provider's sign-in page in a pop-up window. If the browser blocks the pop-up, the form asks you to allow pop-ups for the page. After you sign in with the provider, the console uses the access token as the password of the session. The user name is the claim named by `sso_username_claim` (by default `preferred_username`). The server checks the token through the token authenticator, for users `IDENTIFIED WITH http`. If the server refuses the sign-in, the form says that the provider signed you in, and that the user must exist on the server with the token authenticator, which must be running.
+
+While you are signed in, the console refreshes the access token before it expires and passes the new token to the native panels. The SQL Console, the Web Terminal, and ClickStack keep the token they started with, so reload them after it expires. When the provider refuses a refresh, for example because the session ended there or the user was disabled, the console signs you out and says that your session has ended. For the whole design, see [Identity Providers](/products/web-console/guides/identity-providers#sso).
+
+### Signing out and switching connection {#signing-out-and-switching-connection}
+
+**Sign out** in the header, and **Switch connection** (in the header and on the home page) to sign in as another user, close every panel. This ends their queries, timers, and terminal sessions. They also discard the password, and the ClickHouse connection that ClickStack stored for the current browser tab. After signing out, the browser's Back button does not restore the signed-in state.
+
+With single sign-on, **Sign out** also ends the session with the provider and returns to the sign-in page. **Switch connection** then works like **Sign out**, because another user needs a new session with the provider.
+
+## The home page {#the-home-page}
+
+After the sign-in, the console opens **Home**. Its connection overview shows:
+
+| Field | Content |
+|---|---|
+| **Status** | `Connected, verified at` a time, or `Authentication failed` or `Connection lost` with the time of the failure. |
+| **Server** | The URL the console is connected to. |
+| **Database user** | The user the server reports with `currentUser`. |
+| **ClickHouse version** | The version of the server. |
+| **Host name** | The host name of the server. |
+
+**Check connection** checks the connection again, and **Switch connection** signs out so that you can sign in as another user. Below the overview, the home page shows a card for each destination the user can use, grouped by category. Each card has a description, its state, and a button: **Open**, **Configure** (for a destination without an address), or **Details** (for an unavailable one).
+
+When the console access policy exists but cannot be read, the home page also says that the components it governs are hidden, and which privilege to ask for (see [Component Access](/products/web-console/guides/component-access)).
+
+### Connection status {#connection-status}
+
+The header shows the connection status as `<user>@<host>` followed by `connected`, `checking…`, `authentication failed`, or `connection lost`. The console checks the connection every minute while the tab is visible, and when you select **Check connection**. When the check fails, the open panel shows a notice that it may not work until the connection is restored. If authentication fails, the password may have changed: switch connection to sign in again.
+
+## The sidebar and its categories {#the-sidebar-and-its-categories}
+
+The sidebar and the home page list the same destinations, in these categories:
+
+| Category | Destinations |
+|---|---|
+| **Home** | Home. |
+| **Workspace** | SQL Console, Dashboard, ClickStack, Web Terminal. |
+| **Diagnostics** | Binary visualizer, Merges visualizer, Schema visualizer, Jemalloc, Processors profile. |
+| **Administration** | Users, Roles & Permissions, Data Access Policies, Component Access, Profiles & Quotas, Audit Activity, Clusters, Backup & Restore. |
+| **Identity Providers** | LDAP, SSO (Keycloak). |
+| **Resources** | Source code, Documentation, Reference, Website, Cloud. |
+
+A category without any destination for the user is not shown. The button at the bottom of the sidebar collapses it to icons (**Collapse sidebar**, **Expand sidebar**); the browser remembers the choice. On a narrow screen, the menu button in the header shows and hides the sidebar.
+
+The administration and identity provider pages are listed only for users who can read what they show, and when the console access policy allows them. Their own guides describe them: [Users and roles](/products/web-console/guides/users-and-roles), [Component Access](/products/web-console/guides/component-access), [Profiles and quotas](/products/web-console/guides/profiles-and-quotas), [Audit activity](/products/web-console/guides/audit-activity), [Data Access Policies](/products/web-console/guides/data-access-policies), [Backup & Restore](/products/web-console/guides/backup-and-restore), [Clusters](/products/web-console/guides/clusters), and [Identity Providers](/products/web-console/guides/identity-providers).
+
+The links of **Resources** come from the `web_console` section of the server configuration. A path on the server opens inside the console; an absolute HTTP or HTTPS URL opens in a new tab and is marked **External**. External links open with `noopener` and `noreferrer` and carry no credentials, queries, or database names. See the [configuration reference](/products/web-console/reference/configuration#web-console).
+
+## Panels {#panels}
+
+A panel is a web UI of the server shown inside the console: the SQL Console (`/ui`), Dashboard (`/dashboard`), ClickStack (`/clickstack` or `clickstack_url`), Web Terminal (`/webterminal`), the diagnostic pages (`/binary`, `/merges`, `/schema`, `/jemalloc`, `/processors-profile`), and Reference (`/docs`). The console passes the connection to each of them, so they do not ask for credentials (see the [embedding contract](/products/web-console/reference/http-endpoints#embedding-contract)). ClickStack is the exception: it keeps its own connection settings, which you enter in ClickStack on first use.
+
+Each panel has a refreshable address under `/console`, for example `/console/merges`, and the browser's Back and Forward buttons move between panels. The pages also keep working on their own at their original paths.
+
+### The panel bar {#the-panel-bar}
+
+Above an open panel, the panel bar shows the name of the panel and these controls:
+
+- **Console**: shows or hides the console header and sidebar (see [Focus mode](#focus-mode)).
+- **Reload panel**: loads the panel again with the current connection.
+- **Standalone page**: opens the page outside of the console, in a new tab. It asks for credentials separately.
+
+### Focus mode {#focus-mode}
+
+When a panel opens, the console header and sidebar hide, so that the panel, with its own navigation, uses the whole window. To return to the console navigation, select **Console** (the arrow at the start of the panel bar); select the same button again to hide it. The console navigation then stays visible for that panel until you select another one.
+
+Home, the administration pages, and the messages shown instead of a panel (for example when it is restricted or not configured) always show the console navigation. In the Web Terminal, Escape moves the keyboard focus to the **Console** button.
+
+### Panels that stay loaded {#panels-that-stay-loaded}
+
+The SQL Console, Dashboard, ClickStack, Web Terminal, and Reference stay loaded when you switch to another destination: their queries, tabs, results, and terminal sessions survive. The other panels are unloaded, which stops their timers and requests, and are loaded again each time they are opened.
+
+### Panel states {#panel-states}
+
+After the sign-in, the console runs a `LIMIT 0` query for each panel that needs privileges or system tables, with the same privileges and tables the panel needs. It also checks whether `/webterminal` and the ClickStack bundle answer. The result gives each destination one of these states:
+
+| State | Meaning | What the address shows |
+|---|---|---|
+| **Checking…** | The checks are still running. | `Checking whether this panel is available for your user.` |
+| Not listed (restricted) | The server denies the check query: the user has no privileges for the panel. The card and the sidebar entry are not shown. | **is restricted**, the answer of the server, and **Open anyway**: the server still checks every query and rejects those the user is not allowed to run. |
+| **Unavailable** | A system table or function the panel needs does not exist, for example `system.part_log` when it is not configured. The Web Terminal is unavailable when the `enable_webterminal` server setting disables it, and when the console is connected to a server other than the one that serves it. ClickStack is unavailable when the server build has no ClickStack bundle. | **is unavailable** and the reason. |
+| **Not configured** | An administrator removed the address of the destination, or set an invalid one. | **is not configured**, with an example of the configuration that sets the address. |
+| **Not verified** | The check failed for another reason, for example a timeout. The panel can still be opened. | The panel. |
+| **Not allowed by policy** | The console access policy does not allow the user to open the component. It is not listed. | **is not allowed**, and a note that the server still decides what the user can query. |
+
+Two more badges describe a destination, not its state: **External** for a destination that opens in a new tab, and **Needs Internet** for a page that loads a library from a public CDN. The Binary visualizer loads Leaflet, and Jemalloc loads uPlot. Every other panel and the console itself work without Internet access.
+
+If the page inside a panel navigates away from its own address, for example when you use the SQL Console's own sign-out, the console unloads the panel and offers **Reload panel**.
+
+## Security model {#security-model}
+
+The sign-in screen is a convenience of the user interface, not an access control. The console page and the embedded pages are public static files, like the other web UIs of the server. Every query is authorized by the ClickHouse server, with the credentials of the signed-in user. Hiding or marking a panel in the console does not change what the user can do.
+
+The console handles credentials as follows:
+
+- It keeps the password, or the access token with single sign-on, in the memory of the browser tab. It never writes them to the address bar, the browser history, cookies, or browser storage. Reloading the page signs you out.
+- It sends the credentials in the `X-ClickHouse-User` and `X-ClickHouse-Key` headers, never in the URL.
+- Embedded pages get the credentials from the console without going through a URL, a storage, or a message to another origin. Some of them send the credentials to the server as `user` and `password` URL parameters, as they do when opened on their own. The server masks the password in its logs, but a reverse proxy may record such URLs: do not log query strings on a proxy in front of ClickHouse.
+- Links to external destinations open in a new tab with `noopener` and `noreferrer`, and carry no credentials, queries, or database names.
+- The console page is served with `Cache-Control: no-store`, `X-Frame-Options: DENY`, and a `Content-Security-Policy` that allows only inline code, same-origin frames, and requests to ClickHouse servers. To override any of these headers, set it in a `console` handler of `http_handlers` (see the [configuration reference](/products/web-console/reference/configuration#http-handlers)).
+- The embedded pages are loaded in same-origin frames. Do not set `X-Frame-Options: DENY` or `frame-ancestors 'none'` on them, or they cannot be embedded.
+
+The administration pages follow the same model: each change is a SQL statement that the server authorizes with your privileges (see [Users and roles](/products/web-console/guides/users-and-roles#identity-and-authorization-model)). The console access policy only lists or hides components; see [Component Access](/products/web-console/guides/component-access).
+
+### Data in the browser's local storage {#data-in-the-browsers-local-storage}
+
+The SQL Console keeps its saved queries, query history, and open tabs in the browser's local storage, per server URL and user, also when it is used inside the console. Signing out of the console does not delete them. Use a browser profile of your own on a shared computer.
+
+The console itself stores only two preferences in local storage: the theme (light or dark, shared with the other web UIs of the server) and whether the sidebar is collapsed.
+
+## Limitations {#limitations}
+
+- The console and the panels share the origin of the ClickHouse HTTP port. Any page on that origin, including ClickStack and the SQL Console, can read the memory of the console. Do not serve untrusted content from the ClickHouse HTTP port.
+- Navigation inside an embedded page, for example opening a query in the SQL Console, also adds entries to the browser history.
+- Panels other than the SQL Console, Dashboard, ClickStack, Web Terminal, and Reference are reloaded each time they are opened, which stops their background refresh while they are hidden.
+- A theme change applies to panels opened after it. Panels that are already open keep their theme until they are reloaded.
+- The Merges visualizer does not display query errors, including permission errors.
+- With single sign-on, the SQL Console, the Web Terminal, and ClickStack keep the access token they started with: reload them after it expires.
+- The SQL Console has no embedding interface: the console fills in its connection form and submits it. If that does not succeed, the console shows a notice above the panel, and you can sign in with the form of the SQL Console.

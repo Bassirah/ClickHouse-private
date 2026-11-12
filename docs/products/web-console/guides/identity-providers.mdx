@@ -1,0 +1,334 @@
+---
+description: 'How the Identity Providers pages of the web console work: LDAP and Active Directory user directories, single sign-on with Keycloak, and how the ClickHouse server accepts each kind of sign-in.'
+sidebarTitle: 'Identity providers'
+slug: /web-console/guides/identity-providers
+title: 'Identity providers'
+doc_type: 'guide'
+---
+
+Besides the users and passwords managed on the **Users** page, people can sign in to the console, and to ClickHouse,
+through an external identity provider: an LDAP directory (OpenLDAP or Active Directory), or single sign-on with
+Keycloak over OpenID Connect. The **Identity Providers** group of the sidebar has a page for each: **LDAP** and
+**SSO (Keycloak)**.
+
+This guide explains what each page shows and does, and the model behind it. For the procedures, see
+[Configure an LDAP user directory](/products/web-console/how-to/configure-ldap) and
+[Configure single sign-on with Keycloak](/products/web-console/how-to/configure-keycloak-sso). To try single sign-on
+on a test machine first, follow the [single sign-on tutorial](/products/web-console/tutorials/single-sign-on).
+
+## What the server can check {#what-the-server-can-check}
+
+The console has no session of its own on the server. Every query reaches the server with credentials, and the server
+authenticates each one (see [Security model](/products/web-console/guides/console#security-model)). So whatever
+identity provider is used, the server must accept what the console sends.
+
+| Method | In this build | Notes |
+|---|---|---|
+| Password (SQL users, `users.xml`) | Yes | The default. |
+| LDAP authenticator (`ldap_servers`, users `IDENTIFIED WITH ldap`) | Yes | The user exists in ClickHouse; the directory checks the password. |
+| LDAP user directory (`user_directories.ldap`) | Yes | Users and roles come from the directory, with `role_mapping`. Works with OpenLDAP and Active Directory. |
+| Kerberos (users `IDENTIFIED WITH kerberos`) | Yes | HTTP `Negotiate`. |
+| X.509 certificates, SSH keys | Yes | For services and the command-line client, not for people in a browser. |
+| HTTP authenticator (`http_authentication_servers`, users `IDENTIFIED WITH http`) | Yes | The server sends the user name and the password (HTTP Basic) to an HTTP service, which answers yes or no. |
+| JWT (`IDENTIFIED WITH jwt`) | Parsed only | The type exists, but the server does not verify tokens. |
+
+LDAP and Active Directory are native to the server. OpenID Connect (Keycloak and other providers) is not: the server
+cannot check its tokens. The console therefore uses the HTTP authenticator for single sign-on, with a small service,
+the **token authenticator**, that checks the tokens for the server (see [Why a token authenticator](#why-a-token-authenticator)).
+
+## LDAP {#ldap}
+
+The **LDAP** page (`/console/idp-ldap`) shows the LDAP user directories of the server. Users of such a directory sign
+in with their directory password and get their roles from their LDAP groups. They are not created in ClickHouse. The
+users of `users.xml` and those created with SQL keep working next to them, and the console is the same for both.
+
+A user directory is part of the server configuration. The console shows it, tests a sign-in through it, and generates
+its configuration, but it does not change the server configuration.
+
+To open the page, your user needs `SELECT` on `system.user_directories`. Without it, the page says that the console
+cannot tell whether an LDAP directory is configured.
+
+### Directory sign-in {#directory-sign-in}
+
+The **Directory sign-in (LDAP)** box lists the LDAP user directories that `system.user_directories` reports. Its
+buttons are:
+
+- **Configure LDAP…**, when no directory exists, or **Add a directory…**, when one does: opens the configuration
+  generator (see [Generated configuration](#generated-configuration)).
+- **Test sign-in…**, when a directory exists: see [Test a directory sign-in](#test-a-directory-sign-in).
+
+Each directory has a **Configuration…** button, which opens the generator with the fields filled from the directory
+(except the connection settings, which the server does not report), and shows:
+
+| Field | Content |
+|---|---|
+| **Directory** | The name of the user directory and its precedence. |
+| **LDAP server** | The entry of `ldap_servers` it uses. |
+| **Default roles** | The roles every directory user gets. A role that does not exist on the server is marked: create it, or the users get nothing from it. |
+| **Roles from groups** | The group search of `role_mapping`: the attribute, the base DN, the scope, the filter, and the prefix. |
+| **Precedence** | Whether a user of the same name in an earlier directory signs in there instead. |
+
+When the groups map to roles but no role exists yet, the box warns that roles are mapped by name, and that you must
+create the roles the groups stand for.
+
+### How the server accepts directory users {#how-the-server-accepts-directory-users}
+
+The server checks the password of a directory user by binding to the LDAP server as the bind DN of `ldap_servers`, in
+which `{user_name}` is replaced by the name the user signs in with. It then finds the user's groups with the search of
+`role_mapping`: a group whose attribute is `<prefix><role>` gives the role `<role>`, if that role exists. Groups
+without the prefix are ignored. The roles of `<roles>` are given to every directory user. See
+[LDAP](/operations/external-authenticators/ldap) for every setting.
+
+| Aspect | Behavior |
+|---|---|
+| Verification cooldown | The server checks a password with the directory on every request, unless a check succeeded within `verification_cooldown` seconds. The console sends a request for every action, about 80 when signing in, so the generated configuration uses 300 seconds. A user disabled in the directory keeps access for at most this long. |
+| Precedence | The directories are tried in order: `users.xml`, then the users created with SQL, then LDAP. A local user with the same name as a directory user comes first. |
+| Changes | A new user directory is created only when the server starts. Later changes of the LDAP server settings take effect with `SYSTEM RELOAD CONFIG`. |
+| Offboarding | Disable the user, or remove them from the groups, in the directory: it takes effect after the cooldown. Directory users cannot be suspended or deleted in the console. |
+| Access reviews | ClickHouse cannot list the directory: review group membership in LDAP. |
+| Transport | Passwords travel with every request: serve the console over HTTPS, and never use LDAP without TLS. |
+
+Directory users appear on the **Users** page, read-only, once they have signed in. See
+[Users and roles](/products/web-console/guides/users-and-roles).
+
+### Generated configuration {#generated-configuration}
+
+**Configure LDAP…** (or **Add a directory…**) opens a form that generates the XML of an LDAP server and an LDAP user
+directory, to save as a file in `config.d` of the server. The fields are **Server name**, **Host**, **Port**,
+**Encryption** (LDAPS or StartTLS), **CA certificate file**, **Bind DN**, **Verification cooldown (seconds)**,
+**Default roles**, and, under **Roles from LDAP groups**, **Base DN of the groups**, **Search filter**, **Attribute**,
+and **Prefix**. **Copy** copies the result.
+
+The configuration is secure by default:
+
+- LDAPS (port 636) or StartTLS (port 389), never plain LDAP;
+- `tls_minimum_protocol_version` `tls1.2`;
+- the certificate of the LDAP server always checked (`tls_require_cert` `demand`), with your certificate authority in
+  `tls_ca_cert_file`;
+- a `verification_cooldown`, 300 seconds by default.
+
+The form checks that the bind DN contains `{user_name}`, and that the search filter contains `{bind_dn}` or
+`{user_name}`, so that it finds the groups of the user. Leave the base DN of the groups empty for no group mapping:
+the users then get only the default roles.
+
+For Active Directory, bind as `{user_name}@<domain>` and find nested groups; see
+[Active Directory](/products/web-console/how-to/configure-ldap#active-directory).
+
+### Test a directory sign-in {#test-a-directory-sign-in}
+
+**Test sign-in…** signs in once with a user name and a password, with a query that reads the user's name and enabled
+roles. It shows **Signed in as**, **Through** (the directory that accepted the user), and **Roles**, or the reason the
+server refused the sign-in. The password is used for this request only: it is not stored, shown again, or written to
+the audit log. The test is recorded in the audit log (action `test_directory_sign_in`) when your user can write it.
+
+Because of `verification_cooldown`, the server may reuse a successful check for that many seconds, so a change in the
+directory shows only after it.
+
+### Directory users seen since the start {#directory-users-seen-since-the-start}
+
+ClickHouse knows a directory user from their first sign-in after the server started. This box lists those users, with
+their directory, and links to each on the **Users** page. It needs `SELECT` on `system.users`. After a restart, the
+list starts empty again.
+
+### Attributes from the directory {#attributes-from-the-directory}
+
+Data Access Policies can take user attributes, such as the department, from the same directory. Define the attribute
+with the source `ldap` on the **Attributes** tab of Data Access Policies, and run the access policy worker with
+`LDAP_ATTRIBUTES_URL` (LDAPS or StartTLS). The worker reads the values; the console does not connect to the directory.
+See [Attributes](/products/web-console/guides/data-access-policies#attributes) and
+[Import user attributes](/products/web-console/how-to/import-user-attributes).
+
+## SSO (Keycloak) {#sso}
+
+The **SSO (Keycloak)** page (`/console/idp-sso`) keeps the settings of a Keycloak provider, tests the connection to it,
+and tries a sign-in. It also shows how the server accepts these sign-ins, and the users of single sign-on.
+
+The console signs users in with the Authorization Code flow and PKCE, as a public client, so no client secret is kept
+in the browser. The tokens of a test are checked and then dropped, never stored.
+
+### Provider settings {#provider-settings}
+
+The settings are kept in the table `idp_providers` of the console database (`console_admin` by default). Until it
+exists, the page shows **Set up single sign-on**: **Set up** creates the table (it needs `CREATE TABLE` on the console
+database), and does not add a provider. See
+[Identity provider tables](/products/web-console/reference/console-tables#identity-provider-tables).
+
+**Add Keycloak…** (and **Edit…** on a provider) has these fields:
+
+| Field | Default | Meaning |
+|---|---|---|
+| **Name** | `Keycloak` | The name of the provider in the console. |
+| **Client ID** | `clickhouse-console` | The client of the console in the realm. |
+| **Keycloak URL** | — | The address of the Keycloak server, without `/realms`. HTTPS; plain HTTP only on `localhost`. |
+| **Realm** | — | The realm. The issuer is built as `<Keycloak URL>/realms/<realm>` and shown below the field. |
+| **Scopes** | `openid profile email` | Must include `openid`. |
+| **User name claim** | `preferred_username` | The claim that is the ClickHouse user name. |
+| **Group claim** | `groups` | Empty for none. |
+| **Role prefix** | `clickhouse-` | A group `<prefix><role>` gives the role `<role>`; other groups are ignored. |
+| **Default roles** | — | Roles every SSO user gets, comma-separated. |
+| **Enabled** | On | |
+
+Every change is a statement that you review before it runs, and it is recorded in the audit log, like the other
+settings of the console. A changed provider loses its last connection test: the test describes the settings it ran
+with. **Remove…** removes only the settings in the console; the realm and the client in Keycloak are not changed.
+
+Reading the page needs `SELECT` on `idp_providers`; changing the providers and storing connection tests needs `INSERT`
+on it.
+
+The form and the empty page show what the client of the console in Keycloak needs, with the values of this console:
+
+| Setting | Value |
+|---|---|
+| Client authentication | Off (a public client). |
+| Authentication flow | Standard flow only; no implicit flow, no direct access grants. |
+| PKCE method | S256 (**Advanced** → **Proof Key for Code Exchange**). |
+| Valid redirect URI | `<console origin>/console/oidc-callback` |
+| Valid post logout redirect URI | `<console origin>/console/login` |
+| Web origin | `<console origin>` |
+| Group claim | A Group Membership mapper, without the full path, named after the group claim (`groups`). |
+| Audience | An Audience mapper that adds the client to the access token, for the server to check. |
+
+### Test connection {#test-connection}
+
+**Test connection** checks the provider from the browser, as the console will use it:
+
+| Check | Passes when |
+|---|---|
+| **Discovery document** | `<issuer>/.well-known/openid-configuration` answers. A wrong realm is told apart from an unreachable server: if the realm `master` answers, the page says that the realm does not exist (realm names are case-sensitive). |
+| **Issuer** | The issuer of the document is the configured issuer. Otherwise tokens would be refused: check the hostname setting of Keycloak (`KC_HOSTNAME`). |
+| **Authorization Code flow** | The provider offers the response type `code`. |
+| **PKCE** | The provider reports PKCE with S256. |
+| **Endpoints** | The authorization, token, keys, and end-session endpoints use HTTPS (plain HTTP only on `localhost`). |
+| **Signing keys** | The provider has a signing key the console can verify: RS256, ES256, or PS256. |
+| **Default roles** | The default roles exist on the server. |
+| **Roles for groups** | Some role exists for the groups to map to. |
+
+The result is stored with the provider (with `INSERT` on `idp_providers`), shown as **Last connection test** with its
+time, and recorded in the audit log. The client itself (redirect URI, web origin, PKCE) is checked by a test sign-in.
+
+### Test sign-in {#test-sign-in}
+
+**Test sign-in…** opens the Keycloak sign-in page in a separate window, where you sign in as the user to test. The
+sign-in is a real one: Authorization Code with PKCE (S256), `state`, `nonce`, and `prompt=login`, so that Keycloak asks
+for the password every time, even when the browser already has a session with it. The console checks that the answer
+comes from the expected issuer (RFC 9207), exchanges the code for tokens, and verifies:
+
+- the signature of the ID token and of the access token, with the provider's keys (RS256, PS256, ES256 only);
+- the issuer, the audience, the client it was issued to, the expiry, and the nonce of the ID token;
+- that the audience of the access token names the client of the console, so that the server can use it.
+
+It then shows **Signed in as**, **Name and e-mail**, **Groups**, **Roles it would get** (with the roles that do not
+exist marked), **ClickHouse user** (whether a user of that name exists, where, and with which authentication), and
+**Access token** (how long it is valid and its audience, or why the server cannot use it). The tokens are dropped
+afterwards: they are not stored, shown, or recorded. The test is recorded in the audit log.
+
+The browser must allow pop-ups for the console: the window is opened directly in the click.
+
+### Signing in to ClickHouse {#signing-in-to-clickhouse}
+
+The **Signing in to ClickHouse** box explains how the server accepts the sign-ins, and shows:
+
+- **Sign-in page**: whether the sign-in page offers single sign-on, with its issuer and client, from the server
+  configuration (`web_console.sso_*`). The providers of this page are for the tests: the sign-in page reads the server
+  configuration, which it can read before anyone is signed in.
+- **Users of single sign-on**: the users identified with an HTTP authentication server, with their default roles. It
+  needs `SELECT` on `system.users`.
+
+## How single sign-on works {#how-single-sign-on-works}
+
+### Sign in with Keycloak {#sign-in-with-keycloak}
+
+With `web_console.sso_issuer` and `web_console.sso_client_id` set in the server configuration, the sign-in page offers
+**Sign in with Keycloak** (the text follows `web_console.sso_name`). The values are served in `/console/config.json`.
+They are public: the client of the console has no secret. See
+[`web_console`](/products/web-console/reference/configuration#sso-keys).
+
+1. The console opens the provider's sign-in page in a separate window, with Authorization Code and PKCE.
+2. The window returns to `/console/oidc-callback`, which passes the answer to the console page and closes. Without the
+   PKCE verifier, which stays in the console page, the code cannot be exchanged for a token.
+3. The console verifies the ID token, takes the user name from its claim (`sso_username_claim`, default
+   `preferred_username`), and signs in to the server with that user name and the access token as the password.
+
+The access token is the password of the session, kept in memory only, like a password. The console refreshes it at 70%
+of its lifespan, and posts each new token to the native panels (`console-credentials` messages, from the console to its
+own frames). When the provider refuses a refresh, because the session ended there or the user was disabled, the console
+signs out and closes every panel. Signing out also ends the session with the provider (its `end_session_endpoint`), and
+returns to the sign-in page.
+
+If the provider signs the user in but the server refuses the token, the sign-in page says that the user must exist on
+the server, identified with the token authenticator, and that the authenticator must be running.
+
+### The token authenticator {#token-authenticator}
+
+The token authenticator (`sso_authenticator.mjs`, the `sso-authenticator` command of the tools image) is the HTTP
+authentication server `sso` of the server. For the users `IDENTIFIED WITH http SERVER 'sso'`, the server sends it the
+user name and the password (the access token) as HTTP Basic credentials, and accepts the sign-in when the answer is
+`200`. The authenticator checks:
+
+- the signature, with the provider's keys, cached and fetched again for an unknown key ID at most every 30 seconds;
+  only RS256, PS256, and ES256, so a token signed with `none` or a shared secret is refused;
+- the issuer;
+- the type: an access token, not an ID token (`typ` `Bearer`);
+- the client it was issued to (`azp`) and the audience;
+- the expiry and the time it becomes valid, with 30 seconds for clock skew;
+- that the user name claim is the user name of the sign-in.
+
+Whatever it cannot check is refused, including when the provider's keys are unavailable: it fails closed. It logs the
+reason of each refusal, never the token. See [Token authenticator API](/products/web-console/reference/token-authenticator-api#checks)
+and [Helper processes](/products/web-console/reference/helper-processes#sso-authenticator).
+
+The authenticator is on the path of every query of an SSO user: run it next to the server, reachable only from it, with
+short timeouts.
+
+### User sync {#user-sync}
+
+Users must exist in ClickHouse before they sign in. The authenticator can keep them in line with the provider. With a
+confidential client of the provider that can read users and groups, every interval (60 seconds by default) it:
+
+- creates a user `IDENTIFIED WITH http SERVER 'sso'` for each enabled member of the groups `clickhouse-<role>` (the
+  prefix is `SSO_ROLE_PREFIX`);
+- grants the roles of their groups and the default roles, and revokes the roles they no longer get; a role that does
+  not exist is skipped;
+- drops the users who left every such group, or were disabled or deleted.
+
+It changes only the users identified with this authentication server, never a user with a password or another method,
+and skips a name that already exists with another method. When the provider shows no group with the prefix while such
+users exist, it refuses to apply the result, so that a wrong setting or a failure of the provider cannot remove every
+user at once. Each change is recorded in the audit log. See
+[User sync](/products/web-console/reference/token-authenticator-api#user-sync).
+
+Without the sync, an administrator creates the users:
+
+```sql
+CREATE USER alice IDENTIFIED WITH http SERVER 'sso' SCHEME 'BASIC';
+GRANT analysts TO alice;
+```
+
+### Why a token authenticator {#why-a-token-authenticator}
+
+There are several ways to accept OpenID Connect sign-ins with this server:
+
+| Option | Assessment |
+|---|---|
+| A token authenticator, through the HTTP authenticator | Used. No change to the server; works with any OpenID Connect provider; the token is checked on every request. The users must exist in ClickHouse, which the sync takes care of, and the service is on the path of every query. |
+| Keycloak with LDAP federation, and the server on the same directory | One identity, but not single sign-on: the console signs in with directory passwords. |
+| Token validation in the server | The type `jwt` exists, but its validation would have to be written and maintained in the server. |
+| A proxy that signs users in and passes a header | Not suitable: the server has no trusted-header authentication, so the proxy would have to hold a password for every user. |
+
+SAML providers and social sign-in are reached through Keycloak, which brokers them: the console only speaks OpenID
+Connect to Keycloak.
+
+### Limits {#limits}
+
+- **Panels that keep their token.** The SQL Console, the Web Terminal, and ClickStack keep the token they started with,
+  because their embedding cannot receive new credentials. Reload them after the token expires.
+- **Revocation latency.** A token is accepted until it expires, as for any bearer token. A user disabled in Keycloak
+  cannot refresh, so the console signs out at the next refresh, and the sync drops the user within its interval: access
+  ends within the lifespan of an access token, 5 minutes by default in Keycloak.
+- **Users must exist.** The sync creates them, or an administrator does.
+- **Names.** A user created with a password or another method is never changed by the sync: give SSO users their own
+  names.
+- **Transport.** Serve the console and Keycloak over HTTPS: the authenticator and the console accept plain HTTP only for
+  a provider on `localhost`.
+- **Other providers.** The checks and the sign-in are generic OpenID Connect, but the issuer of the SSO page is built
+  from a Keycloak URL and realm, and the sync uses the admin API of Keycloak.
