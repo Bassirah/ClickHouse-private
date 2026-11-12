@@ -98,10 +98,6 @@ A readable feed is applied as it is. An empty array removes every value of the s
 
 ## Import from an LDAP directory or Active Directory {#import-from-ldap}
 
-<Note>
-This requires a console build that includes the LDAP attribute import.
-</Note>
-
 The worker reads the users of the directory and the LDAP attributes you map to console attributes, so that the directory is the trusted source of, for example, the department or branch of each user. It connects over LDAPS, or over `ldap://` with StartTLS, always checks the certificate of the directory, and uses TLS 1.2 or later; plain LDAP is refused, because the bind sends the password of the service account. It uses paged results, so directories that cap a search, such as Active Directory at 1000 entries, return every user.
 
 <Steps>
@@ -142,10 +138,9 @@ LDAP_ATTRIBUTES_BASE_DN=ou=users,dc=example,dc=org
 LDAP_ATTRIBUTES_FILTER=(objectClass=person)
 LDAP_ATTRIBUTES_USER=uid
 LDAP_ATTRIBUTES_MAP=department=departmentNumber,branch=l
-ATTRIBUTE_FEED_SOURCE=ldap
 ```
 
-`.env.example` sets `ATTRIBUTE_FEED_SOURCE=feed` for the feed: set it to `ldap` (the source of your definitions), or the worker imports nothing from the directory.
+`compose.ldap-attributes.yaml` sets the source of the worker, `ATTRIBUTE_FEED_SOURCE`, to `ldap` itself, whatever `.env` says, so define the attributes with the source `ldap`.
 
 For Active Directory, set `LDAP_ATTRIBUTES_USER=sAMAccountName` and map the Active Directory attributes, for example `LDAP_ATTRIBUTES_MAP=department=department`. LDAP attribute names are compared without case.
 
