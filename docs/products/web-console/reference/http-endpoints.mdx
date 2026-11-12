@@ -7,7 +7,7 @@ doc_type: 'reference'
 ---
 
 The console is one HTML page, `programs/server/console.html`, embedded into the `clickhouse` binary and served by
-`ConsoleWebUIRequestHandler`. Everything under `/console` returns that page, except `/console/config.json`; the page
+`ConsoleWebUIRequestHandler`. Everything under `/console` returns that page, except `/console/config.json` and `/console/guide.json`; the page
 reads its route from the address and renders it in the browser. This page lists the paths, the routes, the component
 IDs, and the contract between the console and the pages it embeds. For the response headers and the `console` handler,
 see [Configuration](/products/web-console/reference/configuration#http-handlers).
@@ -18,9 +18,10 @@ see [Configuration](/products/web-console/reference/configuration#http-handlers)
 |---|---|---|
 | `/console`, `/console/...`, `/console?...`, `/console#...` | `GET`, `HEAD` | The console page, `text/html; charset=UTF-8`, `200`. Unknown paths under `/console` also return the page, which shows **Page not found**. |
 | `/console/config.json` | `GET`, `HEAD` | The `web_console` configuration as JSON, `application/json; charset=UTF-8`, `200`. See [`/console/config.json`](#config-json). |
+| `/console/guide.json` | `GET`, `HEAD` | The Console Guide, `application/json; charset=UTF-8`, `200`. See [`/console/guide.json`](#guide-json). |
 | `/console/oidc-callback` | `GET`, `HEAD` | The console page. In the browser it runs only the callback of a sign-in window. See [`/console/oidc-callback`](#oidc-callback). |
 
-No path needs credentials: the page and the configuration are public. Every query the page runs is authorized by the
+No path needs credentials: the page, the configuration, and the guide are public. Every query the page runs is authorized by the
 server with the credentials of the signed-in user.
 
 ## Routes {#routes}
@@ -86,6 +87,7 @@ The `COMPONENTS` registry describes every destination; the home page cards and t
 | `admin-backups` | Administration | Backup & Restore | `admin` | `/console/admin-backups` | — |
 | `idp-ldap` | Identity Providers | LDAP | `admin` | `/console/idp-ldap` | — |
 | `idp-sso` | Identity Providers | SSO (Keycloak) | `admin` | `/console/idp-sso` | — |
+| `guide` | Resources | Console Guide | `guide` | `/console/guide`, `/console/guide/<page>` | — |
 | `source` | Resources | Source code | `link` | `source_code_url` | None: opened in a new tab |
 | `documentation` | Resources | Documentation | `link` | `documentation_url` | None: opened in a new tab |
 | `reference` | Resources | Reference | `panel` | `/docs` | Embedding contract |
@@ -98,6 +100,7 @@ The `COMPONENTS` registry describes every destination; the home page cards and t
 | `panel` | A page of this server embedded in a same-origin frame of the main area. |
 | `link` | An external destination, opened in a new tab with `noopener` and `noreferrer`. |
 | `admin` | A page rendered by the console itself. |
+| `guide` | The Console Guide, rendered by the console from `/console/guide.json`. Like `home`, it is available to every signed-in user and is not governed by the console access policy. |
 
 The panels `sql`, `dashboard`, `clickstack`, `terminal`, and `reference` stay loaded (hidden) when another component is
 selected; the other panels are unloaded and loaded again when they are opened. The Binary visualizer loads Leaflet from
@@ -106,6 +109,20 @@ access.
 
 Which components a user sees, and the queries the console runs to decide it, are in
 [Privileges](/products/web-console/reference/privileges#pages).
+
+## `/console/guide.json` {#guide-json}
+
+The Console Guide is the documentation of the console, the pages under `docs/products/web-console` of the repository,
+shown inside the console. `utils/web-console/build_guide.mjs` converts them to HTML when they change and writes
+`programs/server/console_guide.json`, which is embedded into the `clickhouse` binary next to the page. So the guide
+needs no network access and matches the build of the server.
+
+The page fetches `/console/guide.json` when the guide is first opened. The document has the title of the guide, the
+groups of pages of the navigation (`groups`, each with a `title` and the keys of its `pages`), and the `pages` by key,
+such as `how-to/configure-ldap`: the `title`, `sidebar_title`, and `description` of each page, its `headings` (`id`,
+`level`, `text`), and its content as HTML (`html`). The route of a page is `/console/guide/<key>`, and a heading is
+`/console/guide/<key>#<id>`. Links to other pages of the ClickHouse documentation keep their path in `data-docs`,
+and the page resolves them against `documentation_url`; without it, they are shown as text.
 
 ## `/console/config.json` {#config-json}
 

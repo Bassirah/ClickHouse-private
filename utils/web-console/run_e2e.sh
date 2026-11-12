@@ -5,7 +5,7 @@
 #
 #     --suites <list>       comma-separated, from: console, access, data_access, backup, cluster, ldap, sso (default: all of them)
 #     --binary <path>       clickhouse binary (default: build/programs/clickhouse)
-#     --page-from-source    serve programs/server/console.html as it is in the working tree, instead of the page built
+#     --page-from-source    serve programs/server/console.html (and console_guide.json) as in the working tree, instead of the page built
 #                           into the binary: try a change of the page without rebuilding
 #     --e2e-dir <dir>       Playwright workspace with node_modules/playwright (default: ~/console-e2e)
 #     --keep                leave the server, MinIO, and the agent running at the end, for inspection
@@ -188,6 +188,7 @@ cat > "$SERVER/users.d/e2e.xml" <<EOF
 EOF
 if [ "$PAGE_FROM_SOURCE" = 1 ]; then
     cp "$ROOT/programs/server/console.html" "$SERVER/data/user_files/console.html"
+    cp "$ROOT/programs/server/console_guide.json" "$SERVER/data/user_files/console_guide.json"
     # The same headers as the built-in handler (`ConsoleWebUIRequestHandler`), so the page runs under the same policy.
     cat > "$SERVER/config.d/page-from-source.xml" <<'EOF'
 <clickhouse>
@@ -196,6 +197,20 @@ if [ "$PAGE_FROM_SOURCE" = 1 ]; then
             <url>/console/config.json</url>
             <methods>GET,HEAD</methods>
             <handler><type>console</type></handler>
+        </rule>
+        <rule>
+            <url>/console/guide.json</url>
+            <methods>GET,HEAD</methods>
+            <handler>
+                <type>static</type>
+                <status>200</status>
+                <content_type>application/json; charset=UTF-8</content_type>
+                <response_content>file://console_guide.json</response_content>
+                <http_response_headers>
+                    <Cache-Control>no-store</Cache-Control>
+                    <X-Frame-Options>DENY</X-Frame-Options>
+                </http_response_headers>
+            </handler>
         </rule>
         <rule>
             <url>regex:^/console(/.*)?$</url>

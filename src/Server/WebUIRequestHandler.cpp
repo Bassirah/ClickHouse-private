@@ -85,6 +85,11 @@ constexpr unsigned char resource_console_html[] =
 {
 #embed "../../programs/server/console.html"
 };
+/// The Console Guide: the pages of `docs/products/web-console`, converted by `utils/web-console/build_guide.mjs`.
+constexpr unsigned char resource_console_guide_json[] =
+{
+#embed "../../programs/server/console_guide.json"
+};
 constexpr unsigned char resource_marked_js[] =
 {
 #embed "../../programs/server/js/marked.min.js"
@@ -454,6 +459,14 @@ void ConsoleWebUIRequestHandler::handleRequest(HTTPServerRequest & request, HTTP
     {
         headers["Content-Type"] = "application/json; charset=UTF-8";
         handle(request, response, getConsoleConfigJSON(server.context()->getConfigRef()), headers);
+        return;
+    }
+
+    /// The documentation shown in the console. Public, like the page itself: it is the same for every server.
+    if (path == "/console/guide.json")
+    {
+        headers["Content-Type"] = "application/json; charset=UTF-8";
+        handle(request, response, {reinterpret_cast<const char *>(resource_console_guide_json), std::size(resource_console_guide_json)}, headers);
         return;
     }
 

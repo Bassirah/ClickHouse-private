@@ -22,7 +22,7 @@ public: the page reads them before anyone signs in, so no key may hold a secret.
 | Key | Default | Meaning |
 |---|---|---|
 | `source_code_url` | `https://github.com/ClickHouse/ClickHouse/` | Destination of **Source code** under **Resources**. |
-| `documentation_url` | `https://clickhouse.com/docs/` | Destination of **Documentation** under **Resources**. |
+| `documentation_url` | `https://clickhouse.com/docs/` | Destination of **Documentation** under **Resources**, and the base of the links of the Console Guide to the rest of the ClickHouse documentation. |
 | `website_url` | `https://clickhouse.com/` | Destination of **Website** under **Resources**. |
 | `cloud_url` | `https://clickhouse.cloud/` | Destination of **Cloud** under **Resources**. |
 | `clickstack_url` | `/clickstack/` | Address of ClickStack. A path on this server is embedded as a panel; an absolute URL of another origin is opened in a new tab, as a separate deployment with its own sign-in. |
@@ -128,7 +128,7 @@ The deployment examples set these keys from the environment of the server contai
 
 The server serves the console by default for `GET` and `HEAD` requests to `/console`, and to any URI that starts with
 `/console/`, `/console?`, or `/console#`. To change its response headers, add a rule with the handler type `console` to
-[`http_handlers`](/interfaces/http). The handler answers `/console/config.json` with the JSON document and every other
+[`http_handlers`](/interfaces/http). The handler answers `/console/config.json` and `/console/guide.json` with their JSON documents and every other
 path with the page, so the rule must match every path under `/console`:
 
 ```xml
@@ -155,13 +155,13 @@ Keep `<defaults/>`, so that the other web UIs and the HTTP interface stay availa
 |---|---|
 | `type` | `console`. |
 | `http_response_headers` | Headers to set, one element per header. A header set here replaces the default of the same name below. |
-| `content_type` | `Content-Type` of the page. Default `text/html; charset=UTF-8`. `/console/config.json` is always `application/json; charset=UTF-8`. |
+| `content_type` | `Content-Type` of the page. Default `text/html; charset=UTF-8`. `/console/config.json` and `/console/guide.json` are always `application/json; charset=UTF-8`. |
 
 Headers in `http_handlers.common_http_response_headers` apply to the `console` handler as to the other handlers.
 
 ### Default response headers {#default-response-headers}
 
-Both the page and `/console/config.json` are sent with these headers, unless the handler configuration sets a header
+The page, `/console/config.json`, and `/console/guide.json` are sent with these headers, unless the handler configuration sets a header
 of the same name:
 
 | Header | Value |

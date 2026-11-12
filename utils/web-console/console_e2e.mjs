@@ -197,7 +197,7 @@ await test('Home cards and sidebar list every component and resolve to the same 
         Home: ['Home'],
         Workspace: ['SQL Console', 'Dashboard', 'ClickStack', 'Web Terminal'],
         Diagnostics: ['Binary visualizer', 'Merges visualizer', 'Schema visualizer', 'Jemalloc', 'Processors profile'],
-        Resources: ['Source code', 'Documentation', 'Reference', 'Website', 'Cloud'],
+        Resources: ['Console Guide', 'Source code', 'Documentation', 'Reference', 'Website', 'Cloud'],
     };
     const sidebar = await page.evaluate(() => [...document.querySelectorAll('#sidebar h2')].map(h => ({
         category: h.textContent,
@@ -718,6 +718,73 @@ await test('Web Terminal: signed in with the console credentials', async () => {
         .querySelector('.xterm-rows').textContent.includes(user + ' '), ADMIN_USER, {timeout: 30000});
     check(!terminal().url().includes('user='), `credentials in the terminal URL: ${terminal().url()}`);
     await screenshot(page, '14-terminal');
+    await context.close();
+});
+
+await test('Console Guide: deep links survive the sign-in, search, links between pages, tabs, and the Guide button', async () => {
+    const {context, page} = await newContext();
+    /// A deep link to a page of the guide: after the sign-in, the console opens that page.
+    await page.goto(`${BASE}/console/guide/how-to/configure-ldap`);
+    await page.waitForSelector('#login-view:not([hidden])');
+    check(new URL(page.url()).searchParams.get('next') === 'guide/how-to/configure-ldap', `login next: ${page.url()}`);
+    check((await page.textContent('#login-notice')).includes('Console Guide'), 'no deep link notice');
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await page.waitForSelector('#admin-view .guide-content #active-directory');
+    check(new URL(page.url()).pathname === '/console/guide/how-to/configure-ldap', `after sign-in: ${page.url()}`);
+    check(await page.getAttribute('.guide-nav a[aria-current="page"]', 'href') === '/console/guide/how-to/configure-ldap', 'current page not marked');
+    check((await page.title()).includes('Console Guide'), `title: ${await page.title()}`);
+
+    /// An anchor of the page scrolls to its heading and is kept in the address.
+    await page.evaluate(() => { document.querySelector('details.guide-contents').open = true; });
+    await page.click('details.guide-contents a[href="#active-directory"]');
+    await waitUntil(page, () => location.hash === '#active-directory');
+    const top = await page.evaluate(() => document.querySelector('#active-directory').getBoundingClientRect().top);
+    check(top >= 0 && top < 250, `the heading of the anchor is not at the top: ${top}`);
+
+    /// Search: the results replace the navigation, and the query is kept on the page of a result.
+    await page.fill('.guide-nav input[type="search"]', 'keycloak realm');
+    await page.waitForSelector('.guide-results li a');
+    const results = await page.$$eval('.guide-results li a', links => links.map(a => a.getAttribute('href')));
+    check(results.includes('/console/guide/tutorials/single-sign-on'), `search results: ${results.join(', ')}`);
+    check(await page.isHidden('.guide-groups'), 'the navigation is shown with search results');
+    await page.click('.guide-results li a[href="/console/guide/tutorials/single-sign-on"]');
+    await waitUntil(page, () => location.pathname === '/console/guide/tutorials/single-sign-on' && document.querySelector('#guide-title'));
+    check(await page.inputValue('.guide-nav input[type="search"]') === 'keycloak realm', 'the search is not kept');
+    await page.fill('.guide-nav input[type="search"]', '');
+    check(await page.isVisible('.guide-groups'), 'the navigation does not come back when the search is cleared');
+
+    /// Links between pages, the previous page, and the diagram of the overview.
+    await page.click('.guide-nav a[href="/console/guide/overview"]');
+    await waitUntil(page, () => location.pathname === '/console/guide/overview' && document.querySelector('.guide-diagram'));
+    await page.click('.guide-content a[href="/console/guide/quick-start"]');
+    await waitUntil(page, () => location.pathname === '/console/guide/quick-start' && document.querySelector('#guide-title'));
+    await page.click('.guide-pager a.previous');
+    await waitUntil(page, () => location.pathname === '/console/guide/overview' && document.querySelector('.guide-diagram'));
+
+    /// Tabs, and external links.
+    await page.click('.guide-nav a[href="/console/guide/how-to/create-service-accounts"]');
+    await page.waitForSelector('.guide-tabs [role="tab"]');
+    const tabs = await page.$$('.guide-tabs [role="tab"]');
+    await tabs[1].click();
+    check(await tabs[1].getAttribute('aria-selected') === 'true', 'the second tab is not selected');
+    check(await page.evaluate(() => document.querySelector('.guide-tabs').querySelectorAll('[role="tabpanel"]:not([hidden])').length) === 1,
+        'not exactly one tab panel shown');
+    const external = await page.$$eval('#admin-view a[target="_blank"]', links => links.map(a => a.rel));
+    check(external.every(rel => rel.includes('noopener') && rel.includes('noreferrer')), 'an external link without noopener noreferrer');
+
+    /// The Guide button of an administration page opens its guide.
+    await page.click('#sidebar a[data-component="admin-users"]');
+    await page.waitForSelector('#admin-view .guide-help');
+    await page.click('#admin-view .guide-help');
+    await page.waitForSelector('.guide-content #the-users-page');
+    check(new URL(page.url()).pathname === '/console/guide/guides/users-and-roles', `Guide button: ${page.url()}`);
+
+    /// A missing page.
+    await page.click('.guide-nav a[href="/console/guide/overview"]');
+    await page.evaluate(() => { history.pushState(null, '', '/console/guide/no-such-page'); dispatchEvent(new PopStateEvent('popstate')); });
+    await page.waitForSelector('.guide-article .box h2');
+    check(await page.textContent('.guide-article .box h2') === 'Page not found', 'missing page');
+    await screenshot(page, '15-guide');
     await context.close();
 });
 

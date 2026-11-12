@@ -70,11 +70,16 @@ The sidebar and the home page list the same destinations, in these categories:
 | **Diagnostics** | Binary visualizer, Merges visualizer, Schema visualizer, Jemalloc, Processors profile. |
 | **Administration** | Users, Roles & Permissions, Data Access Policies, Component Access, Profiles & Quotas, Audit Activity, Clusters, Backup & Restore. |
 | **Identity Providers** | LDAP, SSO (Keycloak). |
-| **Resources** | Source code, Documentation, Reference, Website, Cloud. |
+| **Resources** | Console Guide, Source code, Documentation, Reference, Website, Cloud. |
 
 A category without any destination for the user is not shown. The button at the bottom of the sidebar collapses it to icons (**Collapse sidebar**, **Expand sidebar**); the browser remembers the choice. On a narrow screen, the menu button in the header shows and hides the sidebar.
 
 The administration and identity provider pages are listed only for users who can read what they show, and when the console access policy allows them. Their own guides describe them: [Users and roles](/products/web-console/guides/users-and-roles), [Component Access](/products/web-console/guides/component-access), [Profiles and quotas](/products/web-console/guides/profiles-and-quotas), [Audit activity](/products/web-console/guides/audit-activity), [Data Access Policies](/products/web-console/guides/data-access-policies), [Backup & Restore](/products/web-console/guides/backup-and-restore), [Clusters](/products/web-console/guides/clusters), and [Identity Providers](/products/web-console/guides/identity-providers).
+
+**Console Guide** shows this documentation inside the console, for every signed-in user: the tutorials, user guides,
+how-to guides, and reference, with a search box and the pages in the same order as on the documentation site. It is
+embedded in the server, so it works without Internet access and describes the console of this build. The header of
+each administration and identity provider page has a **Guide** button that opens the guide of that page.
 
 The links of **Resources** come from the `web_console` section of the server configuration. A path on the server opens inside the console; an absolute HTTP or HTTPS URL opens in a new tab and is marked **External**. External links open with `noopener` and `noreferrer` and carry no credentials, queries, or database names. See the [configuration reference](/products/web-console/reference/configuration#web-console).
 
