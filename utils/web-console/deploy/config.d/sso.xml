@@ -1,0 +1,24 @@
+<!--
+    Single sign-on with an OpenID Connect provider (Keycloak), for compose.sso.yaml (README.md, "Single sign-on").
+    The values come from the environment of the server container, so that this file stays the same everywhere.
+    - http_authentication_servers.sso: the token authenticator, which checks the access tokens of the users
+      IDENTIFIED WITH http SERVER 'sso'.
+    - web_console.sso_*: what the sign-in page of the console offers. Public values: the client of the console has no secret.
+-->
+<clickhouse>
+    <http_authentication_servers>
+        <sso>
+            <uri>http://sso-authenticator:29700/</uri>
+            <connection_timeout_ms>1000</connection_timeout_ms>
+            <receive_timeout_ms>2000</receive_timeout_ms>
+            <send_timeout_ms>1000</send_timeout_ms>
+            <!-- A refused token is an answer, not a failure: retry only connection errors, briefly. -->
+            <max_tries>2</max_tries>
+        </sso>
+    </http_authentication_servers>
+    <web_console>
+        <sso_name from_env="SSO_NAME"/>
+        <sso_issuer from_env="SSO_ISSUER"/>
+        <sso_client_id from_env="SSO_CLIENT_ID"/>
+    </web_console>
+</clickhouse>

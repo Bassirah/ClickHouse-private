@@ -8,7 +8,13 @@
 ///
 /// Usage:
 ///   node sso_e2e.mjs --url http://localhost:38123 --admin default:<password> --keycloak-url http://localhost:39080 \
-///       --realm clickhouse --client clickhouse-console --keycloak-user kara:<password> --role-group clickhouse-developer
+///       --realm clickhouse --client clickhouse-console --keycloak-user kara:<password> --role-group clickhouse-developer \
+///       [--sign-in --keycloak-admin admin:<password> --outsider pia:<password> --token-lifespan 60]
+///
+/// With --sign-in, also the sign-in with Keycloak: the server must have web_console.sso_* set, the HTTP authentication
+/// server `sso`, and the token authenticator running with its user sync (which creates the Keycloak user in ClickHouse).
+/// The outsider is a Keycloak user in no `clickhouse-*` group, so without a ClickHouse user. The checks of the token
+/// refresh wait for more than the lifespan of the access tokens of the realm (--token-lifespan, in seconds).
 ///
 /// The console must be opened on the origin registered in the client (`--url`), and the Keycloak user must be in the
 /// group `--role-group`, whose name is `clickhouse-<role>`.
@@ -29,6 +35,10 @@ const REALM = arg('realm', 'clickhouse');
 const CLIENT = arg('client', 'clickhouse-console');
 const [KC_USER, KC_PASSWORD] = arg('keycloak-user', 'kara:karapass').split(':');
 const ROLE_GROUP = arg('role-group', 'clickhouse-developer');
+const SIGN_IN = process.argv.includes('--sign-in');
+const [KC_ADMIN, KC_ADMIN_PASSWORD] = arg('keycloak-admin', 'admin:admin').split(':');
+const [OUTSIDER, OUTSIDER_PASSWORD] = arg('outsider', 'pia:piapass').split(':');
+const TOKEN_LIFESPAN = Number(arg('token-lifespan', '300'));
 const DB = arg('admin-db', 'console_admin');
 const SCREENSHOTS = arg('screenshots', null);
 if (SCREENSHOTS) mkdirSync(SCREENSHOTS, {recursive: true});
@@ -141,6 +151,20 @@ async function keycloakSignIn(popup, user, password) {
 check((await sql('SELECT 1')) === '1', `cannot query ${BASE} as ${ADMIN_USER}`);
 check((await fetch(`${KEYCLOAK}/realms/${REALM}/.well-known/openid-configuration`)).ok, `no realm ${REALM} at ${KEYCLOAK}`);
 check(!(await sql(`CREATE ROLE IF NOT EXISTS ${ROLE}`)), `role ${ROLE} not created`);
+/// The Dashboard panel, which the refresh checks open as the Keycloak user, needs only this.
+check(!(await sql(`GRANT SELECT ON system.dashboards TO ${ROLE}`)), `grant to ${ROLE} failed`);
+
+/// On a server without the console tables, such as a new one, the tables of the administration pages (the audit log, which
+/// the checks read) are created first, through the console's own setup.
+if (await sql(`SELECT count() FROM system.tables WHERE database = '${DB}' AND name IN ('audit_log', 'component_policy', 'protected_accounts')`) !== '3') {
+    await signIn(ADMIN_USER, ADMIN_PASSWORD);
+    await go('/console/admin-access');
+    await view().locator('button', {hasText: 'Set up'}).first().click();
+    await dialog().locator('.dialog-actions button', {hasText: 'Review'}).click();
+    await sleep(400);
+    const outcome = await applyPlan();
+    check(outcome.includes('Applied'), `the setup of the administration pages failed: ${outcome}`);
+}
 
 await test('The sidebar has Identity Providers with LDAP and SSO, and the Users page points there', async () => {
     await signIn(ADMIN_USER, ADMIN_PASSWORD);
@@ -292,6 +316,121 @@ await test('The callback page without an answer explains itself and does not sta
     check(text.includes('receives the answer of an identity provider') && !(await other.locator('#login-user').isVisible()), `callback: ${text}`);
     await other.close();
 });
+
+/// --- Sign-in with Keycloak ---
+
+/// A call of Keycloak's admin API, as the administrator of the master realm.
+async function keycloakAdmin(method, path, body) {
+    const token = await (await fetch(`${KEYCLOAK}/realms/master/protocol/openid-connect/token`, {method: 'POST',
+        body: new URLSearchParams({grant_type: 'password', client_id: 'admin-cli', username: KC_ADMIN, password: KC_ADMIN_PASSWORD})})).json();
+    const response = await fetch(`${KEYCLOAK}/admin/realms/${REALM}${path}`, {method, headers: {Authorization: `Bearer ${token.access_token}`, 'Content-Type': 'application/json'},
+        body: body ? JSON.stringify(body) : undefined});
+    if (!response.ok) throw new Error(`${method} ${path}: HTTP ${response.status}`);
+    return response.status === 204 ? null : response.json();
+}
+
+async function setKeycloakUserEnabled(user, enabled) {
+    const [found] = await keycloakAdmin('GET', `/users?username=${encodeURIComponent(user)}&exact=true`);
+    await keycloakAdmin('PUT', `/users/${found.id}`, {enabled});
+}
+
+/// On the sign-in page: Sign in with Keycloak, as `user` in the window that opens. Returns the window.
+async function ssoSignIn(user, password) {
+    if (page) await page.context().close();
+    page = await (await browser.newContext({viewport: {width: 1400, height: 1000}})).newPage();
+    page.on('pageerror', e => page_errors.push(`sso ${user}: ${e.message}`));
+    await page.goto(`${BASE}/console/login`);
+    await page.locator('#login-sso-button').waitFor({timeout: 15000});
+    const [popup] = await Promise.all([page.waitForEvent('popup'), page.click('#login-sso-button')]);
+    await keycloakSignIn(popup, user, password);
+    return popup;
+}
+
+const consoleState = () => page.evaluate(() => session ? {user: session.user, password: session.password, sso: !!session.sso} : null);
+
+if (SIGN_IN) {
+    await test('The sync of the authenticator has created the Keycloak user, identified with the authentication server', async () => {
+        const row = await until(async () => {
+            /// SET DEFAULT ROLE ALL leaves default_roles_list empty: the grants are in system.role_grants.
+            const text = await sql(`SELECT name, has(auth_type, 'http'), (SELECT count() FROM system.role_grants WHERE user_name = '${KC_USER}' AND granted_role_name = '${ROLE}')
+                FROM system.users WHERE name = '${KC_USER}' FORMAT TSV`);
+            return text === `${KC_USER}\t1\t1` ? text : null;
+        }, 60000, `the user ${KC_USER} with the role ${ROLE}`);
+        check(row, 'no user');
+        check((await sql(`SELECT count() FROM system.users WHERE name = '${OUTSIDER}'`)) === '0', `${OUTSIDER}, in no group, was created`);
+    });
+
+    await test('The sign-in page offers Keycloak, and a user signs in with it and gets the role of the group', async () => {
+        const popup = await ssoSignIn(KC_USER, KC_PASSWORD);
+        await page.waitForSelector('#shell:not([hidden])', {timeout: 60000});
+        await until(async () => popup.isClosed(), 10000, 'the sign-in window to close');
+        await sleep(2000);
+        const state = await consoleState();
+        check(state && state.user === KC_USER && state.sso && state.password.startsWith('eyJ'), `session: ${JSON.stringify(state && {...state, password: state.password.slice(0, 3)})}`);
+        const pill = await page.locator('#connection-pill').innerText();
+        check(pill.includes(KC_USER), `connection: ${pill}`);
+        const roles = await sql('SELECT arraySort(currentRoles()) FORMAT TSV', KC_USER, state.password);
+        check(roles.includes(ROLE), `roles with the token: ${roles}`);
+        await screenshot('s05-signed-in');
+    });
+
+    await test('The access token is refreshed before it expires, and the console and a native panel keep working with the new one', async () => {
+        await go('/console/dashboard');
+        /// The panel's frame, not the console itself, whose address is /console/dashboard.
+        const frame = () => page.frames().find(f => f !== page.mainFrame() && new URL(f.url()).pathname === '/dashboard');
+        await until(async () => frame() && await frame().evaluate(() => typeof password === 'string' && password.length > 0).catch(() => false), 30000, 'the dashboard');
+        const before = (await consoleState()).password;
+        check(await frame().evaluate(() => password) === before, 'the dashboard did not get the token');
+        /// After the first token has expired (with the authenticator's 30 seconds of skew).
+        await sleep((TOKEN_LIFESPAN + 35) * 1000);
+        const after = await consoleState();
+        check(after && after.password !== before, 'the token was not refreshed');
+        check(await frame().evaluate(() => password) === after.password, 'the dashboard did not get the new token');
+        check((await sql('SELECT 1', KC_USER, before)).startsWith('Code: 516'), 'the expired token is still accepted');
+        check((await sql('SELECT 1', KC_USER, after.password)) === '1', 'the new token is refused');
+        await go('/console/admin-users');
+        check(!(await view().innerText()).includes('AUTHENTICATION_FAILED'), 'a page of the console fails after the refresh');
+    });
+
+    await test('A user without a ClickHouse user is told why the sign-in did not succeed', async () => {
+        await ssoSignIn(OUTSIDER, OUTSIDER_PASSWORD);
+        await until(async () => !(await page.locator('#login-error').isHidden()), 60000, 'the error');
+        const text = await page.locator('#login-error').innerText();
+        check(text.includes(`signed you in as ${OUTSIDER}`) && text.includes('must exist on the server'), `error: ${text}`);
+        check(await page.locator('#shell').isHidden(), 'the console opened');
+    });
+
+    await test('Signing out ends the Keycloak session: the next sign-in asks for the password again', async () => {
+        await ssoSignIn(KC_USER, KC_PASSWORD);
+        await page.waitForSelector('#shell:not([hidden])', {timeout: 60000});
+        await sleep(1500);
+        await page.click('#logout-button');
+        await page.waitForURL(url => url.pathname === '/console/login', {timeout: 30000});
+        await page.locator('#login-sso-button').waitFor();
+        check(!(await consoleState()), 'still signed in');
+        const [popup] = await Promise.all([page.waitForEvent('popup'), page.click('#login-sso-button')]);
+        await popup.waitForSelector('#username', {timeout: 30000});
+        await popup.close();
+    });
+
+    await test('A user disabled in Keycloak loses access: the sync drops the user, and the console signs out at the next refresh', async () => {
+        await ssoSignIn(KC_USER, KC_PASSWORD);
+        await page.waitForSelector('#shell:not([hidden])', {timeout: 60000});
+        await sleep(1500);
+        await setKeycloakUserEnabled(KC_USER, false);
+        try {
+            await until(async () => (await sql(`SELECT count() FROM system.users WHERE name = '${KC_USER}'`)) === '0', 60000, `the sync to drop ${KC_USER}`);
+            await until(async () => !(await page.locator('#login-view').isHidden()), (TOKEN_LIFESPAN + 30) * 1000, 'the console to sign out');
+            const notice = await page.locator('#login-notice').innerText();
+            check(notice.includes('session has ended'), `notice: ${notice}`);
+            const audited = await sql(`SELECT count() FROM ${DB}.audit_log WHERE action = 'sso_drop_user' AND target_name = '${KC_USER}' AND result = 'success'`);
+            check(Number(audited) >= 1, 'the drop is not in the audit log');
+        } finally {
+            await setKeycloakUserEnabled(KC_USER, true);
+        }
+        await until(async () => (await sql(`SELECT count() FROM system.users WHERE name = '${KC_USER}'`)) === '1', 60000, `the sync to create ${KC_USER} again`);
+    });
+}
 
 await test('No script errors in the pages', async () => {
     check(!page_errors.length, page_errors.join('\n'));

@@ -14,6 +14,11 @@ DEFAULTS = {
     "clickstack_url": "/clickstack/",
     "admin_database": "console_admin",
     "backup_s3_endpoints": "",
+    "sso_name": "Keycloak",
+    "sso_issuer": "",
+    "sso_client_id": "",
+    "sso_scopes": "openid profile email",
+    "sso_username_claim": "preferred_username",
 }
 
 

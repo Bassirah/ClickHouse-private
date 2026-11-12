@@ -64,6 +64,8 @@ LDAP_ADMIN_PASSWORD=e2e-ldap-admin
 KEYCLOAK_CONTAINER=console-e2e-keycloak
 KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7
 KEYCLOAK_PORT=39080
+SSO_AUTHENTICATOR_PORT=39700
+KEYCLOAK_ADMIN_PASSWORD="e2e-kc-admin-$$"
 MINIO_USER=e2eminio
 MINIO_SECRET=e2eminio-secret-1
 BUCKET=ch-backups
@@ -89,7 +91,7 @@ fi
 if has_suite backup; then
     docker image inspect "$MINIO_IMAGE" > /dev/null 2>&1 || die "the image $MINIO_IMAGE is not on this host"
 fi
-for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT $LDAP_PORT $KEYCLOAK_PORT; do
+for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT $LDAP_PORT $KEYCLOAK_PORT $SSO_AUTHENTICATOR_PORT; do
     ! ss -ltn | grep -q ":$port " || die "port $port is in use: is another run still going? (stop it, or remove what --keep left)"
 done
 
@@ -215,6 +217,26 @@ if [ "$PAGE_FROM_SOURCE" = 1 ]; then
 EOF
 fi
 
+if has_suite sso; then
+    # Single sign-on: the token authenticator as the HTTP authentication server sso, and the sign-in page with Keycloak.
+    cat > "$SERVER/config.d/e2e-sso.xml" <<EOF
+<clickhouse>
+    <http_authentication_servers>
+        <sso>
+            <uri>http://127.0.0.1:$SSO_AUTHENTICATOR_PORT/</uri>
+            <receive_timeout_ms>2000</receive_timeout_ms>
+            <max_tries>2</max_tries>
+        </sso>
+    </http_authentication_servers>
+    <web_console>
+        <sso_name>Keycloak</sso_name>
+        <sso_issuer>http://localhost:$KEYCLOAK_PORT/realms/clickhouse</sso_issuer>
+        <sso_client_id>clickhouse-console</sso_client_id>
+    </web_console>
+</clickhouse>
+EOF
+fi
+
 start_server() {
     (cd "$SERVER" && "$BINARY" server --config-file="$SERVER/config.xml" --daemon --pid-file="$SERVER/server.pid")
     for _ in $(seq 120); do
@@ -238,9 +260,11 @@ EOF
 chmod +x "$RUN/restart-server.sh"
 
 AGENT_PID=""
+SSO_PID=""
 cleanup() {
     [ "$KEEP" = 1 ] && return
     [ -n "$AGENT_PID" ] && kill "$AGENT_PID" 2> /dev/null || true
+    [ -n "$SSO_PID" ] && kill "$SSO_PID" 2> /dev/null || true
     docker rm -f "$MINIO_CONTAINER" "$VAULT_CONTAINER" "$LDAP_CONTAINER" "$KEYCLOAK_CONTAINER" > /dev/null 2>&1 || true
     if [ -f "$SERVER/server.pid" ]; then
         pid=$(cat "$SERVER/server.pid")
@@ -337,26 +361,35 @@ if has_suite sso; then
     cat > "$RUN/keycloak/realm.json" <<EOF
 {
   "realm": "clickhouse", "enabled": true, "sslRequired": "external", "registrationAllowed": false, "bruteForceProtected": true,
+  "accessTokenLifespan": 60,
   "groups": [{"name": "clickhouse-developer"}],
   "users": [{"username": "kara", "enabled": true, "emailVerified": true, "firstName": "Kara", "lastName": "Developer", "email": "kara@example.org",
-             "credentials": [{"type": "password", "value": "Kara-Kc-Pw-1", "temporary": false}], "groups": ["/clickhouse-developer"]}],
+             "credentials": [{"type": "password", "value": "Kara-Kc-Pw-1", "temporary": false}], "groups": ["/clickhouse-developer"]},
+            {"username": "pia", "enabled": true, "emailVerified": true, "firstName": "Pia", "lastName": "Outsider", "email": "pia@example.org",
+             "credentials": [{"type": "password", "value": "Pia-Kc-Pw-1", "temporary": false}]},
+            {"username": "service-account-clickhouse-sso-sync", "enabled": true, "serviceAccountClientId": "clickhouse-sso-sync",
+             "clientRoles": {"realm-management": ["view-users", "query-groups"]}}],
   "clients": [{
     "clientId": "clickhouse-console", "enabled": true, "publicClient": true, "protocol": "openid-connect",
     "standardFlowEnabled": true, "implicitFlowEnabled": false, "directAccessGrantsEnabled": false, "serviceAccountsEnabled": false,
     "redirectUris": ["http://127.0.0.1:$HTTP_PORT/console/oidc-callback", "http://localhost:$HTTP_PORT/console/oidc-callback"],
-    "webOrigins": ["+"], "attributes": {"pkce.code.challenge.method": "S256"},
+    "webOrigins": ["+"], "attributes": {"pkce.code.challenge.method": "S256",
+      "post.logout.redirect.uris": "http://127.0.0.1:$HTTP_PORT/console/login##http://localhost:$HTTP_PORT/console/login"},
     "protocolMappers": [
       {"name": "groups", "protocol": "openid-connect", "protocolMapper": "oidc-group-membership-mapper",
        "config": {"claim.name": "groups", "full.path": "false", "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true"}},
       {"name": "audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
        "config": {"included.client.audience": "clickhouse-console", "id.token.claim": "false", "access.token.claim": "true"}}]
+  }, {
+    "clientId": "clickhouse-sso-sync", "enabled": true, "publicClient": false, "secret": "e2e-sso-sync-secret-$$", "serviceAccountsEnabled": true,
+    "standardFlowEnabled": false, "implicitFlowEnabled": false, "directAccessGrantsEnabled": false, "protocol": "openid-connect"
   }]
 }
 EOF
     chmod -R a+rX "$RUN/keycloak"
     docker rm -f "$KEYCLOAK_CONTAINER" > /dev/null 2>&1 || true
     docker run -d --name "$KEYCLOAK_CONTAINER" -p "127.0.0.1:$KEYCLOAK_PORT:8080" -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
-        -e KC_BOOTSTRAP_ADMIN_PASSWORD="e2e-kc-admin-$$" -e KC_HOSTNAME="http://localhost:$KEYCLOAK_PORT" \
+        -e KC_BOOTSTRAP_ADMIN_PASSWORD="$KEYCLOAK_ADMIN_PASSWORD" -e KC_HOSTNAME="http://localhost:$KEYCLOAK_PORT" \
         -v "$RUN/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro" "$KEYCLOAK_IMAGE" start-dev --import-realm > /dev/null
 fi
 
@@ -432,8 +465,18 @@ if has_suite sso; then
         sleep 1
     done
 fi
+if has_suite sso; then
+    printf '%s' "e2e-sso-sync-secret-$$" > "$RUN/keycloak/sync-secret"
+    chmod 600 "$RUN/keycloak/sync-secret"
+    (cd "$ROOT" && SSO_ISSUER="http://localhost:$KEYCLOAK_PORT/realms/clickhouse" SSO_CLIENT_ID=clickhouse-console SSO_LISTEN="127.0.0.1:$SSO_AUTHENTICATOR_PORT" \
+        SSO_SYNC_CLIENT_ID=clickhouse-sso-sync SSO_SYNC_SECRET_FILE="$RUN/keycloak/sync-secret" SSO_SYNC_INTERVAL_SECONDS=5 \
+        CLICKHOUSE_URL="$BASE" CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD="$ADMIN_PASSWORD" \
+        exec node "$HERE/sso_authenticator.mjs" > "$LOGS/sso-authenticator.log" 2>&1) &
+    SSO_PID=$!
+fi
 run_suite sso sso_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --keycloak-url "http://localhost:$KEYCLOAK_PORT" --realm clickhouse \
-    --client clickhouse-console --keycloak-user kara:Kara-Kc-Pw-1 --role-group clickhouse-developer
+    --client clickhouse-console --keycloak-user kara:Kara-Kc-Pw-1 --role-group clickhouse-developer \
+    --sign-in --keycloak-admin "admin:$KEYCLOAK_ADMIN_PASSWORD" --outsider pia:Pia-Kc-Pw-1 --token-lifespan 60
 # Last: it installs an LDAP directory and restarts the server, and removes the directory again at the end.
 run_suite ldap ldap_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --config-dir "$SERVER/config.d" --server-restart "$RUN/restart-server.sh" \
     --ldap-port "$LDAP_PORT" --ldap-ca "$RUN/ldap/tls/ca.crt" --ldap-container "$LDAP_CONTAINER" --ldap-admin-password "$LDAP_ADMIN_PASSWORD"

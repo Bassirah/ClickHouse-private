@@ -69,22 +69,41 @@ The client in Keycloak is public (no secret in the browser), with the standard f
 `<console origin>/console/oidc-callback`, the console's origin as a web origin, a Group Membership mapper without the
 full path, and an Audience mapper that adds the client to the access token.
 
-Checks: `sso_e2e.mjs`, run by `run_e2e.sh` with a Keycloak of its own.
+Checks: `sso_e2e.mjs`, run by `run_e2e.sh` with a Keycloak and a token authenticator of its own.
+
+## Signing in with Keycloak
+
+Option 1 is in place:
+
+- **Token authenticator** (`sso_authenticator.mjs`, the `sso-authenticator` command of the tools image): the HTTP
+  authentication server `sso`. It checks the signature of the access token with the provider's keys (cached, fetched
+  again for an unknown key ID at most every 30 seconds; RS256, PS256, ES256 only), the issuer, the type (an access
+  token, not an ID token), the client it was issued to (`azp`), the audience, the expiry with 30 seconds of skew, and
+  that the user name claim is the user name. Whatever it cannot check is refused.
+- **User sync** (optional, in the same process): with a confidential client of the provider that can read users and
+  groups, it creates `IDENTIFIED WITH http SERVER 'sso'` users for the members of the groups `clickhouse-<role>`, grants
+  and revokes their roles, and drops the users who left or were disabled. It changes only the users identified with
+  this server, refuses an empty result while such users exist, and records each change in the audit log.
+- **Sign in with Keycloak** on the console's sign-in page, from `web_console.sso_*` in the server configuration (served
+  in `/console/config.json`, which the page reads before anyone is signed in). The access token is the password of the
+  session, kept in memory only and refreshed at 70% of its lifespan; the native panels receive each new token
+  (`console-credentials` messages, from the console to its own frames). A refused refresh signs the console out.
+  Signing out also ends the session with the provider (`end_session_endpoint`).
+
+Remaining limits:
+
+- The SQL Console (`/ui`), the Web Terminal, and ClickStack keep the token they started with: reload them after it
+  expires. Their embedding has no way to receive new credentials.
+- Revocation takes up to the lifespan of an access token (5 minutes by default), as for any bearer token.
+- Users must exist in ClickHouse before they sign in: the sync creates them, or an administrator does.
 
 ## Next steps
 
-1. **Token authenticator** (`sso_authenticator.mjs`): the HTTP service of option 1, with the provider's keys cached
-   and refreshed on an unknown key ID, a clock skew of 60 seconds, the audience of the console's client, and the user
-   name claim equal to the user name. Packaged in the tools image, configured in `http_authentication_servers`.
-2. **Sign in with Keycloak** on the console's sign-in page: the provider settings that the page needs before anyone is
-   signed in come from `/console/config.json` (`web_console.sso_*` in the server configuration), not from the table,
-   which needs a signed-in user. The access token is kept in memory only, refreshed before it expires, and the sign-out
-   ends the Keycloak session (`end_session_endpoint`).
-3. **User and role sync** for SSO users: create `IDENTIFIED WITH http SERVER 'sso'` users and grant the roles of their
-   groups, from the Keycloak admin API with a read-only service account, removing users who left (fail closed, as the
-   attribute import of Data Access Policies does).
-4. **Other OpenID Connect providers**: the checks and the sign-in are generic OpenID Connect; only the issuer is built
-   from a Keycloak URL and realm. A provider kind `oidc` with an issuer URL covers Entra ID, Okta, and Auth0.
+1. **Other OpenID Connect providers**: the checks and the sign-in are generic OpenID Connect; only the issuer of the
+   SSO page is built from a Keycloak URL and realm, and the sync uses Keycloak's admin API. A provider kind `oidc` with
+   an issuer URL covers Entra ID, Okta, and Auth0 for sign-in; their user sync would read Microsoft Graph or SCIM.
+2. **The SQL Console and the Web Terminal**: a way to pass refreshed credentials into them.
+3. **Token validation in the server** (option 3), if the authenticator on the path of every query becomes a concern.
 
 ## Development lab
 

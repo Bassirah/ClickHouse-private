@@ -1,0 +1,38 @@
+# Single sign-on with an OpenID Connect provider (Keycloak), added to compose.yaml (README.md, "Single sign-on"):
+#
+#   docker compose -f compose.yaml -f compose.sso.yaml up -d
+#
+# The token authenticator checks the access tokens for the server; it is reached only from the Compose network. Its user
+# sync (optional) needs a confidential client of the provider: put its secret in sso/sync-secret (mode 600, readable by
+# the user 1000 of the container), and leave SSO_SYNC_CLIENT_ID empty to turn the sync off.
+services:
+  clickhouse:
+    environment:
+      SSO_NAME: ${SSO_NAME:-Keycloak}
+      SSO_ISSUER: ${SSO_ISSUER:?set SSO_ISSUER in .env, for example https://keycloak.example.com/realms/clickhouse}
+      SSO_CLIENT_ID: ${SSO_CLIENT_ID:-clickhouse-console}
+    volumes:
+      - ./config.d/sso.xml:/etc/clickhouse-server/config.d/sso.xml:ro
+    depends_on:
+      sso-authenticator:
+        condition: service_started
+
+  sso-authenticator:
+    image: clickhouse-console-tools:${CONSOLE_VERSION:?set CONSOLE_VERSION in .env}
+    restart: unless-stopped
+    command: ["sso-authenticator"]
+    environment:
+      SSO_ISSUER: ${SSO_ISSUER}
+      SSO_CLIENT_ID: ${SSO_CLIENT_ID:-clickhouse-console}
+      SSO_USERNAME_CLAIM: ${SSO_USERNAME_CLAIM:-preferred_username}
+      SSO_LISTEN: 0.0.0.0:29700
+      SSO_SYNC_CLIENT_ID: ${SSO_SYNC_CLIENT_ID:-}
+      SSO_SYNC_SECRET_FILE: ${SSO_SYNC_CLIENT_ID:+/etc/clickhouse-console/sso/sync-secret}
+      SSO_ROLE_PREFIX: ${SSO_ROLE_PREFIX:-clickhouse-}
+      SSO_DEFAULT_ROLES: ${SSO_DEFAULT_ROLES:-console_admin_reader}
+      SSO_SYNC_INTERVAL_SECONDS: ${SSO_SYNC_INTERVAL_SECONDS:-60}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: sso_sync
+      CLICKHOUSE_PASSWORD: ${SSO_SYNC_PASSWORD:-}
+    volumes:
+      - ./sso:/etc/clickhouse-console/sso:ro

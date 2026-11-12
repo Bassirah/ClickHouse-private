@@ -9,10 +9,11 @@ case "${1:-help}" in
     backup-worker) shift; exec node "$DIR/backup_worker.mjs" "$@" ;;
     cluster-agent) shift; exec node "$DIR/cluster_agent.mjs" "$@" ;;
     access-policy-worker) shift; exec node "$DIR/access_policy_worker.mjs" "$@" ;;
+    sso-authenticator) shift; exec node "$DIR/sso_authenticator.mjs" "$@" ;;
     version) cat "$DIR/VERSION" ;;
     help)
-        echo "Usage: <image> backup-worker | cluster-agent | access-policy-worker [--once]"
+        echo "Usage: <image> backup-worker | cluster-agent | access-policy-worker [--once] | sso-authenticator [--sync-once | --check-config]"
         echo "Configuration is in environment variables: CLICKHOUSE_URL, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, and those of each process."
         ;;
-    *) echo "Unknown process '$1'. Choose backup-worker, cluster-agent, or access-policy-worker." >&2; exit 2 ;;
+    *) echo "Unknown process '$1'. Choose backup-worker, cluster-agent, access-policy-worker, or sso-authenticator." >&2; exit 2 ;;
 esac

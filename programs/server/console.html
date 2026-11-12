@@ -364,6 +364,10 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.35rem 1.25rem; margin: 0; }
 .kv dt { color: var(--muted); }
+.login-divider { display: flex; align-items: center; gap: 0.75rem; color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0; }
+.login-divider::before, .login-divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+#login-sso { display: grid; gap: 0.5rem; }
+#login-sso[hidden] { display: none; }
 .idp-directory + .idp-directory { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: 0.5rem; }
 .idp-directory h3 { margin: 0; }
 .oidc-callback { max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: var(--text); }
@@ -561,6 +565,10 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
         <div id="login-warning" class="message warning" hidden></div>
         <div id="login-error" class="message error" role="alert" hidden></div>
         <button id="login-submit" class="button primary" type="submit">Connect</button>
+        <div id="login-sso" hidden>
+            <div class="login-divider"><span>or</span></div>
+            <button id="login-sso-button" class="button" type="button"></button>
+        </div>
         <p class="login-footer">Credentials are kept in this tab's memory only and are sent only to this server.</p>
     </form>
 </div>
@@ -1097,6 +1105,7 @@ function showLogin() {
         showLoginNotice(`Sign in to open ${COMPONENTS_BY_ID.get(next).title}.`);
     }
     updateLoginWarning();
+    updateLoginSSO();
     ($('login-user').value ? $('login-password') : $('login-user')).focus();
 }
 
@@ -1199,6 +1208,7 @@ function startSession(connection, info) {
 /// requests, timers, and WebSocket sessions), and forgets the credentials.
 function endSession() {
     if (!session) return;
+    if (session.sso) clearTimeout(session.sso.timer);
     session.controller.abort();
     clearInterval(session.status_timer);
     for (const id of [...frames.keys()]) destroyFrame(id);
@@ -1220,12 +1230,22 @@ function endSession() {
 }
 
 function signOut() {
+    const logout = session ? ssoLogoutUrl(session) : null;
     endSession();
     showLoginNotice('');
+    if (logout) {
+        location.assign(logout);
+        return;
+    }
     navigate(loginPath(null), true);
 }
 
 function switchConnection() {
+    /// Another user of single sign-on needs a new session with the provider, or the provider signs the same user in again.
+    if (session && session.sso) {
+        signOut();
+        return;
+    }
     const previous = session ? `${session.user} at ${session.url}` : '';
     endSession();
     showLoginNotice(`Signed out of ${previous}. Sign in as another user. All panels were closed.`, true);
@@ -4080,7 +4100,7 @@ ADMIN_PAGES.sso = (root, route, page) => {
             paragraph('Add Keycloak with the URL of the server, the realm, and the client of the console. The client must be public, with the standard flow, '
                 + 'PKCE (S256), the redirect URI below, and the origin of the console as a web origin.'),
             idpClientChecklist()),
-        idpServerSideBox(),
+        idpServerSideBox(page),
     ]);
 };
 
@@ -4092,6 +4112,7 @@ function idpClientChecklist() {
         ['Authentication flow', 'Standard flow only; no implicit flow, no direct access grants'],
         ['PKCE method', 'S256 (Advanced → Proof Key for Code Exchange)'],
         ['Valid redirect URI', copyable(oidcRedirectUri())],
+        ['Valid post logout redirect URI', copyable(`${location.origin}${BASE_PATH}/login`)],
         ['Web origin', copyable(location.origin)],
         ['Group claim', 'A Group Membership mapper, without the full path, named after the group claim (groups)'],
         ['Audience', 'An Audience mapper that adds the client to the access token, for the server to check later'],
@@ -4322,16 +4343,17 @@ async function verifyJwt(token, jwks) {
 }
 
 /// Points the sign-in window at the provider's sign-in page, and waits for the answer that the window posts from the
-/// redirect URI. The window is opened by the caller, in the click handler.
-function oidcAuthorize(discovery, p, popup) {
+/// redirect URI. The window is opened by the caller, in the click handler. `settings`: `{client_id, scopes, prompt}`.
+function oidcAuthorize(discovery, settings, popup) {
     const state = randomToken();
     const nonce = randomToken();
     const verifier = randomToken();
     return (async () => {
         const challenge = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
         const url = new URL(discovery.authorization_endpoint);
-        for (const [k, v] of Object.entries({client_id: p.client_id, response_type: 'code', redirect_uri: oidcRedirectUri(), scope: p.scopes, state, nonce,
-            code_challenge: challenge, code_challenge_method: 'S256', prompt: 'login'})) url.searchParams.set(k, v);
+        for (const [k, v] of Object.entries({client_id: settings.client_id, response_type: 'code', redirect_uri: oidcRedirectUri(), scope: settings.scopes, state, nonce,
+            code_challenge: challenge, code_challenge_method: 'S256'})) url.searchParams.set(k, v);
+        if (settings.prompt) url.searchParams.set('prompt', settings.prompt);
         popup.location.href = url.href;
         const answer = await new Promise((resolve, reject) => {
             const channel = new BroadcastChannel('console-oidc');
@@ -4354,15 +4376,11 @@ function oidcAuthorize(discovery, p, popup) {
     })();
 }
 
-async function oidcTestSignIn(p, popup) {
-    let discovery;
-    try {
-        discovery = await fetchProviderJSON(`${idpIssuer(p)}/.well-known/openid-configuration`, 'Discovery');
-    } catch (e) {
-        popup.close();
-        throw new Error(await idpDiscoveryProblem(p, e));
-    }
-    const {answer, verifier, nonce} = await oidcAuthorize(discovery, p, popup);
+/// A sign-in with an OpenID Connect provider: Authorization Code with PKCE in `popup`, the code exchanged for tokens, and the
+/// ID token verified (signature, issuer, audience, expiry, nonce). `settings`: `{issuer, client_id, scopes, prompt}`.
+/// Returns the verified claims of both tokens, the tokens, and the provider's discovery document.
+async function oidcSignIn(settings, popup, discovery) {
+    const {answer, verifier, nonce} = await oidcAuthorize(discovery, settings, popup);
     if (answer.error) throw new Error(`The provider refused the sign-in: ${answer.error}${answer.error_description ? ` (${answer.error_description})` : ''}.`);
     /// RFC 9207: the answer names the issuer that sent it, against mix-up attacks.
     if (answer.iss && answer.iss !== discovery.issuer) throw new Error(`The answer comes from ${answer.iss}, not from ${discovery.issuer}.`);
@@ -4370,9 +4388,9 @@ async function oidcTestSignIn(p, popup) {
     try {
         response = await fetch(discovery.token_endpoint, {method: 'POST', credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15000),
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: new URLSearchParams({grant_type: 'authorization_code', client_id: p.client_id, code: answer.code, redirect_uri: oidcRedirectUri(), code_verifier: verifier})});
+            body: new URLSearchParams({grant_type: 'authorization_code', client_id: settings.client_id, code: answer.code, redirect_uri: oidcRedirectUri(), code_verifier: verifier})});
     } catch (e) {
-        throw new Error(`The token request was blocked. Add ${location.origin} (or +) to the web origins of the client ${p.client_id}.`);
+        throw new Error(`The token request was blocked. Add ${location.origin} (or +) to the web origins of the client ${settings.client_id}.`);
     }
     const tokens = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(`The token request was refused: ${tokens.error || `HTTP ${response.status}`}${tokens.error_description ? ` (${tokens.error_description})` : ''}.`);
@@ -4382,22 +4400,34 @@ async function oidcTestSignIn(p, popup) {
     const audiences = [].concat(id.aud || []);
     const problems = [];
     if (id.iss !== discovery.issuer) problems.push(`the ID token is from ${id.iss}`);
-    if (!audiences.includes(p.client_id)) problems.push(`the ID token is not for the client ${p.client_id}`);
-    if (audiences.length > 1 && id.azp !== p.client_id) problems.push('the ID token was issued to another client (azp)');
+    if (!audiences.includes(settings.client_id)) problems.push(`the ID token is not for the client ${settings.client_id}`);
+    if (audiences.length > 1 && id.azp !== settings.client_id) problems.push('the ID token was issued to another client (azp)');
     if (!(id.exp > now)) problems.push('the ID token has expired');
     if (id.iat && id.iat > now + 60) problems.push('the ID token is issued in the future: check the clocks');
     if (id.nonce !== nonce) problems.push('the nonce does not match');
     if (problems.length) throw new Error(`The ID token is not valid: ${problems.join('; ')}.`);
-    /// The access token is what the server will check: its audience must name the console's client.
+    /// The access token is what the server checks: its audience must name the console's client.
     let access = null;
     let access_problem = null;
     try {
         access = await verifyJwt(tokens.access_token, jwks);
-        if (![].concat(access.aud || []).includes(p.client_id) && access.azp !== p.client_id) access_problem = `its audience does not include ${p.client_id}: add an Audience mapper`;
+        if (![].concat(access.aud || []).includes(settings.client_id) && access.azp !== settings.client_id) access_problem = `its audience does not include ${settings.client_id}: add an Audience mapper`;
     } catch (e) {
         access_problem = e.message;
     }
-    return {id, access, access_problem, expires_in: tokens.expires_in};
+    return {id, access, access_problem, tokens, discovery, expires_in: tokens.expires_in};
+}
+
+async function oidcTestSignIn(p, popup) {
+    let discovery;
+    try {
+        discovery = await fetchProviderJSON(`${idpIssuer(p)}/.well-known/openid-configuration`, 'Discovery');
+    } catch (e) {
+        popup.close();
+        throw new Error(await idpDiscoveryProblem(p, e));
+    }
+    /// prompt=login: a test asks for the password every time, even when the browser has a session with the provider.
+    return oidcSignIn({issuer: idpIssuer(p), client_id: p.client_id, scopes: p.scopes, prompt: 'login'}, popup, discovery);
 }
 
 function idpTestSignInDialog(p) {
@@ -4478,16 +4508,174 @@ function finishOidcCallback() {
     if (answer.state) setTimeout(() => window.close(), 300);
 }
 
-/// What it takes for the server to accept these sign-ins: the server checks every request, and this build of ClickHouse
-/// has no token authentication of its own.
-function idpServerSideBox() {
-    return h('div', {className: 'box'}, h('h2', {}, 'Signing in to ClickHouse with Keycloak'),
-        h('p', {}, 'The console sends every query to the server, and the server authenticates each one. This build of ClickHouse does not check tokens itself '
-            + '(JWT authentication is not part of it), so a Keycloak sign-in needs the token authenticator: a small service that the server asks to check a token, '
-            + 'through its HTTP authentication (http_authentication_servers, users IDENTIFIED WITH http). It checks the signature with the keys of Keycloak, the '
-            + 'issuer, the audience, and the expiry, and that the token is for that user.'),
-        h('p', {className: 'note'}, 'Until the authenticator is set up, use the tests on this page to prepare and check the realm and the client. Users of '
-            + 'Keycloak keep signing in with LDAP if Keycloak federates an LDAP directory that the server also uses, or with their ClickHouse password.'));
+/// --- Single sign-on on the sign-in page ---
+///
+/// With `web_console.sso_issuer` set in the server configuration, the sign-in page offers "Sign in with <sso_name>". The
+/// console signs in with the provider (Authorization Code with PKCE, a public client), and uses the access token as the
+/// password of the session: the server checks it through its HTTP authentication server (the token authenticator), for
+/// users IDENTIFIED WITH http. The user name is the `sso_username_claim` of the verified ID token.
+///
+/// The tokens stay in this page's memory, like a password. The access token is refreshed before it expires, and the new
+/// one is posted to the native panels; panels without that protocol (the SQL Console, the Web Terminal, ClickStack) keep
+/// the token they started with, until they are reloaded. When the provider refuses a refresh (the session ended there, or
+/// the user was disabled), the console signs out. Signing out also ends the session with the provider.
+
+function ssoSettings() {
+    if (!config.sso_issuer || !config.sso_client_id) return null;
+    return {name: config.sso_name || 'single sign-on', issuer: String(config.sso_issuer).replace(/\/+$/, ''), client_id: config.sso_client_id,
+        scopes: config.sso_scopes || 'openid profile email', username_claim: config.sso_username_claim || 'preferred_username'};
+}
+
+function updateLoginSSO() {
+    const settings = ssoSettings();
+    $('login-sso').hidden = !settings;
+    if (settings) $('login-sso-button').textContent = `Sign in with ${settings.name}`;
+}
+
+async function ssoSignIn() {
+    const settings = ssoSettings();
+    if (!settings) return;
+    /// Opened here, synchronously in the click: a window opened after an await is blocked as a pop-up.
+    const popup = window.open('about:blank', 'console-oidc-sign-in', 'popup,width=520,height=720');
+    if (!popup) {
+        showLoginError('The browser blocked the sign-in window: allow pop-ups for this page, and try again.');
+        return;
+    }
+    $('login-error').hidden = true;
+    const button = $('login-sso-button');
+    const attempt = ++login_attempt;
+    button.disabled = true;
+    button.replaceChildren(Object.assign(document.createElement('span'), {className: 'spinner'}), document.createTextNode(` Signing in with ${settings.name}…`));
+    const done = () => {
+        button.disabled = false;
+        button.textContent = `Sign in with ${settings.name}`;
+    };
+    let result;
+    try {
+        const url_check = validateServerURL(location.origin);
+        if (url_check.error) throw new Error(url_check.error);
+        const problem = idpUrlProblem(settings.issuer, 'the identity provider');
+        if (problem) throw new Error(problem);
+        let discovery;
+        try {
+            discovery = await fetchProviderJSON(`${settings.issuer}/.well-known/openid-configuration`, 'Discovery');
+        } catch (e) {
+            popup.close();
+            throw e;
+        }
+        result = await oidcSignIn(settings, popup, discovery);
+        if (result.access_problem) throw new Error(`The access token cannot be used to sign in to ClickHouse: ${result.access_problem}.`);
+        const user = String(result.id[settings.username_claim] ?? '');
+        if (!user) throw new Error(`The provider's token has no claim ${settings.username_claim}, which is the user name.`);
+        result.connection = {url: url_check.url, origin: url_check.origin, user, password: result.tokens.access_token};
+    } catch (e) {
+        if (attempt !== login_attempt) return;
+        done();
+        showLoginError(e.message);
+        return;
+    }
+    const check = await runQuery(result.connection, CHECK_QUERY, new AbortController().signal);
+    if (attempt !== login_attempt) return;
+    done();
+    if (!check.ok) {
+        showLoginError(check.kind === 'credentials'
+            ? `${settings.name} signed you in as ${result.connection.user}, but the server did not accept the sign-in. The user ${result.connection.user} must exist on the server, `
+                + 'identified with the token authenticator (IDENTIFIED WITH http), and the authenticator must be running. Ask an administrator.'
+            : check.message, check.kind === 'credentials' ? null : check.detail);
+        return;
+    }
+    startSession(result.connection, check.data[0]);
+    session.sso = {settings, discovery: result.discovery, refresh_token: result.tokens.refresh_token, id_token: result.tokens.id_token,
+        expires_in: result.tokens.expires_in, timer: null};
+    scheduleSsoRefresh(session);
+    showLoginNotice('');
+    navigate(parseRoute().next ? componentPath(parseRoute().next) : componentPath('home'), true);
+}
+
+function scheduleSsoRefresh(current, delay) {
+    clearTimeout(current.sso.timer);
+    current.sso.timer = setTimeout(() => refreshSsoToken(current), delay ?? Math.max(10, Number(current.sso.expires_in || 300) * 0.7) * 1000);
+}
+
+async function refreshSsoToken(current) {
+    if (session !== current) return;
+    let response;
+    let tokens;
+    try {
+        response = await fetch(current.sso.discovery.token_endpoint, {method: 'POST', credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15000),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: new URLSearchParams({grant_type: 'refresh_token', client_id: current.sso.settings.client_id, refresh_token: current.sso.refresh_token})});
+        tokens = await response.json().catch(() => ({}));
+    } catch (e) {
+        /// The provider cannot be reached: the current token stays valid until it expires; try again shortly.
+        if (session === current) scheduleSsoRefresh(current, 15000);
+        return;
+    }
+    if (session !== current) return;
+    if (!response.ok || !tokens.access_token) {
+        const reason = tokens.error_description || tokens.error || `HTTP ${response.status}`;
+        endSession();
+        showLoginNotice(`Your ${current.sso.settings.name} session has ended (${reason}): sign in again. All panels were closed.`, true);
+        navigate(loginPath(null), true);
+        return;
+    }
+    current.password = tokens.access_token;
+    if (tokens.refresh_token) current.sso.refresh_token = tokens.refresh_token;
+    if (tokens.id_token) current.sso.id_token = tokens.id_token;
+    current.sso.expires_in = tokens.expires_in;
+    shareCredentials(current);
+    scheduleSsoRefresh(current);
+}
+
+/// Posts new credentials to the native panels of the session, which accept them (`console-credentials`).
+function shareCredentials(current) {
+    for (const entry of frames.values()) {
+        if (entry.component.integration !== 'native' || entry.session !== current || !entry.iframe.contentWindow) continue;
+        entry.iframe.contentWindow.postMessage({type: 'console-credentials', user: current.user, password: current.password}, location.origin);
+    }
+}
+
+/// The address that ends the session with the provider and returns to the sign-in page (RP-initiated logout). The
+/// sign-in page must be a valid post-logout redirect URI of the client.
+function ssoLogoutUrl(current) {
+    const endpoint = current.sso && current.sso.discovery.end_session_endpoint;
+    if (!endpoint) return null;
+    const url = new URL(endpoint);
+    url.searchParams.set('client_id', current.sso.settings.client_id);
+    if (current.sso.id_token) url.searchParams.set('id_token_hint', current.sso.id_token);
+    url.searchParams.set('post_logout_redirect_uri', `${location.origin}${BASE_PATH}/login`);
+    return url.href;
+}
+
+/// How the server accepts these sign-ins: this build of ClickHouse does not check tokens itself, so a token authenticator
+/// (`sso_authenticator.mjs`) does, as an HTTP authentication server. Shows what the sign-in page offers, and the users
+/// identified with an HTTP authentication server.
+function idpServerSideBox(page) {
+    const settings = ssoSettings();
+    const users = h('div', {}, h('span', {className: 'spinner'}));
+    if (session.admin.can.read_users) {
+        adminRows("SELECT name, arraySort(default_roles_list) AS roles FROM system.users WHERE has(auth_type, 'http') ORDER BY name").then(rows => {
+            if (!isCurrent(page)) return;
+            users.replaceChildren(rows.length ? dataTable([
+                {title: 'User', render: r => adminLink(r.name, 'admin-users', r.name)},
+                {title: 'Default roles', render: r => chips(r.roles || [])},
+            ], rows, null, 'Users identified with an HTTP authentication server')
+                : paragraph('No user is identified with an HTTP authentication server yet: the user sync of the authenticator creates them, or CREATE USER … IDENTIFIED WITH http SERVER \'sso\'.'));
+        }, e => { if (!(e instanceof AdminSessionChanged)) users.replaceChildren(errorBox(e)); });
+    } else {
+        users.replaceChildren(paragraph('Your user cannot read the users of the server.'));
+    }
+    return h('div', {className: 'box'}, h('h2', {}, 'Signing in to ClickHouse'),
+        h('p', {}, 'The console sends every query to the server, which authenticates each one. This build of ClickHouse does not check tokens itself, so the '
+            + 'token authenticator (utils/web-console/sso_authenticator.mjs) does, as an HTTP authentication server: users IDENTIFIED WITH http SERVER \'sso\' sign '
+            + 'in with their access token, which it checks with the keys of the provider (signature, issuer, client, audience, expiry, and the user name). '
+            + 'Its user sync creates those users from the groups of the provider and grants the roles of the groups.'),
+        kvList([
+            ['Sign-in page', settings ? [`Offers "Sign in with ${settings.name}", issuer `, h('code', {}, settings.issuer), ', client ', h('code', {}, settings.client_id)]
+                : h('span', {className: 'note'}, 'No single sign-on: set web_console.sso_issuer and web_console.sso_client_id in the server configuration.')],
+            ['This page', 'The providers above are for the tests. The sign-in page uses the server configuration, which it can read before anyone is signed in.'],
+        ]),
+        h('h3', {}, 'Users of single sign-on'), users);
 }
 
 async function createUserDialog() {
@@ -11989,6 +12177,7 @@ function destroyDialog(cluster, resources) {
 /// --- Startup ---
 
 $('logout-button').addEventListener('click', signOut);
+$('login-sso-button').addEventListener('click', ssoSignIn);
 $('switch-button').addEventListener('click', switchConnection);
 $('switch-button').append(icon('switch'));
 $('menu-button').append(icon('menu'));

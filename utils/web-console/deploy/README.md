@@ -207,7 +207,7 @@ sign in as well, with their directory password: an **LDAP user directory**. They
 roles come from default roles and from their LDAP groups, and they appear on the Users page, read-only, once they have
 signed in. The users of `users.xml` and those created with SQL keep working, and the console is the same for both.
 
-1. **Generate the configuration.** On **Administration → Users → Directory sign-in (LDAP)**, select **Configure LDAP…**
+1. **Generate the configuration.** On **Identity Providers → LDAP**, select **Configure LDAP…** (or **Add a directory…**)
    and fill in the LDAP server, the bind DN (`uid={user_name},ou=users,dc=example,dc=org`, or
    `{user_name}@corp.example.com` for Active Directory), and the group mapping. The configuration is secure by default:
    LDAPS (or StartTLS), TLS 1.2 or later, the certificate of the LDAP server always checked
@@ -228,6 +228,44 @@ signed in. The users of `users.xml` and those created with SQL keep working, and
 | Offboarding | Disable the user, or remove them from the groups, in the directory: it takes effect after the cooldown. Directory users cannot be suspended or deleted in the console. |
 | Access reviews | ClickHouse cannot list the directory: review group membership in LDAP. The Users page shows directory users that have signed in since the server started. |
 | Transport | Passwords travel with every request: serve the console over HTTPS, and never use LDAP without TLS. |
+
+## 9. Single sign-on (Keycloak)
+
+Users can sign in with Keycloak (or another OpenID Connect provider): the console signs them in with the Authorization
+Code flow and PKCE, as a public client, and sends the access token to the server as the password. This build of
+ClickHouse does not check tokens itself, so the **token authenticator** (`sso-authenticator` in the tools image) does,
+as an HTTP authentication server of the server: for the users `IDENTIFIED WITH http SERVER 'sso'`, it checks the
+signature with the keys of the provider, the issuer, the client, the audience, the expiry, and that the user name claim
+is the user name. Its **user sync** creates those users from the members of the groups `clickhouse-<role>`, grants the
+roles, and drops the users who left or were disabled. Passwords and LDAP keep working next to it.
+
+1. **The client of the console in Keycloak**: client authentication off (public), standard flow only, PKCE S256
+   (Advanced settings), the valid redirect URI `https://<console>/console/oidc-callback`, the valid post logout redirect
+   URI `https://<console>/console/login`, the web origin `https://<console>`. Mappers: Group Membership named `groups`,
+   without the full path, and an Audience mapper that adds `clickhouse-console` to the access token. The access tokens
+   last 5 minutes by default; the console refreshes them.
+2. **The client of the user sync**: a confidential client with only a service account, and the roles `view-users` and
+   `query-groups` of `realm-management`. Put its secret in `sso/sync-secret`.
+3. **The account `sso_sync`** in ClickHouse (`service-accounts.sql`), with the roles of the groups `WITH ADMIN OPTION`,
+   and its password in `.env` (`SSO_SYNC_PASSWORD`).
+4. **The roles** the groups stand for, on the server: the group `clickhouse-analysts` gives the role `analysts`.
+5. **Start it** with `.env` (`SSO_ISSUER`, `SSO_CLIENT_ID`, `SSO_SYNC_CLIENT_ID`):
+
+   ```bash
+   docker compose -f compose.yaml -f compose.sso.yaml up -d
+   docker compose -f compose.yaml -f compose.sso.yaml run --rm sso-authenticator --check-config   # issuer, keys, sync
+   ```
+
+   The sign-in page shows **Sign in with Keycloak**. **Identity Providers → SSO (Keycloak)** tests the provider and a
+   sign-in, and lists the users of single sign-on.
+
+| Setting | Why |
+|---|---|
+| Revocation | A token is accepted until it expires. A user disabled in Keycloak cannot refresh, so the console signs out at the next refresh, and the sync drops the user within its interval: access ends within the token lifespan (5 minutes). |
+| Network | Only the server should reach the authenticator (port 29700 on the Compose network, not published). It refuses whatever it cannot check, including when the provider's keys are unavailable. |
+| Panels | The native panels receive each refreshed token. The SQL Console, the Web Terminal, and ClickStack keep the token they started with: reload them after it expires. |
+| Transport | Serve the console and Keycloak over HTTPS: the authenticator accepts plain HTTP only for a provider on localhost. |
+| Names | A user created with a password, or another method, is never changed by the sync: give SSO users their own names. |
 
 ## Upgrade and rollback
 

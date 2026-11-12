@@ -295,6 +295,14 @@ function getConsoleConnection() {
 }
 
 const console_connection = getConsoleConnection();
+/// The console refreshes short-lived credentials (single sign-on tokens) while this page is open: it posts them to
+/// this frame only, from its own origin, for the same user.
+window.addEventListener('message', e => {
+    if (!console_connection || e.source !== window.parent || e.origin !== location.origin) return;
+    if (e.data && e.data.type === 'console-credentials' && e.data.user === console_connection.user) {
+        document.getElementById('password').value = e.data.password;
+    }
+});
 if (console_connection) {
     document.getElementById('url').value = console_connection.url;
     document.getElementById('user').value = console_connection.user;
