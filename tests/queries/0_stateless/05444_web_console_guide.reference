@@ -1,0 +1,15 @@
+--- the pages of the guide are routes of the console
+/console/guide 200 1
+/console/guide/overview 200 1
+/console/guide/how-to/configure-ldap 200 1
+--- the guide is JSON, with the headers of the console
+Content-Type: application/json; charset=UTF-8
+Cache-Control: no-store
+frame-ancestors 'none'
+--- every page of the navigation is in the guide, and every link between pages resolves
+Web Console
+[None, 'Tutorials', 'User guides', 'How-to guides', 'API reference']
+listed pages exist: True True
+overview: ClickHouse Web Console
+broken links: []
+scripts: 0

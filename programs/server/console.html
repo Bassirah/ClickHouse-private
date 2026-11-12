@@ -387,6 +387,82 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .button.danger.primary:hover { background: var(--danger); border-color: var(--danger); filter: brightness(0.92); }
 .button.danger:hover:not(.primary) { background: var(--danger-bg); border-color: currentColor; }
 .actions-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+
+/* Console Guide */
+
+.guide-help { text-decoration: none; display: inline-flex; align-items: center; gap: 0.3rem; }
+.guide-layout { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+/* Below the sticky header of the page (52px). */
+.guide-nav { position: sticky; top: 60px; display: flex; flex-direction: column; gap: 0.6rem; max-height: calc(100vh - var(--header-height) - 76px); overflow-y: auto; padding: 0.25rem 0.25rem 1rem 0; }
+.guide-nav input[type="search"] { width: 100%; min-height: 2.2rem; padding: 0.35rem 0.6rem; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg); font: inherit; color: inherit; }
+#admin-view .admin-page .guide-nav h2 { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0.4rem 0 0.1rem; }
+.guide-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.guide-nav a { display: block; padding: 0.25rem 0.5rem; border-radius: 4px; color: var(--text); text-decoration: none; }
+.guide-nav a:hover { background: var(--surface-hover); }
+.guide-nav a[aria-current="page"] { background: var(--selected); font-weight: 600; }
+.guide-results .snippet { display: block; color: var(--muted); font-size: 0.8rem; font-weight: 400; }
+.guide-results mark { background: var(--accent); color: var(--accent-text); border-radius: 2px; }
+.guide-article { max-width: 52rem; min-width: 0; font-size: 14px; line-height: 1.6; }
+.guide-article > .note { font-size: 0.95rem; margin: 0 0 1rem; }
+.guide-content > :first-child { margin-top: 0; }
+.guide-content :is(h2, h3, h4) { scroll-margin-top: 64px; line-height: 1.3; }
+#admin-view .admin-page .guide-content h2 { font-size: 1.2rem; font-weight: 600; margin: 1.8rem 0 0.6rem; padding-top: 0.4rem; border-top: 1px solid var(--hairline); }
+#admin-view .admin-page .guide-content h3 { font-size: 1.02rem; font-weight: 600; margin: 1.4rem 0 0.5rem; }
+#admin-view .admin-page .guide-content h4 { font-size: 0.95rem; font-weight: 600; margin: 1.2rem 0 0.4rem; }
+.guide-content p { margin: 0.6rem 0; }
+.guide-content :is(ul, ol) { margin: 0.5rem 0; padding-left: 1.4rem; }
+.guide-content li { margin: 0.2rem 0; }
+.guide-content li > p { margin: 0.3rem 0; }
+.guide-content a { color: var(--link); }
+.guide-content code { background: var(--bg-subtle); border: 1px solid var(--hairline); border-radius: 3px; padding: 0 0.25em; overflow-wrap: anywhere; }
+.guide-code { position: relative; margin: 0.7rem 0; }
+.guide-code pre { margin: 0; padding: 0.7rem 0.8rem; overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-subtle); font-size: 12.5px; line-height: 1.5; }
+.guide-code pre code { background: none; border: 0; padding: 0; overflow-wrap: normal; }
+.guide-code-language { position: absolute; top: 0.3rem; right: 4.6rem; font-size: 0.72rem; color: var(--muted); }
+.guide-code .copy { position: absolute; top: 0.25rem; right: 0.3rem; }
+.guide-table { overflow-x: auto; margin: 0.7rem 0; border: 1px solid var(--border); border-radius: 6px; }
+.guide-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.guide-table :is(th, td) { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.guide-table tr:last-child td { border-bottom: 0; }
+.guide-table th { background: var(--bg-subtle); font-weight: 600; }
+.guide-callout { margin: 0.8rem 0; padding: 0.6rem 0.9rem; border-radius: 6px; border: 1px solid var(--border); border-left-width: 4px; background: var(--info-bg); }
+.guide-callout > :last-child { margin-bottom: 0; }
+.guide-callout-title { font-weight: 600; margin: 0 0 0.2rem !important; }
+.guide-tip { background: var(--success-bg); border-left-color: var(--success); }
+.guide-warning { background: var(--warning-bg); border-left-color: var(--warning); }
+.guide-note { border-left-color: var(--focus); }
+.guide-steps { list-style: none; counter-reset: step; padding-left: 0 !important; }
+.guide-steps > li { counter-increment: step; position: relative; padding: 0 0 0.6rem 2.4rem; margin: 0; border-left: 2px solid var(--hairline); margin-left: 0.85rem; }
+.guide-steps > li::before
+{
+    content: counter(step); position: absolute; left: -0.95rem; top: 0; width: 1.8rem; height: 1.8rem; border-radius: 50%;
+    display: grid; place-items: center; font-weight: 600; font-size: 0.85rem; background: var(--primary-bg); color: var(--primary-text);
+}
+.guide-steps > li:last-child { border-left-color: transparent; }
+.guide-step-title { font-weight: 600; font-size: 1rem; margin: 0.15rem 0 0.4rem !important; }
+.guide-tabs { margin: 0.8rem 0; }
+.guide-tabs [role="tablist"] { display: flex; gap: 0.15rem; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.guide-tabs [role="tab"] { padding: 0.45rem 0.8rem; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: none; color: var(--muted); font: inherit; cursor: pointer; }
+.guide-tabs [role="tab"][aria-selected="true"] { border-bottom-color: var(--accent-border); color: var(--text); font-weight: 600; }
+.guide-diagram { margin: 0.8rem 0; }
+.guide-diagram figcaption { font-size: 0.85rem; color: var(--muted); }
+.guide-pager { display: flex; justify-content: space-between; gap: 1rem; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--hairline); flex-wrap: wrap; }
+.guide-pager a { text-decoration: none; display: flex; flex-direction: column; padding: 0.5rem 0.8rem; border: 1px solid var(--border); border-radius: 6px; color: var(--text); max-width: 48%; }
+.guide-pager a:hover { border-color: var(--border-hover); background: var(--surface-hover); }
+.guide-pager a.next { margin-left: auto; text-align: right; }
+.guide-pager .note { font-size: 0.78rem; }
+details.guide-contents { margin: 0 0 1rem; font-size: 0.92em; border: 1px solid var(--hairline); border-radius: 6px; padding: 0.4rem 0.8rem; }
+details.guide-contents summary { cursor: pointer; font-weight: 600; }
+details.guide-contents ul { margin: 0.3rem 0 0.2rem; padding-left: 1.1rem; }
+details.guide-contents li.level-3 { margin-left: 1rem; }
+@media (max-width: 60rem)
+{
+    .guide-layout { grid-template-columns: minmax(0, 1fr); }
+    .guide-nav { position: static; max-height: none; }
+    .guide-nav .guide-groups { display: none; }
+    .guide-nav.open .guide-groups { display: flex; flex-direction: column; gap: 0.4rem; }
+}
+@media (min-width: 60.01rem) { .guide-nav .guide-toggle { display: none; } }
 pre.code
 {
     margin: 0; padding: 0.65rem 0.75rem; overflow-x: auto; border: 1px solid var(--border); border-radius: 4px;
@@ -628,6 +704,7 @@ const ICONS = {
     source: '<path d="M8 6l-6 6 6 6M16 6l6 6-6 6"/>',
     docs: '<path d="M4 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4zM20 4h-6a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6z"/>',
     reference: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+    guide: '<circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.8 1c0 1.7-2.4 2.1-2.4 3.6M12 17h.01"/>',
     website: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
     cloud: '<path d="M7 18h10a4 4 0 0 0 .5-8 6 6 0 0 0-11.5 1.5A3.5 3.5 0 0 0 7 18z"/>',
     external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
@@ -695,6 +772,8 @@ const CATEGORIES = [
 /// - `link`: an external destination opened in a new tab (`config_key` in `config`);
 /// - `admin`: an administration page rendered by this page (`page`). It is listed only for users who can
 ///   read what it shows (`admin_needs`, keys of `session.admin.can`); the server authorizes every action.
+/// - `guide`: the Console Guide, the documentation of the console, embedded in the server (`/console/guide.json`).
+///   Like Home, it is available to every signed-in user and not governed by the component access policy.
 /// `integration` says how the panel receives the connection (see the comment at the top).
 /// `keep_alive` panels stay loaded (hidden) when another destination is selected, so that unsaved
 /// queries, tabs, results, and terminal sessions survive; the others are unloaded, which stops their
@@ -741,6 +820,8 @@ const COMPONENTS = [
      probes: ['SELECT 1 FROM system.processors_profile_log LIMIT 0', 'SELECT 1 FROM system.query_log LIMIT 0'],
      description: 'Time spent in each processor of a query pipeline.'},
 
+    {id: 'guide', category: 'resources', kind: 'guide', title: 'Console Guide', icon: 'guide',
+     description: 'How to use, deploy, and administer this console: tutorials, user guides, how-to guides, and reference.'},
     {id: 'source', category: 'resources', kind: 'link', title: 'Source code', icon: 'source', config_key: 'source_code_url',
      description: 'The ClickHouse source code repository.'},
     {id: 'documentation', category: 'resources', kind: 'link', title: 'Documentation', icon: 'docs', config_key: 'documentation_url',
@@ -1017,10 +1098,12 @@ function loginPath(next) {
     return `${BASE_PATH}/login` + (next ? `?next=${encodeURIComponent(next)}` : '');
 }
 
-/// Only an id of the registry is accepted as the destination after login, so it can never point
-/// outside of the console.
+/// Only an id of the registry, or a page of the Console Guide (`guide/<page>`), is accepted as the destination
+/// after login, so it can never point outside of the console.
+const GUIDE_PAGE_PATH = /^guide\/[a-z0-9-]+(\/[a-z0-9-]+)*$/;
+
 function validNext(value) {
-    return value && value !== 'home' && COMPONENTS_BY_ID.has(value) ? value : null;
+    return value && value !== 'home' && (COMPONENTS_BY_ID.has(value) || GUIDE_PAGE_PATH.test(value)) ? value : null;
 }
 
 /// Administration pages take one more path segment, the name of the user or role they show
@@ -1031,6 +1114,10 @@ function parseRoute() {
     if (rest === 'login') return {name: 'login', next: validNext(new URLSearchParams(location.search).get('next'))};
     if (COMPONENTS_BY_ID.has(rest)) return {name: 'component', id: rest, sub: null, tab: new URLSearchParams(location.search).get('tab')};
     const slash = rest.indexOf('/');
+    /// The pages of the Console Guide have paths of their own (`/console/guide/how-to/configure-ldap`).
+    if (slash > 0 && rest.slice(0, slash) === 'guide') {
+        return GUIDE_PAGE_PATH.test(rest) ? {name: 'component', id: 'guide', sub: rest.slice(slash + 1), tab: null} : {name: 'not-found', path: rest};
+    }
     if (slash > 0) {
         const c = COMPONENTS_BY_ID.get(rest.slice(0, slash));
         if (c && c.kind === 'admin' && !rest.slice(slash + 1).includes('/')) {
@@ -1059,7 +1146,8 @@ function navigate(path, replace) {
 function render() {
     let route = parseRoute();
     if (!session) {
-        const next = route.name === 'login' ? route.next : (route.name === 'component' ? validNext(route.id) : null);
+        const next = route.name === 'login' ? route.next
+            : (route.name === 'component' ? validNext(route.id === 'guide' && route.sub ? `guide/${route.sub}` : route.id) : null);
         if (route.name !== 'login') history.replaceState(null, '', loginPath(next));
         showLogin();
         return;
@@ -1102,7 +1190,7 @@ function showLogin() {
     if (!$('login-user').value) $('login-user').value = 'default';
     const next = parseRoute().next;
     if (next && !$('login-notice').dataset.persistent) {
-        showLoginNotice(`Sign in to open ${COMPONENTS_BY_ID.get(next).title}.`);
+        showLoginNotice(`Sign in to open ${COMPONENTS_BY_ID.get(next.split('/')[0]).title}.`);
     }
     updateLoginWarning();
     updateLoginSSO();
@@ -1313,7 +1401,7 @@ function clickstackRoute() {
 /// `status` is `available`, `checking`, `configure`, `restricted`, `unavailable`, or `unverified`;
 /// `action` is `Open`, `Configure`, `Details`, or null; `external` is set for new-tab destinations.
 function componentState(c) {
-    if (c.kind === 'home') return {status: 'available', action: 'Open', href: componentPath(c.id)};
+    if (c.kind === 'home' || c.kind === 'guide') return {status: 'available', action: 'Open', href: componentPath(c.id)};
     if (c.kind === 'admin') return adminComponentState(c);
     const state = ownComponentState(c);
     /// The console policy applies only to components that could otherwise be used: a component that is
@@ -1426,7 +1514,7 @@ function refreshComponentStates() {
         /// Render the administration page once the capabilities of the user are known, and not again
         /// afterwards: that would discard what is typed in its forms.
         if (admin_page && admin_page.waiting && session.admin.state !== 'checking') showAdmin(c, route);
-    } else if (!frames.has(route.id)) showPanel(c);
+    } else if (c.kind !== 'guide' && !frames.has(route.id)) showPanel(c);
 }
 
 /// --- Shell ---
@@ -1464,13 +1552,14 @@ function showShell(route) {
         $('home-view').hidden = false;
         renderHome();
         focusHeading($('home-view').querySelector('h1'));
-    } else if (c.kind === 'admin') {
+    } else if (c.kind === 'admin' || c.kind === 'guide') {
         leaveFocusMode();
         hideAllFrames();
         $('panel-view').hidden = true;
         $('home-view').hidden = true;
         $('admin-view').hidden = false;
-        showAdmin(c, route);
+        if (c.kind === 'admin') showAdmin(c, route);
+        else showGuide(c, route);
     } else {
         $('home-view').hidden = true;
         $('admin-view').hidden = true;
@@ -2907,9 +2996,12 @@ function select(options, value, props = {}) {
 
 /// The header bar of an administration page: `crumbs` are the parent pages, shown before the title as in ClickStack.
 function pageHeader(c, title, crumbs, actions) {
+    const topic = GUIDE_TOPICS[c.id];
+    const help = topic ? h('a', {className: 'button small guide-help', href: `${componentPath('guide')}/${topic}`, dataset: {route: ''},
+        title: `${c.title} in the Console Guide`}, icon('guide', 'icon-small'), 'Guide') : null;
     return h('div', {className: 'admin-head'},
         icon(c.icon), crumbs ? h('nav', {className: 'crumbs', 'aria-label': 'Breadcrumb'}, crumbs, h('span', {'aria-hidden': 'true'}, '›')) : null,
-        h('h1', {className: 'page-title', tabIndex: -1}, title), h('span', {className: 'spacer'}), actions || null);
+        h('h1', {className: 'page-title', tabIndex: -1}, title), h('span', {className: 'spacer'}), help, actions || null);
 }
 
 function tabList(c, sub, tabs, active) {
@@ -3130,6 +3222,259 @@ async function writeAudit(current, plan, outcome, error) {
 /// The administration page being shown: `token` changes when another page is shown, so the results of
 /// queries started for the previous one are dropped.
 let admin_page = null;
+/// --- Console Guide ---
+
+/// The page of the Console Guide that describes each administration page, for the "Guide" link in its header.
+const GUIDE_TOPICS = {
+    'admin-users': 'guides/users-and-roles#the-users-page',
+    'admin-roles': 'guides/users-and-roles#the-roles-and-permissions-page',
+    'admin-data-access': 'guides/data-access-policies',
+    'admin-access': 'guides/component-access',
+    'admin-limits': 'guides/profiles-and-quotas',
+    'admin-audit': 'guides/audit-activity',
+    'admin-clusters': 'guides/clusters',
+    'admin-backups': 'guides/backup-and-restore',
+    'idp-ldap': 'guides/identity-providers#ldap',
+    'idp-sso': 'guides/identity-providers#sso',
+};
+
+const GUIDE_HOME = 'overview';
+
+/// The guide is loaded once per page load, when it is first opened; a failed load is tried again on the next visit.
+let guide_load = null;
+/// What is typed in the search box, kept while moving between pages.
+let guide_query = '';
+/// The plain text of each page, for the search, computed on the first search.
+let guide_index = null;
+let guide_render_token = null;
+
+function loadGuide() {
+    if (!guide_load) {
+        guide_load = fetch(`${BASE_PATH}/guide.json`).then(response => {
+            if (!response.ok) throw new Error(`The server answered ${response.status} for ${BASE_PATH}/guide.json.`);
+            return response.json();
+        });
+        guide_load.catch(() => { guide_load = null; });
+    }
+    return guide_load;
+}
+
+function guidePath(key) {
+    return `${componentPath('guide')}/${key}`;
+}
+
+async function showGuide(c, route) {
+    const view = $('admin-view');
+    const token = Symbol('guide');
+    guide_render_token = token;
+    const key = route.sub || GUIDE_HOME;
+    let guide;
+    try {
+        const pending = loadGuide();
+        view.replaceChildren(h('div', {className: 'admin-page'}, pageHeader(c, c.title), loadingBox('Loading the guide…')));
+        guide = await pending;
+    } catch (e) {
+        if (guide_render_token !== token) return;
+        view.replaceChildren(h('div', {className: 'admin-page'}, pageHeader(c, c.title), errorBox(e, 'The guide could not be loaded.'),
+            h('div', {className: 'actions-row'}, button('Try again', () => showGuide(c, route)))));
+        return;
+    }
+    if (guide_render_token !== token || !session) return;
+
+    const page = guide.pages[key];
+    const nav = renderGuideNav(guide, key);
+    const article = h('article', {className: 'guide-article', 'aria-labelledby': 'guide-title'});
+    if (!page) {
+        document.title = `Not found · ${c.title} · ClickHouse Console`;
+        put(article, h('div', {className: 'box'}, h('h2', {}, 'Page not found'),
+            paragraph(`The Console Guide has no page ${key}.`), h('div', {className: 'actions-row'}, routeLink('Go to the guide', guidePath(GUIDE_HOME), true))));
+        view.replaceChildren(h('div', {className: 'admin-page'}, pageHeader(c, c.title), h('div', {className: 'guide-layout'}, nav, article)));
+        return;
+    }
+    document.title = `${page.sidebar_title} · ${c.title} · ClickHouse Console`;
+    const group = guide.groups.find(g => g.pages.includes(key));
+    const crumbs = [h('a', {href: guidePath(GUIDE_HOME), dataset: {route: ''}}, c.title), group && group.title ? ` › ${group.title}` : null];
+    const header = pageHeader(c, page.title, crumbs);
+    header.querySelector('h1').id = 'guide-title';
+
+    const contents = page.headings.filter(heading => heading.level === 2 || heading.level === 3);
+    const content = h('div', {className: 'guide-content'});
+    content.innerHTML = page.html;
+    prepareGuideContent(content);
+    put(article, h('p', {className: 'note'}, page.description),
+        contents.length > 2 ? h('details', {className: 'guide-contents', open: contents.length <= 12},
+            h('summary', {}, 'On this page'),
+            h('ul', {}, contents.map(heading => h('li', {className: `level-${heading.level}`}, h('a', {href: `#${heading.id}`}, heading.text))))) : null,
+        content, renderGuidePager(guide, key));
+    article.addEventListener('click', onGuideClick);
+    article.addEventListener('keydown', onGuideTabKey);
+
+    view.replaceChildren(h('div', {className: 'admin-page'}, header, h('div', {className: 'guide-layout'}, nav, article)));
+    scrollGuideToHash(view);
+    focusHeading(header.querySelector('h1'));
+}
+
+/// The links of the guide to the documentation site keep their path; they go to the configured documentation.
+function prepareGuideContent(content) {
+    const documentation = parseDestination(config.documentation_url);
+    for (const a of content.querySelectorAll('a[data-docs]')) {
+        if (documentation && !documentation.invalid) {
+            a.href = documentation.url.replace(/\/+$/, '') + a.dataset.docs;
+            if (documentation.same_origin) a.removeAttribute('target');
+        } else {
+            /// No documentation is configured: the text stays, without a link.
+            a.replaceWith(h('span', {}, ...a.childNodes));
+        }
+    }
+    for (const a of content.querySelectorAll('a[target="_blank"]')) a.append(visuallyHidden(' (opens in a new tab)'));
+    for (const block of content.querySelectorAll('.guide-code')) {
+        const code = block.querySelector('code');
+        const copy = button('Copy', async () => {
+            try {
+                await navigator.clipboard.writeText(code.textContent);
+                copy.textContent = 'Copied';
+            } catch (e) {
+                copy.textContent = 'Copy failed';
+                copy.title = String(e.message || e);
+            }
+            setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+        }, {className: 'small copy'});
+        copy.setAttribute('aria-label', 'Copy the code');
+        block.append(copy);
+    }
+}
+
+function scrollGuideToHash(view) {
+    let target = null;
+    if (location.hash.length > 1) {
+        try {
+            target = view.querySelector(`.guide-content [id="${CSS.escape(decodeURIComponent(location.hash.slice(1)))}"]`);
+        } catch (e) {
+            target = null;
+        }
+    }
+    if (target) target.scrollIntoView({block: 'start'});
+    else view.scrollTop = 0;
+}
+
+function onGuideClick(e) {
+    const tab = e.target.closest('.guide-tabs [role="tab"]');
+    if (tab) {
+        selectGuideTab(tab);
+        return;
+    }
+    /// Anchors of the same page: scroll there and keep the anchor in the address, without rendering the page again.
+    const a = e.target.closest('a[href^="#"]');
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    history.pushState(null, '', `${location.pathname}${location.search}${a.getAttribute('href')}`);
+    scrollGuideToHash($('admin-view'));
+}
+
+function selectGuideTab(tab) {
+    const list = tab.parentElement;
+    for (const other of list.querySelectorAll('[role="tab"]')) {
+        const selected = other === tab;
+        other.setAttribute('aria-selected', String(selected));
+        other.tabIndex = selected ? 0 : -1;
+        $(other.getAttribute('aria-controls')).hidden = !selected;
+    }
+}
+
+function onGuideTabKey(e) {
+    const tab = e.target.closest('.guide-tabs [role="tab"]');
+    if (!tab || (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft')) return;
+    const tabs = [...tab.parentElement.querySelectorAll('[role="tab"]')];
+    const next = tabs[(tabs.indexOf(tab) + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    e.preventDefault();
+    selectGuideTab(next);
+    next.focus();
+}
+
+function renderGuidePager(guide, key) {
+    const keys = guide.groups.flatMap(g => g.pages);
+    const index = keys.indexOf(key);
+    const link = (target, label, className) => target ? h('a', {href: guidePath(target), dataset: {route: ''}, className},
+        h('span', {className: 'note'}, label), guide.pages[target].sidebar_title) : null;
+    return h('nav', {className: 'guide-pager', 'aria-label': 'Previous and next pages'},
+        link(keys[index - 1], 'Previous', 'previous'), link(keys[index + 1], 'Next', 'next'));
+}
+
+function renderGuideNav(guide, current) {
+    const results = h('div', {className: 'guide-results', 'aria-live': 'polite'});
+    const groups = h('div', {className: 'guide-groups'}, guide.groups.map((group, k) => {
+        const id = `guide-group-${k}`;
+        return [group.title ? h('h2', {id}, group.title) : null,
+            h('ul', {'aria-labelledby': group.title ? id : null}, group.pages.map(key => h('li', {},
+                h('a', {href: guidePath(key), dataset: {route: ''}, 'aria-current': key === current ? 'page' : null}, guide.pages[key].sidebar_title))))];
+    }));
+    const nav = h('nav', {className: 'guide-nav', 'aria-label': 'Console Guide'});
+    const toggle = button('Pages of the guide', () => {
+        const open = nav.classList.toggle('open');
+        toggle.setAttribute('aria-expanded', String(open));
+    }, {className: 'small guide-toggle'});
+    toggle.setAttribute('aria-expanded', 'false');
+    const search = h('input', {type: 'search', placeholder: 'Search the guide', 'aria-label': 'Search the guide', value: guide_query});
+    const update = () => {
+        guide_query = search.value;
+        renderGuideResults(guide, results, groups);
+    };
+    search.addEventListener('input', update);
+    search.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && search.value) {
+            e.stopPropagation();
+            search.value = '';
+            update();
+        }
+    });
+    put(nav, search, results, toggle, groups);
+    renderGuideResults(guide, results, groups);
+    return nav;
+}
+
+function renderGuideResults(guide, results, groups) {
+    const terms = guide_query.toLowerCase().split(/\s+/).filter(Boolean);
+    groups.hidden = terms.length > 0;
+    if (!terms.length) {
+        results.replaceChildren();
+        return;
+    }
+    if (!guide_index) {
+        guide_index = Object.entries(guide.pages).map(([key, page]) => {
+            const template = document.createElement('template');
+            template.innerHTML = page.html;
+            const text = template.content.textContent.replace(/\s+/g, ' ');
+            return {key, title: page.sidebar_title, title_lower: `${page.title} ${page.sidebar_title}`.toLowerCase(), text, text_lower: text.toLowerCase()};
+        });
+    }
+    const matches = [];
+    for (const entry of guide_index) {
+        if (!terms.every(term => entry.title_lower.includes(term) || entry.text_lower.includes(term))) continue;
+        const score = terms.reduce((sum, term) => sum + (entry.title_lower.includes(term) ? 100 : 0) + entry.text_lower.split(term).length - 1, 0);
+        matches.push({entry, score});
+    }
+    matches.sort((a, b) => b.score - a.score);
+    if (!matches.length) {
+        results.replaceChildren(h('p', {className: 'note'}, 'No page matches.'));
+        return;
+    }
+    results.replaceChildren(h('p', {className: 'note'}, matches.length === 1 ? '1 page' : `${matches.length} pages`),
+        h('ul', {}, matches.slice(0, 25).map(({entry}) => h('li', {},
+            h('a', {href: guidePath(entry.key), dataset: {route: ''}}, entry.title, guideSnippet(entry, terms))))));
+}
+
+/// Where the first term appears in the text of a page, with the terms marked.
+function guideSnippet(entry, terms) {
+    const at = Math.min(...terms.map(term => entry.text_lower.indexOf(term)).filter(i => i >= 0));
+    if (!Number.isFinite(at)) return null;
+    const start = Math.max(0, at - 40);
+    const text = (start ? '…' : '') + entry.text.slice(start, at + 80).trim() + '…';
+    const snippet = h('span', {className: 'snippet'});
+    const pattern = new RegExp(`(${terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'ig');
+    for (const [k, part] of text.split(pattern).entries()) snippet.append(k % 2 ? h('mark', {}, part) : part);
+    return snippet;
+}
+
 const ADMIN_PAGES = {};
 
 function showAdmin(c, route) {
