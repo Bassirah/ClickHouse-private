@@ -13,7 +13,7 @@
 /// Dana-Ldap-Pw-1 and Eli-Ldap-Pw-1, under ou=users,dc=example,dc=org; groups are under ou=groups,dc=example,dc=org.
 
 import {chromium} from 'playwright';
-import {execFileSync} from 'node:child_process';
+import {execFileSync, spawn} from 'node:child_process';
 import {mkdirSync, rmSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
 
@@ -30,6 +30,9 @@ const LDAP_PORT = arg('ldap-port', '39636');
 const LDAP_CA = arg('ldap-ca', null);
 const LDAP_CONTAINER = arg('ldap-container', 'console-e2e-ldap');
 const LDAP_ADMIN_PASSWORD = arg('ldap-admin-password', null);
+const LDAP_STARTTLS_PORT = arg('ldap-starttls-port', '39389');
+const POLICY_WORKER = arg('policy-worker', null);
+const CONSOLE_HTML = arg('console-html', null);
 const SCREENSHOTS = arg('screenshots', null);
 if (SCREENSHOTS) mkdirSync(SCREENSHOTS, {recursive: true});
 const COOLDOWN = 3;
@@ -214,6 +217,74 @@ await test('Directory changes reach ClickHouse after the cooldown: a removed gro
     ldapModify(`dn: cn=console-analysts,${GROUPS}\nchangetype: modify\nadd: member\nmember: uid=dana,${USERS}\n`);
     await sleep((COOLDOWN + 2) * 1000);
     check(await sql('SELECT count() FROM e2e_ldap.facts', 'dana', 'Dana-Ldap-Pw-1') === '42', 'dana does not get the role back');
+});
+
+/// One cycle of the access policy worker, reading the attributes from the directory (asynchronous: a blocked event loop
+/// would keep the HTTP client from seeing the server close its idle connections).
+function policyWorker(env) {
+    return new Promise(resolve => {
+        const child = spawn(process.execPath, [POLICY_WORKER, '--once'], {env: {...process.env, CLICKHOUSE_URL: BASE, CLICKHOUSE_USER: ADMIN_USER,
+            CLICKHOUSE_PASSWORD: ADMIN_PASSWORD, CONSOLE_HTML, LDAP_ATTRIBUTES_BIND_DN: 'cn=admin,dc=example,dc=org', LDAP_ATTRIBUTES_PASSWORD: LDAP_ADMIN_PASSWORD,
+            LDAP_ATTRIBUTES_BASE_DN: USERS, LDAP_ATTRIBUTES_MAP: 'department=departmentNumber', ...env}});
+        let output = '';
+        child.stdout.on('data', d => { output += d; });
+        child.stderr.on('data', d => { output += d; });
+        child.on('close', exit => resolve({exit, output}));
+    });
+}
+
+const ldaps = {LDAP_ATTRIBUTES_URL: `ldaps://127.0.0.1:${LDAP_PORT}`, LDAP_ATTRIBUTES_CA_FILE: LDAP_CA};
+const departments = async () => Object.fromEntries((await sql(`SELECT user_name, value FROM console_admin.dap_user_attributes FINAL
+    WHERE NOT deleted AND source = 'ldap' AND attribute = 'department' ORDER BY user_name FORMAT TSV`)).split('\n').filter(Boolean).map(line => line.split('\t')));
+
+await test('Data Access Policies read user attributes from the directory: values, changes, and leavers follow it, over LDAPS and StartTLS', async () => {
+    check(POLICY_WORKER && CONSOLE_HTML, 'give --policy-worker and --console-html (run_e2e.sh does)');
+    await signIn(ADMIN_USER, ADMIN_PASSWORD);
+    await page.evaluate(() => { history.pushState(null, '', '/console/admin-data-access?tab=attributes'); dispatchEvent(new PopStateEvent('popstate')); });
+    await until(() => page.evaluate(() => !document.querySelector('#admin-view .spinner')), 30000, 'the page');
+    const setup = view().locator('button', {hasText: 'Set up'});
+    if (await setup.count()) {
+        await setup.first().click();
+        await dialog().locator('.dialog-actions button.primary').last().click();
+        await dialog().locator('.dialog-actions button', {hasText: 'Close'}).waitFor({timeout: 60000});
+        await page.evaluate(() => document.getElementById('admin-dialog').close());
+    }
+    const defined = await sql(`INSERT INTO console_admin.dap_attributes (attribute, category, dynamic, source, writer, owner, max_age_seconds, description)
+        VALUES ('department', 'user', false, 'ldap', '${ADMIN_USER}', 'e2e', 86400, 'From the LDAP directory')`);
+    check(!code(defined), `attribute not defined: ${defined}`);
+    ldapModify(`dn: uid=dana,${USERS}\nchangetype: modify\nadd: departmentNumber\ndepartmentNumber: finance\n`);
+    ldapModify(`dn: uid=eli,${USERS}\nchangetype: modify\nadd: departmentNumber\ndepartmentNumber: sales\n`);
+
+    const first = await policyWorker(ldaps);
+    check(/attribute feed imported/.test(first.output), `LDAPS import: ${first.output.slice(-600)}`);
+    const imported = await departments();
+    check(imported.dana === 'finance' && imported.eli === 'sales', `imported: ${JSON.stringify(imported)}`);
+    await page.reload();
+    await page.waitForSelector('#login-user, #shell:not([hidden])');
+    await signIn(ADMIN_USER, ADMIN_PASSWORD);
+    await page.evaluate(() => { history.pushState(null, '', '/console/admin-data-access?tab=attributes'); dispatchEvent(new PopStateEvent('popstate')); });
+    await until(() => page.evaluate(() => !document.querySelector('#admin-view .spinner')), 30000, 'the page');
+    const tab = await view().innerText();
+    check(tab.includes('finance') && tab.includes('ldap'), 'the Attributes tab does not show the values from the directory');
+    await screenshot('l04-attributes');
+
+    /// A change and a leaver, read over StartTLS on the plain port.
+    ldapModify(`dn: uid=eli,${USERS}\nchangetype: modify\nreplace: departmentNumber\ndepartmentNumber: marketing\n`);
+    ldapModify(`dn: uid=dana,${USERS}\nchangetype: modify\ndelete: departmentNumber\n`);
+    const second = await policyWorker({LDAP_ATTRIBUTES_URL: `ldap://127.0.0.1:${LDAP_STARTTLS_PORT}`, LDAP_ATTRIBUTES_STARTTLS: '1', LDAP_ATTRIBUTES_CA_FILE: LDAP_CA});
+    check(/attribute feed imported/.test(second.output), `StartTLS import: ${second.output.slice(-600)}`);
+    const changed = await departments();
+    check(changed.eli === 'marketing' && changed.dana === undefined, `after the changes: ${JSON.stringify(changed)}`);
+});
+
+await test('The worker refuses plain LDAP, an untrusted certificate, and a search that finds nobody, and keeps the values', async () => {
+    const plain = await policyWorker({LDAP_ATTRIBUTES_URL: `ldap://127.0.0.1:${LDAP_STARTTLS_PORT}`});
+    check(/needs StartTLS/.test(plain.output), `plain LDAP: ${plain.output.slice(-400)}`);
+    const untrusted = await policyWorker({LDAP_ATTRIBUTES_URL: `ldaps://127.0.0.1:${LDAP_PORT}`});
+    check(/attribute feed failed/.test(untrusted.output) && /certificate|self.signed/i.test(untrusted.output), `untrusted certificate: ${untrusted.output.slice(-400)}`);
+    const nobody = await policyWorker({...ldaps, LDAP_ATTRIBUTES_FILTER: '(uid=nobody-at-all)'});
+    check(/refusing to remove them all/.test(nobody.output), `empty search: ${nobody.output.slice(-400)}`);
+    check((await departments()).eli === 'marketing', 'a refused import changed the values');
 });
 
 await test('Users managed here keep working, and a local user of the same name comes first', async () => {

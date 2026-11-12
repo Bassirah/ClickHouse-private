@@ -1,0 +1,22 @@
+# User attributes for Data Access Policies from an LDAP directory, read by the access policy worker instead of a
+# feed file (README.md, "Attributes from the directory"). Use it with compose.yaml:
+#
+#   docker compose -f compose.yaml -f compose.ldap-attributes.yaml up -d access-policy-worker
+#
+# Put the certificate authority of the directory in ldap/ca.crt, and the password of a read-only service account of
+# the directory in ldap/password (mode 600, readable by the worker's user, 1000).
+services:
+  access-policy-worker:
+    environment:
+      ATTRIBUTE_FEED: ""
+      LDAP_ATTRIBUTES_URL: ${LDAP_ATTRIBUTES_URL:?set LDAP_ATTRIBUTES_URL in .env, for example ldaps://ldap.example.com}
+      LDAP_ATTRIBUTES_STARTTLS: ${LDAP_ATTRIBUTES_STARTTLS:-0}
+      LDAP_ATTRIBUTES_CA_FILE: /etc/clickhouse-console/ldap/ca.crt
+      LDAP_ATTRIBUTES_BIND_DN: ${LDAP_ATTRIBUTES_BIND_DN:?set LDAP_ATTRIBUTES_BIND_DN in .env}
+      LDAP_ATTRIBUTES_PASSWORD_FILE: /etc/clickhouse-console/ldap/password
+      LDAP_ATTRIBUTES_BASE_DN: ${LDAP_ATTRIBUTES_BASE_DN:?set LDAP_ATTRIBUTES_BASE_DN in .env}
+      LDAP_ATTRIBUTES_FILTER: ${LDAP_ATTRIBUTES_FILTER:-(objectClass=person)}
+      LDAP_ATTRIBUTES_USER: ${LDAP_ATTRIBUTES_USER:-uid}
+      LDAP_ATTRIBUTES_MAP: ${LDAP_ATTRIBUTES_MAP:?set LDAP_ATTRIBUTES_MAP in .env, for example department=departmentNumber}
+    volumes:
+      - ./ldap:/etc/clickhouse-console/ldap:ro
