@@ -788,6 +788,57 @@ await test('Console Guide: deep links survive the sign-in, search, links between
     await context.close();
 });
 
+await test('Console Guide home: a card for every page by section, cards open their page, search replaces the sections', async () => {
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await page.click('#sidebar a[data-component="guide"]');
+    await page.waitForSelector('#admin-view .guide-landing .guide-card');
+    const guide = await page.evaluate(async () => (await fetch('/console/guide.json')).json());
+    const grouped = guide.groups.filter(g => g.title);
+    const sections = await page.$$eval('.guide-section', list => list.map(s => ({
+        title: s.querySelector('h2').textContent,
+        cards: [...s.querySelectorAll('.guide-card h3 a')].map(a => a.getAttribute('href')),
+    })));
+    for (const group of grouped) {
+        const section = sections.find(s => s.title === group.title);
+        check(section && JSON.stringify(section.cards) === JSON.stringify(group.pages.map(key => `/console/guide/${key}`)),
+            `cards of ${group.title}: ${JSON.stringify(section)}`);
+    }
+    check(sections.some(s => s.title === 'More resources'), 'no More resources');
+    const primary = await page.getAttribute('.guide-get-started a.button.primary', 'href');
+    check(primary === '/console/guide/quick-start', `primary action: ${primary}`);
+    /// Each card is one link: the title, stretched over the card.
+    check(await page.evaluate(() => [...document.querySelectorAll('.guide-section .guide-card')].every(card => card.querySelectorAll('a').length === 1)),
+        'a card with more than one link');
+
+    /// A click anywhere on a card opens its page, inside the console.
+    const card = await page.$('.guide-card:has(a[href="/console/guide/how-to/offboard-a-user"])');
+    await card.scrollIntoViewIfNeeded();
+    const box = await card.boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height - 12);
+    await waitUntil(page, () => location.pathname === '/console/guide/how-to/offboard-a-user' && document.querySelector('.guide-article'));
+    await page.click('.guide-home-link');
+    await page.waitForSelector('.guide-landing');
+
+    /// The keyboard reaches a card and opens it.
+    await page.focus('.guide-card a[href="/console/guide/reference/privileges"]');
+    await page.keyboard.press('Enter');
+    await waitUntil(page, () => location.pathname === '/console/guide/reference/privileges');
+    await page.click('.admin-head .crumbs a');
+    await page.waitForSelector('.guide-landing');
+
+    await page.fill('#guide-landing-search', 'offboard');
+    await page.waitForSelector('.guide-landing-results li a');
+    check(await page.isHidden('.guide-sections'), 'the sections are shown with search results');
+    check(await page.$('.guide-landing-results a[href="/console/guide/how-to/offboard-a-user"]'), 'no search result for offboard');
+    await page.fill('#guide-landing-search', '');
+    check(await page.isVisible('.guide-sections'), 'the sections do not come back when the search is cleared');
+    await screenshot(page, '16-guide-home');
+    await context.close();
+});
+
 await test('Legacy pages and links keep working on their own', async () => {
     const {context, page} = await newContext();
     await page.goto(`${BASE}/ui`);
