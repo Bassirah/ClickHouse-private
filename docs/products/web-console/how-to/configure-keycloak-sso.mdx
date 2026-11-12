@@ -1,0 +1,259 @@
+---
+description: 'Set up single sign-on with Keycloak for a Docker Compose deployment of the web console: the clients in Keycloak, the token authenticator, the user sync, verification, and troubleshooting.'
+sidebarTitle: 'Configure Keycloak SSO'
+slug: /web-console/how-to/configure-keycloak-sso
+title: 'Configure single sign-on with Keycloak'
+doc_type: 'guide'
+---
+
+Use this guide to let users sign in to the console, and to ClickHouse, with Keycloak, in a deployment made with
+[Docker Compose](/products/web-console/how-to/deploy-with-docker-compose). The console signs users in as a public
+client, with the Authorization Code flow and PKCE, and sends the access token to the server as the password. The token
+authenticator (`sso-authenticator` in the tools image) checks it for the server, and its user sync creates the users
+from the groups `clickhouse-<role>`. Passwords and LDAP keep working next to it.
+
+For the model and its limits, see [SSO (Keycloak)](/products/web-console/guides/identity-providers#sso). To try it on a
+test machine first, follow the [single sign-on tutorial](/products/web-console/tutorials/single-sign-on).
+
+## Before you begin {#before-you-begin}
+
+- A deployment from `compose.yaml`, running, with Component Access set up (it creates `console_admin` and the role
+  `console_admin_reader`).
+- The console served over HTTPS at its final address, `https://<console>` below, for example through a reverse proxy
+  that terminates TLS. The access token is a password: it must not travel over plain HTTP.
+- A Keycloak server reachable over HTTPS from the browsers and from the Docker host, with a realm for ClickHouse, for
+  example `clickhouse`, and an administrator of that realm. Its issuer is
+  `https://<keycloak>/realms/clickhouse`.
+
+## Configure Keycloak {#configure-keycloak}
+
+<Steps>
+<Step title="Create the client of the console">
+
+In the realm, create an OpenID Connect client `clickhouse-console`:
+
+| Setting | Value |
+|---|---|
+| Client authentication | Off (a public client: no secret in the browser). |
+| Authentication flow | **Standard flow** only; no implicit flow, no direct access grants. |
+| Proof Key for Code Exchange method (Advanced settings) | `S256` |
+| Valid redirect URIs | `https://<console>/console/oidc-callback` |
+| Valid post logout redirect URIs | `https://<console>/console/login` |
+| Web origins | `https://<console>` |
+
+Add two mappers to the client (its dedicated client scope):
+
+- **Group Membership**, named `groups`, with the token claim name `groups` and **Full group path** off.
+- **Audience**, with the included client audience `clickhouse-console`, added to the access token.
+
+The access tokens last 5 minutes by default; the console refreshes them.
+
+</Step>
+<Step title="Create the client of the user sync">
+
+Create a second client, `clickhouse-sso-sync`: client authentication on (confidential), with only **Service accounts
+roles** as the flow. On its service account, assign the roles `view-users` and `query-groups` of the client
+`realm-management`. Copy its client secret.
+
+Skip this step if you create the users yourself; then leave `SSO_SYNC_CLIENT_ID` empty below.
+
+</Step>
+<Step title="Create the groups">
+
+Create a group `clickhouse-<role>` for each ClickHouse role that single sign-on gives, for example
+`clickhouse-analysts` for the role `analysts`, and add the users. Groups without the prefix are ignored.
+
+</Step>
+</Steps>
+
+## Configure ClickHouse {#configure-clickhouse}
+
+<Steps>
+<Step title="Create the roles">
+
+Create the roles the groups stand for, on the server, with **Roles & Permissions** or with SQL:
+
+```sql
+CREATE ROLE analysts;
+GRANT SELECT ON sales.* TO analysts;
+```
+
+</Step>
+<Step title="Create the account of the sync">
+
+The sync signs in to the server as `sso_sync`. Create it with `service-accounts.sql`: uncomment the section of
+`sso_sync`, put its password in `.env` (`SSO_SYNC_PASSWORD`), and pass `--param_sso_pw="$SSO_SYNC_PASSWORD"`, as described in [Create the service accounts](/products/web-console/how-to/create-service-accounts).
+Then let it grant the roles of the groups and the default roles, and only those:
+
+```sql
+GRANT analysts, console_admin_reader TO sso_sync WITH ADMIN OPTION;
+```
+
+Checking tokens needs no account: only the sync does.
+
+</Step>
+<Step title="Store the secret of the sync client">
+
+In the deployment directory:
+
+```bash
+mkdir -p sso
+printf '%s' '<client secret of clickhouse-sso-sync>' > sso/sync-secret
+chmod 600 sso/sync-secret && sudo chown 1000 sso/sync-secret
+```
+
+The file must be readable by the user 1000 of the container.
+
+</Step>
+<Step title="Set the variables in .env">
+
+```bash
+SSO_NAME=Keycloak
+SSO_ISSUER=https://<keycloak>/realms/clickhouse
+SSO_CLIENT_ID=clickhouse-console
+SSO_SYNC_CLIENT_ID=clickhouse-sso-sync
+SSO_SYNC_PASSWORD=<password of sso_sync>
+SSO_ROLE_PREFIX=clickhouse-
+SSO_DEFAULT_ROLES=console_admin_reader
+```
+
+`SSO_ISSUER` must be exactly the issuer that Keycloak reports, without a trailing slash. An empty
+`SSO_SYNC_CLIENT_ID` turns the sync off. Further settings of the authenticator, such as `SSO_USERNAME_CLAIM` and
+`SSO_SYNC_INTERVAL_SECONDS`, are listed in [Helper processes](/products/web-console/reference/helper-processes#sso-authenticator).
+
+</Step>
+</Steps>
+
+## Start the token authenticator {#start-the-token-authenticator}
+
+`compose.sso.yaml` adds the service `sso-authenticator` and mounts `config.d/sso.xml` into the server. That file
+declares the authenticator as the HTTP authentication server `sso`, and sets what the sign-in page offers, from the
+environment of the server container:
+
+```xml
+<clickhouse>
+    <http_authentication_servers>
+        <sso>
+            <uri>http://sso-authenticator:29700/</uri>
+            <connection_timeout_ms>1000</connection_timeout_ms>
+            <receive_timeout_ms>2000</receive_timeout_ms>
+            <send_timeout_ms>1000</send_timeout_ms>
+            <max_tries>2</max_tries>
+        </sso>
+    </http_authentication_servers>
+    <web_console>
+        <sso_name from_env="SSO_NAME"/>
+        <sso_issuer from_env="SSO_ISSUER"/>
+        <sso_client_id from_env="SSO_CLIENT_ID"/>
+    </web_console>
+</clickhouse>
+```
+
+A refused token is an answer, not a failure: `max_tries` retries only connection errors, briefly.
+
+1. Check the configuration. The command loads the provider's keys and prints the settings:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.sso.yaml run --rm sso-authenticator sso-authenticator --check-config
+   ```
+
+   It prints a JSON object with `issuer`, `client_id`, `audience`, `username_claim`, `token_type`, the number of
+   `keys`, and `sync` (the sync client, the server name `sso`, the role prefix, and the default roles, or `null`
+   without the sync). It fails when the issuer cannot be reached or reports another issuer.
+
+2. Start it, and restart the server with the new file:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.sso.yaml up -d
+   ```
+
+3. Read its log:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.sso.yaml logs sso-authenticator
+   ```
+
+   It shows `keys loaded`, `listening`, and, every interval, `users synced` with the number of members and changes.
+
+Use both files in every later `docker compose` command, or the next `up -d` removes single sign-on.
+
+The authenticator listens on port 29700 of the Compose network only, and the port is not published: only the server
+should reach it.
+
+## Verify {#verify}
+
+1. Check the users the sync created:
+
+   ```sql
+   SELECT name FROM system.users WHERE has(auth_type, 'http');
+   ```
+
+2. Open `https://<console>/console`. The sign-in page shows **Sign in with Keycloak** below the password form. Select
+   it and sign in as a member of a `clickhouse-<role>` group: the console opens its home page.
+3. As an administrator, open **Identity Providers → SSO (Keycloak)**. Select **Set up** if the page asks for it, then
+   **Add Keycloak…** with the Keycloak URL `https://<keycloak>`, the realm `clickhouse`, and the client ID
+   `clickhouse-console`.
+4. Select **Test connection**: every check is **OK**.
+5. Select **Test sign-in…**, and sign in as a user in the window. The result shows the user, the groups, the roles they
+   would get, the ClickHouse user, and an access token usable by the server.
+6. In the **Signing in to ClickHouse** box, **Sign-in page** shows the issuer and the client of `.env`, and **Users of
+   single sign-on** lists the synced users.
+
+## Troubleshooting {#troubleshooting}
+
+### The token authenticator refused a sign-in {#refused-sign-in}
+
+The sign-in page says that Keycloak signed the user in, but that the server did not accept the sign-in. The
+authenticator logs a `refused` line with the user and the reason (never the token):
+
+| Reason in the log | Cause and fix |
+|---|---|
+| `token type <type>, not an access token` | The password is not an access token, for example an ID token. With another provider, set `SSO_TOKEN_TYPE`. |
+| `issued to <client>, not clickhouse-console` | The token was issued to another client (`azp`). Check `SSO_CLIENT_ID` and the client the sign-in page uses. |
+| `audience does not include clickhouse-console` | The client has no Audience mapper for itself on the access token. Add it (see [Configure Keycloak](#configure-keycloak)). |
+| `expired` | The token expired, more than 30 seconds ago. Check the clocks of the hosts. A panel that keeps its first token (the SQL Console, the Web Terminal, ClickStack) needs a reload. |
+| `the claim preferred_username is not the user name` | The user signed in under another name than the claim. The console uses the claim of the ID token; check that `SSO_USERNAME_CLAIM` and `web_console.sso_username_claim` name the same claim. |
+| `unknown key <kid>` | The token is signed with a key the provider does not publish (any more). The keys are fetched again at most every 30 seconds: sign in again. |
+| `issuer <issuer>` | The token comes from another issuer than `SSO_ISSUER`. See [Issuer mismatch](#issuer-mismatch). |
+| `invalid signature`, `algorithm <alg> is not accepted` | The token is not signed by the provider with RS256, PS256, or ES256. |
+
+A `cannot check the token` line means that the provider's keys could not be fetched: the authenticator refuses every
+sign-in until they can be.
+
+### The user does not exist {#the-user-does-not-exist}
+
+The sign-in page says: `Keycloak signed you in as <user>, but the server did not accept the sign-in. The user <user>
+must exist on the server, identified with the token authenticator (IDENTIFIED WITH http), and the authenticator must be
+running.` When the log has no `refused` line for the user, the user does not exist or is not identified with `http`:
+
+- the user is not an enabled member of a `clickhouse-<role>` group, or the sync has not run yet (60 seconds by default);
+- the log shows `a user of that name exists with another authentication: skipped`: a user with a password or another
+  method has that name, and the sync never changes it; give SSO users their own names;
+- the log shows `sync failed`: for example `the provider shows no group clickhouse-*`, which means a wrong prefix, a
+  wrong realm, or a service account that cannot see the groups (it needs `query-groups` and `view-users`);
+- `roles that do not exist are skipped`: create the roles, or the user gets nothing from them.
+
+### The sign-in window does not open {#pop-up-blocked}
+
+The page shows `The browser blocked the sign-in window: allow pop-ups for this page, and try again.` Allow pop-ups for
+the address of the console.
+
+### The token request is blocked {#web-origin}
+
+`The token request was blocked. Add https://<console> (or +) to the web origins of the client clickhouse-console.` The
+browser fetches the tokens from Keycloak directly, which Keycloak allows only for the client's web origins (CORS). Add
+the origin of the console, exactly as the browser shows it: scheme, host, and port. A discovery error that mentions
+CORS has the same cause, or Keycloak cannot be reached.
+
+### Issuer mismatch {#issuer-mismatch}
+
+**Test connection** reports `The provider reports the issuer <A>, not <B>: tokens would be refused. Check the hostname
+setting of Keycloak (KC_HOSTNAME).`, and the authenticator logs `cannot load the keys of the provider yet` with the
+error `the provider reports the issuer <A>, not <B>`. Keycloak builds its issuer from its hostname setting, so the issuer must be the same for the browsers and
+for the authenticator. Set `KC_HOSTNAME` of Keycloak to its public HTTPS address, and `SSO_ISSUER` to
+`<that address>/realms/<realm>`.
+
+### The session ends {#the-session-ends}
+
+`Your Keycloak session has ended (<reason>): sign in again. All panels were closed.` Keycloak refused to refresh the
+token: the session ended there, or the user was disabled. This is how access ends after a change in Keycloak.

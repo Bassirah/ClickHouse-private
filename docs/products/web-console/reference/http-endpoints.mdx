@@ -1,0 +1,310 @@
+---
+description: 'The HTTP paths of the web console, its routes and component IDs, /console/config.json, the OpenID Connect callback, the embedding contract of the panels, and the requests the console sends.'
+sidebarTitle: 'HTTP endpoints'
+slug: /web-console/reference/http-endpoints
+title: 'Web console HTTP endpoints and embedding contract'
+doc_type: 'reference'
+---
+
+The console is one HTML page, `programs/server/console.html`, embedded into the `clickhouse` binary and served by
+`ConsoleWebUIRequestHandler`. Everything under `/console` returns that page, except `/console/config.json`; the page
+reads its route from the address and renders it in the browser. This page lists the paths, the routes, the component
+IDs, and the contract between the console and the pages it embeds. For the response headers and the `console` handler,
+see [Configuration](/products/web-console/reference/configuration#http-handlers).
+
+## Server paths {#server-paths}
+
+| Path | Methods | Response |
+|---|---|---|
+| `/console`, `/console/...`, `/console?...`, `/console#...` | `GET`, `HEAD` | The console page, `text/html; charset=UTF-8`, `200`. Unknown paths under `/console` also return the page, which shows **Page not found**. |
+| `/console/config.json` | `GET`, `HEAD` | The `web_console` configuration as JSON, `application/json; charset=UTF-8`, `200`. See [`/console/config.json`](#config-json). |
+| `/console/oidc-callback` | `GET`, `HEAD` | The console page. In the browser it runs only the callback of a sign-in window. See [`/console/oidc-callback`](#oidc-callback). |
+
+No path needs credentials: the page and the configuration are public. Every query the page runs is authorized by the
+server with the credentials of the signed-in user.
+
+## Routes {#routes}
+
+The page parses `location.pathname` after `/console` (`parseRoute`), without leading and trailing `/`:
+
+| Route | Meaning |
+|---|---|
+| `/console` | Opens `/console/home` when signed in, otherwise the sign-in page. |
+| `/console/login` | The sign-in page. |
+| `/console/login?next=<component id>` | The sign-in page; after sign-in, the console opens that component. `next` is accepted only when it is an ID of the [component registry](#component-ids) other than `home`, so it can never point outside the console. Signing in shows **Sign in to open** followed by the title of the component. |
+| `/console/<component id>` | The component, for example `/console/merges` or `/console/admin-users`. |
+| `/console/<component id>?tab=<tab>` | The component with one of its tabs. |
+| `/console/<administration page id>/<name>` | One object of an administration page: one more path segment, URL-encoded, without `/`. |
+| `/console/<administration page id>/<name>?tab=<tab>` | The same, on one of its tabs, for example `/console/admin-users/alice?tab=roles`. |
+| `/console/oidc-callback` | The redirect URI of OpenID Connect sign-ins. |
+| Anything else | **Page not found**. |
+
+When nobody is signed in, every route except `/console/login` is replaced in the history by
+`/console/login?next=<component id>` (for a component route) or `/console/login`. After sign-in, the console replaces
+the address with `/console/home` or the `next` component. Navigation between components adds history entries, so the
+browser's Back and Forward buttons move between them.
+
+### Objects and tabs of the administration pages {#objects-and-tabs}
+
+| Component ID | Object segment | `tab` values (the first is the default) |
+|---|---|---|
+| `admin-users` | A user name | `overview`, `roles`, `privileges`, `limits`, `components`, `audit` |
+| `admin-roles` | A role name | `privileges`, `roles`, `members`, `limits`, `components` |
+| `admin-data-access` | None | `columns`, `rows`, `effective`, `tests`, `attributes`, `rules`, `deployments` |
+| `admin-access` | None | `all` (the default), `role:<name>`, or `user:<name>`: the subject of the policy editor |
+| `admin-limits` | None | `profiles`, `quotas` |
+| `admin-audit` | None | `console`, `server`, `decisions`. The parameter `q` fills in the search, for example `?tab=console&q=dap_`. The default is `console` when the user can read the audit log, otherwise `server`. |
+| `admin-backups` | None | `overview`, `backups`, `server`, `restore`, `schedules`, `destinations`, `operations`, `verification` |
+| `admin-clusters` | None | `inventory`, `create`, `register` |
+| `admin-clusters` | A cluster ID (`cluster_id`) | `overview`, `nodes`, `keeper`, `configuration`, `scaling`, `maintenance`, `protection`, `operations`, `retirement` |
+
+An unknown `tab` value opens the default tab.
+
+## Component IDs {#component-ids}
+
+The `COMPONENTS` registry describes every destination; the home page cards and the sidebar are generated from it.
+
+| ID | Category | Title | Kind | Path or configuration key | How it receives the connection |
+|---|---|---|---|---|---|
+| `home` | Home | Home | `home` | `/console/home` | — |
+| `sql` | Workspace | SQL Console | `panel` | `/ui/` | [Form filling](#sql-console) |
+| `dashboard` | Workspace | Dashboard | `panel` | `/dashboard` | [Embedding contract](#embedding-contract) |
+| `clickstack` | Workspace | ClickStack | `panel` | `clickstack_url` | None: its own connection settings |
+| `terminal` | Workspace | Web Terminal | `panel` | `/webterminal` | [Web Terminal messages](#web-terminal-messages) |
+| `binary` | Diagnostics | Binary visualizer | `panel` | `/binary` | Embedding contract |
+| `merges` | Diagnostics | Merges visualizer | `panel` | `/merges` | Embedding contract |
+| `schema` | Diagnostics | Schema visualizer | `panel` | `/schema` | Embedding contract |
+| `jemalloc` | Diagnostics | Jemalloc | `panel` | `/jemalloc` | Embedding contract |
+| `processors-profile` | Diagnostics | Processors profile | `panel` | `/processors-profile` | Embedding contract |
+| `admin-users` | Administration | Users | `admin` | `/console/admin-users` | — |
+| `admin-roles` | Administration | Roles & Permissions | `admin` | `/console/admin-roles` | — |
+| `admin-data-access` | Administration | Data Access Policies | `admin` | `/console/admin-data-access` | — |
+| `admin-access` | Administration | Component Access | `admin` | `/console/admin-access` | — |
+| `admin-limits` | Administration | Profiles & Quotas | `admin` | `/console/admin-limits` | — |
+| `admin-audit` | Administration | Audit Activity | `admin` | `/console/admin-audit` | — |
+| `admin-clusters` | Administration | Clusters | `admin` | `/console/admin-clusters` | — |
+| `admin-backups` | Administration | Backup & Restore | `admin` | `/console/admin-backups` | — |
+| `idp-ldap` | Identity Providers | LDAP | `admin` | `/console/idp-ldap` | — |
+| `idp-sso` | Identity Providers | SSO (Keycloak) | `admin` | `/console/idp-sso` | — |
+| `source` | Resources | Source code | `link` | `source_code_url` | None: opened in a new tab |
+| `documentation` | Resources | Documentation | `link` | `documentation_url` | None: opened in a new tab |
+| `reference` | Resources | Reference | `panel` | `/docs` | Embedding contract |
+| `website` | Resources | Website | `link` | `website_url` | None: opened in a new tab |
+| `cloud` | Resources | Cloud | `link` | `cloud_url` | None: opened in a new tab |
+
+| Kind | Meaning |
+|---|---|
+| `home` | The home page of the console. |
+| `panel` | A page of this server embedded in a same-origin frame of the main area. |
+| `link` | An external destination, opened in a new tab with `noopener` and `noreferrer`. |
+| `admin` | A page rendered by the console itself. |
+
+The panels `sql`, `dashboard`, `clickstack`, `terminal`, and `reference` stay loaded (hidden) when another component is
+selected; the other panels are unloaded and loaded again when they are opened. The Binary visualizer loads Leaflet from
+`cdnjs.cloudflare.com`, and Jemalloc loads uPlot from `cdn.jsdelivr.net`: the console marks them as needing Internet
+access.
+
+Which components a user sees, and the queries the console runs to decide it, are in
+[Privileges](/products/web-console/reference/privileges#pages).
+
+## `/console/config.json` {#config-json}
+
+The page fetches `/console/config.json` once when it loads, without credentials (`credentials: 'omit'`,
+`cache: 'no-store'`). The response is one JSON object with every key of the `web_console` section, as strings, in this
+order, with the configured value or the default. With no `web_console` section, the response is:
+
+```json
+{
+  "source_code_url": "https://github.com/ClickHouse/ClickHouse/",
+  "documentation_url": "https://clickhouse.com/docs/",
+  "website_url": "https://clickhouse.com/",
+  "cloud_url": "https://clickhouse.cloud/",
+  "clickstack_url": "/clickstack/",
+  "admin_database": "console_admin",
+  "backup_s3_endpoints": "",
+  "sso_name": "Keycloak",
+  "sso_issuer": "",
+  "sso_client_id": "",
+  "sso_scopes": "openid profile email",
+  "sso_username_claim": "preferred_username"
+}
+```
+
+The server writes it without spaces or line breaks. A key set to an empty value is returned as `""`. If the request
+fails, the page keeps its built-in defaults for the destination keys and `admin_database`. The meaning of each key is in
+[Configuration](/products/web-console/reference/configuration#web-console).
+
+## `/console/oidc-callback` {#oidc-callback}
+
+`/console/oidc-callback` is the redirect URI of the sign-in window of an OpenID Connect provider: register
+`<console origin>/console/oidc-callback` as a valid redirect URI of the console's client. It is used by
+**Sign in with** on the sign-in page and by the test sign-in on **Identity Providers → SSO (Keycloak)**.
+
+When the provider redirects the window there, the page does not start the console. It:
+
+1. reads the parameters `code`, `state`, `error`, `error_description`, and `iss` from the query string, keeping only
+   those present;
+2. replaces the address with `/console/oidc-callback`, without the query string;
+3. if `state` is present, posts the object of those parameters on the `BroadcastChannel` named `console-oidc`, and
+   closes the channel;
+4. shows **The sign-in has finished: you can close this window.**, and closes the window after 300 milliseconds. Without
+   `state`, it shows **This page receives the answer of an identity provider. Open the console instead.**
+
+The message on `console-oidc`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `code` | String | The authorization code, when the provider accepted the sign-in. |
+| `state` | String | The `state` of the authorization request. The console page that opened the window accepts only a message with the `state` it generated. |
+| `error` | String | The OAuth error, when the provider refused the sign-in. |
+| `error_description` | String | The description of the error, when the provider gave one. |
+| `iss` | String | The issuer that sent the answer (RFC 9207), when the provider sends it. The console refuses an answer whose `iss` is not the issuer of the discovery document. |
+
+The message carries no token and no PKCE verifier: the verifier stays in the memory of the console page that opened the
+window, and the code cannot be exchanged for tokens without it. The opening page waits at most 5 minutes for the
+message; if the window is closed earlier, it reports that the sign-in window was closed before the sign-in finished.
+
+## Embedding contract {#embedding-contract}
+
+The console embeds the pages of the server in same-origin frames and hands them the connection without a URL, browser
+storage, or a message to another origin. Each kind of page has its own mechanism.
+
+### Native pages {#native-pages}
+
+The pages `/dashboard`, `/binary`, `/merges`, `/schema`, `/jemalloc`, `/processors-profile`, and `/docs`
+(`programs/server/{dashboard,binary,merges,schema,jemalloc,processors_profile,docs}.html`) call, once and synchronously
+at startup:
+
+```javascript
+window.parent.clickhouseConsole.getConnection(window)
+```
+
+`window.clickhouseConsole` is a frozen, non-writable object of the console page:
+
+| Member | Value |
+|---|---|
+| `version` | `1` |
+| `getConnection(panel_window)` | The connection, or `null`. |
+
+`getConnection` returns a frozen object only when someone is signed in, and `panel_window` is the window of a frame that
+the console created for a panel of this kind in the current session. Otherwise it returns `null`.
+
+| Field of the result | Meaning |
+|---|---|
+| `url` | URL of the ClickHouse server the console is connected to. |
+| `user` | User name of the session. |
+| `password` | Password of the session, or the current access token after single sign-on. |
+
+A page that is not embedded (`window.parent === window`), or whose parent is of another origin (reading
+`window.parent.clickhouseConsole` throws), does not use the contract and behaves as when it is opened on its own. When
+it receives a connection, the page uses it instead of the one from its own address, and hides its connection fields.
+
+### Credential updates {#console-credentials}
+
+After single sign-on, the console refreshes the access token before it expires: at 70% of its lifetime (`expires_in`,
+300 seconds when the provider does not report it), and at the earliest after 10 seconds. It then posts the new
+credentials to the frame of every native page of the session, with its own origin as the target origin:
+
+```javascript
+{type: 'console-credentials', user: '<user name>', password: '<new access token>'}
+```
+
+Each native page accepts the message only when it received a connection from `getConnection`, the message comes from
+`window.parent` and from its own origin, and `user` is the user of its connection. It then replaces the password it
+uses. The SQL Console, the Web Terminal, and ClickStack do not receive these messages: they keep the token they started
+with until they are reloaded.
+
+### Web Terminal messages {#web-terminal-messages}
+
+`/webterminal` (`programs/server/webterminal.html`) uses `postMessage`. The console sends its messages to the terminal
+frame only, with its own origin as the target origin, and accepts messages only from that frame and from its own origin.
+
+| Message | Direction | When | Effect |
+|---|---|---|---|
+| `{type: 'webterminal-hello'}` | Console to terminal | When the frame has loaded | The terminal remembers the origin of its parent, so that it can post back to it. |
+| `{type: 'webterminal-credentials', user, password}` | Console to terminal | Right after `webterminal-hello` | The terminal connects with these credentials, if it is waiting for them. Embedded without a user in its URL, the terminal waits for this message and shows **Waiting for credentials... (press Enter to log in manually)**. |
+| `{type: 'webterminal-refit', focus: false}` | Console to terminal | When the terminal panel is shown again | The terminal fits its size to the frame, without taking the focus. |
+| `{type: 'webterminal-escape'}` | Terminal to console | The user presses Escape in the terminal | The console moves the focus to the sidebar entry of the terminal, or to the **Console** button when its navigation is hidden. |
+| `{type: 'webterminal-closed'}` | Terminal to console | The `clickhouse-client` session ended after it was open | The console removes the frame and shows **The terminal session ended** with **Reload panel**. |
+
+The terminal accepts messages only from `window.parent`, and only from the same origin, `*.clickhouse.com`, or
+`*.clickhouse.cloud` over HTTPS.
+
+### SQL Console {#sql-console}
+
+The SQL Console (`/ui/`) has no embedding interface. When its frame has loaded, the console:
+
+1. waits up to 20 seconds for the connection form or the connected layout of the SQL Console;
+2. if it is already connected, does nothing more;
+3. otherwise fills in the URL, user, and password fields of the form, and selects its connect button, as a user would;
+4. waits up to 30 seconds for the connected layout, or for the button to become enabled again after it was disabled,
+   which means the connection failed.
+
+On failure, the console clears the password field of the form, and shows a notice above the panel: **Automatic sign-in
+to the SQL Console did not succeed:** followed by the reason (the form did not appear, it has an unexpected layout, it
+did not finish connecting within 30 seconds, or the error it reported). The user can then sign in with the form of the
+SQL Console.
+
+### ClickStack {#clickstack}
+
+ClickStack has its own connection settings, entered in ClickStack on first use; the console does not sign in to it.
+Before it loads ClickStack, the console stores `"closed"` under the local storage key `clickstack-banner-state` of the
+origin, which closes the banner of ClickStack, and shows the banner's message in a popup the first time ClickStack is
+opened after each sign-in, unless **Do not show this again** was selected (local storage key
+`console.clickstack-notice`).
+
+### Navigation away from a panel {#navigation-away}
+
+When the page inside a panel frame navigates to a path outside the panel's own path, for example the **Logout** of the
+SQL Console, which goes to `/`, the console removes the frame and offers **Reload panel**.
+
+## Requests the console sends {#requests}
+
+### Queries {#queries}
+
+Every query is a `POST` to the root of the ClickHouse HTTP interface of the connection (`<server URL>/`), with the SQL
+text as the body:
+
+| Part | Value |
+|---|---|
+| `Content-Type` | `text/plain; charset=UTF-8` |
+| `X-ClickHouse-User` | The user of the session. |
+| `X-ClickHouse-Key` | The password of the session, or the access token after single sign-on. |
+| URL parameters | `param_<name>` for the query parameters, bound by the server (`{name:Type}`); settings by their names; `add_http_cors_header=1` when the server is of another origin than the page. No credential is ever in the URL. |
+| Fetch options | `credentials: 'omit'`, `cache: 'no-store'`, `referrerPolicy: 'no-referrer'` |
+
+The console checks credentials at sign-in with
+`SELECT currentUser() AS user, version() AS version, hostName() AS hostname FORMAT JSON`, which needs no privilege. It
+tells errors apart by the `X-ClickHouse-Exception-Code` header (or `Code:` in the body):
+
+| Codes | Reported as |
+|---|---|
+| `192`, `193`, `194`, `516`, or HTTP `401` without a code | The username or password is incorrect. |
+| `195` | This user is not allowed to connect from your network address. |
+| `497`, `164`, `446`, or HTTP `403` without a code | The user does not have the required permissions. |
+| `60`, `81`, `46` | A required system table or function is not available on this server. |
+| Other | The server returned an error. |
+
+### Route probes {#route-probes}
+
+After sign-in, the console sends `HEAD` requests without credentials to the routes of optional panels: `/webterminal`
+answers `403` when `enable_webterminal` is off, and the ClickStack path answers `404` when the build has no ClickStack
+bundle. For the diagnostic panels, it runs their probe queries with `LIMIT 0` (see
+[Privileges](/products/web-console/reference/privileges#panels)).
+
+### Identity provider requests {#identity-provider-requests}
+
+With single sign-on, the browser also sends, without credentials of ClickHouse:
+
+| Request | To | Purpose |
+|---|---|---|
+| `GET <sso_issuer>/.well-known/openid-configuration` | The provider | Discovery. |
+| Navigation of the sign-in window to the `authorization_endpoint` | The provider | `response_type=code`, `client_id`, `redirect_uri` (`<origin>/console/oidc-callback`), `scope` (`sso_scopes`), `state`, `nonce`, `code_challenge`, `code_challenge_method=S256`. |
+| `POST` to the `token_endpoint`, `grant_type=authorization_code` | The provider | Exchanges the code, with `code_verifier`. |
+| `GET` of the `jwks_uri` | The provider | Keys to verify the ID token and the access token. |
+| `POST` to the `token_endpoint`, `grant_type=refresh_token` | The provider | Refreshes the access token. When the provider refuses, the console signs out and shows that the session has ended. |
+| Navigation to the `end_session_endpoint` | The provider | On sign-out: `client_id`, `id_token_hint`, and `post_logout_redirect_uri` (`<origin>/console/login`). |
+
+The provider must allow the origin of the console as a web origin of the client, or the browser blocks the token
+request. The server then checks the access token through the
+[token authenticator](/products/web-console/reference/token-authenticator-api).

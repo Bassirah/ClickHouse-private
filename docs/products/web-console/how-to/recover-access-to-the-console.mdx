@@ -1,0 +1,114 @@
+---
+description: 'Recover when the console access policy hides components from everyone, when an administrator is suspended, or when no platform administrator is left.'
+sidebarTitle: 'Recover access'
+slug: /web-console/how-to/recover-access-to-the-console
+title: 'Recover access to the console'
+doc_type: 'guide'
+---
+
+Use these procedures when a change locked users out of the console: a policy rule hides components from everyone, an administrator is suspended, or nobody can change the console access policy any more. The console has safeguards against each of these, but a change made with SQL directly can bypass them.
+
+Every procedure works with SQL, from `clickhouse-client` or any other client, because the console stores nothing of its own outside of ordinary ClickHouse users, roles, and tables. The examples use the default console database `console_admin` (the `admin_database` setting; see the [configuration reference](/products/web-console/reference/configuration#web-console)).
+
+## Prerequisites {#prerequisites}
+
+- Access to the server with a user that has the privileges named in each procedure. A user defined in a configuration file (`users.xml` or a file in `users.d`) with `access_management` is the most robust choice: SQL statements cannot change, suspend, or delete it.
+- `clickhouse-client` on the server, or another SQL client.
+
+## The policy hides components from everyone {#the-policy-hides-components-from-everyone}
+
+Symptoms: panels or administration pages are missing from the home page and the sidebar for every user, and their addresses say that the console policy does not allow them.
+
+The **Component Access** page is not governed by the policy. It stays available to the users who can change the policy (`INSERT` on `console_admin.component_policy`) or set it up (`CREATE TABLE` on `console_admin.*`), so a platform administrator can fix the rules there:
+
+1. Sign in as a platform administrator and open **Component Access**.
+2. In **Rules for**, choose **All users**, or the role whose rules caused the problem.
+3. Tick **Open** for the components that must be available again, and select **Save rules**.
+
+With SQL, insert a rule. A new row for the same subject and component replaces the previous one. For example, to allow the SQL Console for everyone again:
+
+```sql
+INSERT INTO console_admin.component_policy (subject_type, subject, component, open, view_data, run_queries, administer)
+VALUES ('all', '', 'sql', 1, 1, 1, 0);
+```
+
+The component names are the IDs of the console's [components](/products/web-console/overview#components), for example `sql`, `dashboard`, `admin-users`, or `idp-sso`.
+
+To turn the policy off without losing the other console data, empty the table. With no rules, the console shows every component to every user:
+
+```sql
+TRUNCATE TABLE console_admin.component_policy;
+```
+
+To turn every console administration feature off, drop the database and the reader role. The console then works as if it was never set up:
+
+```sql
+DROP DATABASE console_admin;
+DROP ROLE console_admin_reader;
+```
+
+<Warning>
+The database also holds the audit log, and, when they are set up, the tables of Data Access Policies, Backup & Restore, Clusters, and Identity Providers. Dropping it removes them all. Back it up first if it must be kept, for example with `BACKUP DATABASE console_admin TO Disk('backups', 'console_admin.zip')` on a server with a `backups` disk configured.
+</Warning>
+
+### Users cannot read the policy {#users-cannot-read-the-policy}
+
+Symptoms: one user, or some users, do not see the governed components, and the home page says that the console access policy could not be read.
+
+The console fails closed when the policy table exists but the user cannot read it. Give the user the reader role as a default role:
+
+```sql
+GRANT console_admin_reader TO alice;
+SET DEFAULT ROLE ALL TO alice;
+```
+
+`SET DEFAULT ROLE ALL` makes every granted role active at sign-in; to keep a narrower list, name the roles instead. Then the user signs out of the console and in again. For users defined in configuration files, grant `SELECT ON console_admin.component_policy` in those files. See [The reader role](/products/web-console/guides/component-access#the-reader-role).
+
+## An administrator is suspended {#an-administrator-is-suspended}
+
+Symptoms: an administrator cannot sign in, and the **Users** page shows the state **Suspended** or **Expired**.
+
+The console suspends a user by making its authentication methods expire. Any user with `ALTER USER` on the suspended user can reactivate it:
+
+1. Sign in as that user and open the suspended user on **Users**.
+2. Select **Reactivate**. The dialog shows the expiry the user had before the suspension, from the audit log. Leave **Credentials expire (optional)** empty for no expiry, or choose a date.
+3. Select **Review**, then **Apply**.
+
+With SQL:
+
+```sql
+ALTER USER alice VALID UNTIL 'infinity';
+```
+
+If no other administrator can sign in, run the statement as a user defined in a configuration file with `access_management`. The console refuses to suspend your own user and the last platform administrator, so this happens only after changes made with SQL directly or by another tool.
+
+## No platform administrator is left {#no-platform-administrator-is-left}
+
+Symptoms: nobody can change the console access policy or the protected accounts, and the **Component Access** page is missing for everyone who needs it.
+
+Platform administrators are the users with `INSERT` on `console_admin.component_policy`. The console refuses to delete or suspend the last of them, to revoke the last role that makes someone one, and to delete such a role, but a `DROP USER`, `REVOKE`, or `DROP ROLE` run directly bypasses these safeguards. To appoint a platform administrator again, run as a user that holds these privileges `WITH GRANT OPTION`, or as a user defined in a configuration file with `access_management`:
+
+```sql
+GRANT SELECT, INSERT ON console_admin.component_policy TO alice;
+GRANT SELECT, INSERT ON console_admin.protected_accounts TO alice;
+GRANT SELECT, INSERT ON console_admin.audit_log TO alice;
+```
+
+If a role was created from the Platform Administrator [role template](/products/web-console/guides/users-and-roles#role-templates) (by default `console_platform_admin`) and still exists, grant it instead:
+
+```sql
+GRANT console_platform_admin TO alice;
+```
+
+## Verify {#verify}
+
+1. Sign in to the console as the affected user. The home page and the sidebar list the components again.
+2. On **Component Access**, the **Platform administrators** section lists at least one user, and **Policy storage** shows the expected state.
+3. On **Audit Activity**, the **Access changes seen by the server** tab shows your statements, marked **Outside the console**. Changes to the policy table with SQL are not access-management statements, so they appear in neither tab: find them in `system.query_log`.
+
+## Prevent it {#prevent-it}
+
+- Keep a break-glass user defined in a configuration file. SQL statements cannot change it, and it does not depend on the console tables.
+- Protect break-glass and service accounts that are created with SQL on the **Component Access** page, so that the console does not delete or suspend them (see [Protected accounts](/products/web-console/guides/users-and-roles#protected-accounts)).
+- Keep at least two platform administrators.
+- Grant `ALTER`, `TRUNCATE`, and `DROP` on the console database only to the server administrators.

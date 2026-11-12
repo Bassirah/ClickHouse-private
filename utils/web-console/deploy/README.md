@@ -7,7 +7,7 @@ ClickHouse server with the web console, and its helper processes, in an environm
 | Image | Contents |
 |---|---|
 | `clickhouse-server-console:<version>` | The official `clickhouse/clickhouse-server` image of the same release, with the server binary of this build, which serves the console at `/console`. Every setting and environment variable of the official image applies. |
-| `clickhouse-console-tools:<version>` | Node.js with the backup worker, the cluster agent (with the `docker` CLI, Compose, and `kubectl`), and the access policy worker. The first argument chooses the process: `backup-worker`, `cluster-agent`, or `access-policy-worker`. |
+| `clickhouse-console-tools:<version>` | Node.js with the backup worker, the cluster agent (with the `docker` CLI, Compose, and `kubectl`), the access policy worker, and the token authenticator of single sign-on. The first argument chooses the process: `backup-worker`, `cluster-agent`, `access-policy-worker`, or `sso-authenticator`. |
 
 The version is `<ClickHouse release>-console.<commit>`; `MANIFEST.txt` lists the commit, the base image digest, and the image IDs.
 
@@ -125,7 +125,7 @@ directory into the worker; its header has the commands. Create the key, copy it 
 
 ```bash
 mkdir -p bundle-keys restore-staging && sudo chown 101:101 bundle-keys restore-staging && sudo chmod 700 bundle-keys restore-staging
-docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker bundle-key-init --key-file /keys/bundle.key
+docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker backup-worker bundle-key-init --key-file /keys/bundle.key
 docker compose -f compose.yaml -f compose.bundles.yaml up -d backup-worker
 ```
 
@@ -246,14 +246,15 @@ roles, and drops the users who left or were disabled. Passwords and LDAP keep wo
    last 5 minutes by default; the console refreshes them.
 2. **The client of the user sync**: a confidential client with only a service account, and the roles `view-users` and
    `query-groups` of `realm-management`. Put its secret in `sso/sync-secret`.
-3. **The account `sso_sync`** in ClickHouse (`service-accounts.sql`), with the roles of the groups `WITH ADMIN OPTION`,
-   and its password in `.env` (`SSO_SYNC_PASSWORD`).
+3. **The account `sso_sync`** in ClickHouse: uncomment its section of `service-accounts.sql`, grant it the roles of the
+   groups `WITH ADMIN OPTION`, put its password in `.env` (`SSO_SYNC_PASSWORD`), and add
+   `--param_sso_pw="$SSO_SYNC_PASSWORD"` to the command of step 2 of "Start with Docker Compose".
 4. **The roles** the groups stand for, on the server: the group `clickhouse-analysts` gives the role `analysts`.
 5. **Start it** with `.env` (`SSO_ISSUER`, `SSO_CLIENT_ID`, `SSO_SYNC_CLIENT_ID`):
 
    ```bash
    docker compose -f compose.yaml -f compose.sso.yaml up -d
-   docker compose -f compose.yaml -f compose.sso.yaml run --rm sso-authenticator --check-config   # issuer, keys, sync
+   docker compose -f compose.yaml -f compose.sso.yaml run --rm sso-authenticator sso-authenticator --check-config   # issuer, keys, sync
    ```
 
    The sign-in page shows **Sign in with Keycloak**. **Identity Providers → SSO (Keycloak)** tests the provider and a

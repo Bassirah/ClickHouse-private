@@ -1,0 +1,172 @@
+---
+description: 'How the Users and Roles & Permissions pages of the web console manage ClickHouse users, roles, and privileges, and how the server authorizes each change.'
+sidebarTitle: 'Users and roles'
+slug: /web-console/guides/users-and-roles
+title: 'Users and roles'
+doc_type: 'guide'
+---
+
+The **Users** and **Roles & Permissions** pages, in the **Administration** category, manage the users, roles, and privileges of the ClickHouse server the console is connected to. They are a front end to the SQL statements `CREATE USER`, `ALTER USER`, `GRANT`, `REVOKE`, and their relatives: the console builds the statements from validated form fields, shows them to you, and runs them with your credentials. The server decides whether each one is allowed.
+
+This page explains the model behind the pages and what each action does. For a step-by-step procedure, see [Offboard a user](/products/web-console/how-to/offboard-a-user) and the tutorial [Your first administrator](/products/web-console/tutorials/first-administrator). For the privileges each page needs, see the [privileges reference](/products/web-console/reference/privileges#pages).
+
+## Identity and authorization model {#identity-and-authorization-model}
+
+The console has no identity store and no server-side session of its own: you sign in as a ClickHouse user, and the password stays in the memory of the browser tab. Every administrative action is a statement such as `CREATE USER` or `GRANT`, built by the console from validated form fields (it never runs SQL typed by the user), and run with your credentials. ClickHouse authorizes each statement:
+
+- Granting a privilege needs that privilege `WITH GRANT OPTION`, so you cannot hand out more than you have.
+- Granting a role needs `ROLE ADMIN`, or that role granted to you `WITH ADMIN OPTION`.
+- User management can be limited to names: `GRANT CREATE USER, ALTER USER, DROP USER ON app_* TO ...` allows managing only the users whose names start with `app_`. The pages then say which names you can manage.
+
+The console asks the server what you can do (with `CHECK GRANT`, and `LIMIT 0` reads of system tables) to decide which pages and buttons to offer. A button you cannot use is disabled, with the reason in its tooltip. The server still checks every statement, so a direct request without the console is rejected in the same way. See the [SQL reference for `CREATE USER`](/sql-reference/statements/create/user) and [`GRANT`](/sql-reference/statements/grant).
+
+A ClickHouse user is a database identity. Creating one does not create an account in ClickStack or in any other separately deployed service, and the console does not synchronize identities with them. ClickHouse does not store e-mail addresses, creation dates, or the time of the last login, so the console does not show them. The last successful login is shown from `system.session_log` when that log is enabled and readable.
+
+### Reviewing and applying a change {#reviewing-and-applying-a-change}
+
+Every change goes through the same steps:
+
+1. A form collects the values, and **Review** validates them.
+2. The review dialog lists the steps, the statements (with passwords replaced by `[HIDDEN]`), and the server or cluster they run on. If the console audit log is not set up, or you cannot write to it, the dialog says that the change is not recorded there.
+3. **Apply** (or **Suspend**, **Delete**, **Revoke** for destructive changes) runs the statements one after another and stops at the first failure.
+4. The result is `Applied.`, `Not applied` (the first statement failed, so nothing changed), or `Partially applied` with the steps that took effect. ClickHouse has no transactions for access entities, so a partial change is not rolled back.
+
+Each change has a correlation ID, which the console sets as the `log_comment` of its statements (`console-admin:<id>`) and writes to the [audit log](/products/web-console/guides/audit-activity).
+
+### Management sources {#management-sources}
+
+Each user and role shows its source, which decides whether SQL can change it:
+
+| Source | Meaning | In the console |
+|---|---|---|
+| **SQL** | Created with SQL, stored on this server. | Editable. |
+| **SQL (replicated)** | Created with SQL, stored in a `replicated` user directory and replicated through Keeper. | Editable. |
+| **SQL (memory)** | Created with SQL and kept in memory only: lost when the server restarts. | Editable. |
+| **Configuration** | Defined in a configuration file (`users.xml`). | Read-only: change it in the file. |
+| **LDAP** | Provided by an LDAP server for the time of a session. | Read-only: manage it in the directory. |
+
+The console does not move users between sources. Users of an LDAP directory appear in the list once they have signed in since the server started; they cannot be suspended or deleted in the console (see [Identity Providers](/products/web-console/guides/identity-providers#ldap)).
+
+Users of single sign-on are SQL users `IDENTIFIED WITH http`, created by the user sync of the token authenticator. The console does not set a password for them, because their credentials are managed outside of ClickHouse. The sync also manages their roles: at each run it grants the roles of their groups in the identity provider and revokes every other role, so a role you assign them in the console does not last. Manage their roles with the groups of the provider (see [Identity Providers](/products/web-console/guides/identity-providers#sso) and the [user sync reference](/products/web-console/reference/token-authenticator-api#user-sync)).
+
+## The Users page {#the-users-page}
+
+The list shows the users of the server, searchable by name and paginated by 50, with these columns:
+
+| Column | Content |
+|---|---|
+| **User** | The name, and the stable ID (UUID). |
+| **Authentication** | The authentication methods. Methods whose credentials live outside of ClickHouse (`ldap`, `kerberos`, `ssl_certificate`, `ssh_key`, `http`, `jwt`) are highlighted. |
+| **Source** | The management source (see [Management sources](#management-sources)). |
+| **Roles** | The granted roles; default roles are marked as active at login. |
+| **Hosts** | The allowed hosts. |
+| **Profiles & quotas** | The settings profiles and quotas that apply. |
+| **State** | **Active**, **Suspended**, **Expired**, **Partly expired**, **Expires** with a date, or **No allowed hosts**. |
+
+Columns that your user cannot read show `not readable`. Selecting a user opens its page, with the tabs **Overview**, **Roles**, **Permissions**, **Profiles & quotas**, **Component access**, and **Audit activity**, and the actions **Edit**, **Password**, **Suspend** or **Reactivate**, and **Delete**.
+
+The **Overview** tab shows the name, stable ID, management source, authentication methods with their expiry, allowed hosts, default database, default roles, the users it can grant privileges to, the account state, the last successful login, and the definition as the server reports it (`SHOW CREATE USER`, which never shows passwords or hashes).
+
+## User lifecycle {#user-lifecycle}
+
+- **Create user**: a name, a password, an optional expiry, the allowed hosts, a default database, roles, and a settings profile. The password is either typed twice (**Enter a password**) or generated in the browser (**Generate a temporary password**) and shown once after the user is created, with a **Copy** button. When the server has more than one writable user directory, **Stored in** chooses it. Once the console is set up, the role `console_admin_reader` is preselected if you can grant it (see [Component Access](/products/web-console/guides/component-access#setting-up)).
+- **Edit**: rename, allowed hosts, and default database. Renaming keeps the ID, roles, and privileges; clients must sign in with the new name. Changing the allowed hosts applies to new logins; open sessions are not closed.
+- **Password**: set a new password or generate a temporary one, with an optional expiry. This replaces every authentication method of the user. ClickHouse cannot force a password change at the next login; use an expiry instead. Users authenticated with LDAP, Kerberos, certificates, SSH keys, JWT, or HTTP cannot get a password in the console. A suspended user stays suspended: the new password gets the same expiry.
+- **Roles** tab: **Assign role**, **Default roles**, and **Revoke**. Default roles are active when a session starts; other granted roles become active only after `SET ROLE`. Revoking a role takes effect for open sessions of the user at their next query.
+- **Suspend** and **Reactivate**: see [Suspending a user](#suspending-a-user).
+- **Delete**: see [Deleting a user](#deleting-a-user).
+
+You cannot suspend or delete your own user. Passwords are sent to the server only in the statement that sets them, never in a URL. The server stores a hash and masks the password in `system.query_log` and its logs. The console does not write passwords to the audit log, to error messages, or to browser storage, and removes a generated password from the page when its dialog closes.
+
+### Suspending a user {#suspending-a-user}
+
+ClickHouse has no statement that disables a user. The console suspends a user with `ALTER USER name VALID UNTIL '2000-01-01 00:00:00 UTC'`, which makes every authentication method of the user expire. Then:
+
+- New logins are rejected over every interface. HTTP requests are authenticated one by one, including those with a `session_id`, so HTTP clients of the user, including the console, stop working at their next request.
+- Native connections that are already open, such as `clickhouse-client`, the Web Terminal, and pooled driver connections, keep working until they disconnect. ClickHouse has no statement that closes another user's connection. To cut them off at once, revoke the user's roles and privileges as well: revocations apply to open sessions at their next query.
+- Running queries finish, unless you also select **Also stop the queries the user is running now (KILL QUERY)**, which runs `KILL QUERY` and needs the `KILL QUERY` privilege.
+- Roles, privileges, and settings stay unchanged.
+
+**Reactivate** sets `VALID UNTIL 'infinity'`, or a date you choose in **Credentials expire (optional)**. Expiry dates that the user had before the suspension are overwritten; they are kept in the audit record and shown when reactivating.
+
+The console refuses to suspend a [protected account](#protected-accounts) and the last platform administrator.
+
+### Deleting a user {#deleting-a-user}
+
+**Delete** first shows what depends on the user: its granted roles, direct privileges, views and tables that run as the user (`SQL SECURITY DEFINER`), quotas and row policies that name it, and its running queries. Views that use the user as definer stop working until their definer is changed. To confirm, you type the name of the user.
+
+Deleting removes the credentials, direct privileges, role assignments, and settings of the user. Open sessions are not closed, but lose all privileges at their next query. This cannot be undone: a user created again with the same name gets a new ID.
+
+## The Roles & Permissions page {#the-roles-and-permissions-page}
+
+The list shows the roles with their source, their members (users and roles), how many members can grant the role (the admin option), and the number of direct privileges, with how many of them are delegable. **Create role** creates an empty role; the [role templates](#role-templates) below the list create a role with privileges.
+
+A role's page has the tabs **Permissions**, **Granted roles** (roles granted to this role, whose privileges its members also get), **Members** (**Add member**, **Revoke**), **Profiles & quotas**, and **Component access**, and a **Delete** action. Deleting a role shows its members and the console policy rules for it, which then no longer apply to anyone.
+
+### Permissions {#permissions}
+
+The **Permissions** tab of a user or role shows three views:
+
+- **Direct privileges**: granted to the user or role itself, from `system.grants`, with **Revoke**, **Revoke grant option**, and **Grant back** for a partial revoke. The statements are also shown as `SHOW GRANTS`, including user and role management scoped by name.
+- **Inherited from roles**: privileges of the roles granted to it, directly or through other roles, with the role path and, for a user, whether the role is active at login or needs `SET ROLE`.
+- **Effective**: computed by the server with `SHOW GRANTS ... FINAL`. For your own user, the console also lists the roles active in the console session.
+
+Grants with the grant option and roles with the admin option are marked, because they allow delegation.
+
+### Granting a privilege {#granting-a-privilege}
+
+**Grant privilege** offers the privileges and groups of the server version (from `system.privileges`) and the scopes that apply to the chosen privilege:
+
+| Scope | Statement target |
+|---|---|
+| **Everything (`*.*`)** | `ON *.*` |
+| **One database** | `ON db.*` |
+| **One table** | `ON db.table` (a table, view, or dictionary) |
+| **Some columns of a table** | `(col1, col2) ON db.table` |
+| **Users or roles by name** | `ON app_*`, for user and role management |
+
+**WITH GRANT OPTION** lets the grantee pass the privilege on. The review warns when you grant a broad administrative privilege, such as `ALL`, `ACCESS MANAGEMENT`, `ROLE ADMIN`, `CREATE USER`, `ALTER USER`, `SYSTEM`, or `INTROSPECTION`, on everything.
+
+## Role templates {#role-templates}
+
+The role templates are proposals of the console, not built-in ClickHouse roles. None includes the grant option or unrestricted administrative rights. Each template has a suggested role name, which you can change; the console shows its exact privileges before creating a role, and the server refuses any privilege you do not hold `WITH GRANT OPTION`. In the table, `<db>` is the console database (`console_admin` by default).
+
+| Template | Suggested name | Privileges |
+|---|---|---|
+| **Platform Administrator** | `console_platform_admin` | `SELECT, INSERT` on `<db>.component_policy`, `<db>.protected_accounts`, and `<db>.audit_log`; `SHOW USERS, SHOW ROLES ON *.*`. Changes the console access policy and the protected accounts, and reads the audit log; cannot manage users, roles, or data. |
+| **ClickHouse Access Administrator** | `console_access_admin` | `CREATE USER, ALTER USER, DROP USER ON <pattern>`; `SHOW USERS, SHOW ROLES, SHOW SETTINGS PROFILES, SHOW QUOTAS ON *.*`; `SELECT, INSERT` on the audit log and `SELECT` on the policy and the protected accounts; the chosen roles and, once the console is set up, `console_admin_reader` `WITH ADMIN OPTION`; optionally `KILL QUERY ON *.*`, to complete suspensions. |
+| **Database Administrator** | `dba` | On each chosen database: `SHOW, SELECT, INSERT, ALTER, CREATE TABLE, CREATE VIEW, CREATE DICTIONARY, DROP TABLE, DROP VIEW, DROP DICTIONARY, TRUNCATE, OPTIMIZE`, and `SYSTEM MERGES, SYSTEM TTL MERGES, SYSTEM MOVES, SYSTEM FETCHES, SYSTEM REPLICATION QUEUES, SYSTEM SYNC REPLICA, SYSTEM RESTART REPLICA`. |
+| **Developer** | `developer` | On each chosen database: `SHOW, SELECT, INSERT, ALTER TABLE, ALTER VIEW, CREATE TABLE, CREATE VIEW, DROP TABLE, DROP VIEW, TRUNCATE, OPTIMIZE`; `CREATE TEMPORARY TABLE ON *.*`. |
+| **Analyst** | `analyst` | `SHOW TABLES, SHOW COLUMNS, SELECT` on each chosen database. |
+| **Operator** | `operator` | `SELECT` on `system.dashboards`, `metric_log`, `asynchronous_metric_log`, `metrics`, `events`, `asynchronous_metrics`, `part_log`, `merges`, `mutations`, `replicas`, `parts`, `disks`, `clusters`, `tables`, `columns`, `dictionaries`, `jemalloc_stats`, and `documentation`; optionally `system.processes`, `query_log`, and `processors_profile_log` (they contain the queries of all users), and `INTROSPECTION` for the Binary visualizer. |
+| **Backup Viewer**, **Backup Operator**, **Restore Operator**, **Backup Administrator** | `backup_viewer`, `backup_operator`, `restore_operator`, `backup_admin` | The privileges of Backup & Restore; see [Backup & Restore](/products/web-console/guides/backup-and-restore). |
+| **Cluster Viewer**, **Cluster Operator**, **Cluster Administrator** | `cluster_viewer`, `cluster_operator`, `cluster_admin` | The cluster tables and capabilities; see [Clusters](/products/web-console/guides/clusters). |
+| **Auditor** | `auditor` | `SHOW USERS, SHOW ROLES, SHOW SETTINGS PROFILES, SHOW QUOTAS, SHOW ROW POLICIES ON *.*`; `SELECT` on the three console tables, `system.query_log`, and `system.session_log`. Cannot change anything. |
+
+For the ClickHouse Access Administrator, the pattern `*` lets the role change any user, including administrators, and the review warns about it: prefer a prefix such as `app_*`. The role can only hand out the roles chosen in the template, so it cannot give anyone more than those roles contain.
+
+## Protected accounts and platform administrators {#protected-accounts}
+
+Protected accounts are users that the console does not delete or suspend, for example break-glass and service accounts. A protected user's page says so, with the reason, and the **Suspend** and **Delete** actions are disabled. You protect a user and remove the protection on the [Component Access](/products/web-console/guides/component-access) page. Users defined in configuration files cannot be changed with SQL at all, which makes them the most robust break-glass accounts.
+
+Platform administrators are the users who can change the console access policy: `INSERT` on `<db>.component_policy`, directly, through roles, or through broader grants. The console estimates them from `system.grants`, lists them on the Component Access page, and refuses to:
+
+- delete or suspend the last platform administrator;
+- revoke the last role that makes someone a platform administrator;
+- delete such a role.
+
+These safeguards are applied by the console only. A user with the privileges can still make the same changes with SQL directly. To recover when they were bypassed, see [Recover access to the console](/products/web-console/how-to/recover-access-to-the-console).
+
+## Applying changes to a cluster {#applying-changes-to-a-cluster}
+
+Changes apply to the server the console is connected to. When the server has clusters and its SQL-managed users are not in a replicated user directory, the Users, Roles & Permissions, Profiles & Quotas, and Data Access Policies pages offer **Apply changes to**: **This server**, followed by its host name, or `ON CLUSTER` with each cluster of `system.clusters`. Each statement then runs with `ON CLUSTER` and `distributed_ddl_output_mode = 'never_throw'`, and the result shows every server with its outcome (**Done**, **Failed**, or **Unfinished**).
+
+- A server that does not answer within 30 seconds is shown as **Unfinished**: it executes the statement when it processes the distributed DDL queue.
+- A change that fails on some servers is reported as partially applied; it is not rolled back.
+- When users are stored in a `replicated` user directory, every change reaches all servers that share it through Keeper, and the console does not offer `ON CLUSTER`.
+
+The console's own tables, such as the audit log and the protected accounts, are stored on the server the console is connected to and are not replicated.
+
+## Changes made outside of the console {#changes-made-outside-of-the-console}
+
+The pages always read the current state from the server, so a change made with SQL or another tool is shown on the next load or **Refresh**. If a user or role was renamed or deleted meanwhile, its page says so. Access-management statements made outside of the console are listed on the **Access changes seen by the server** tab of [Audit activity](/products/web-console/guides/audit-activity).

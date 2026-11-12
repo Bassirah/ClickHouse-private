@@ -101,7 +101,7 @@ images with their deployment examples.
 
 ### Documentation and tests
 
-* [`docs/concepts/features/interfaces/web-console.mdx`](docs/concepts/features/interfaces/web-console.mdx): the user and administrator documentation: configuration (the `web_console` section), security model, every page, the backup worker, the cluster agent, the access policy worker, runbooks, and limitations.
+* [`docs/products/web-console/`](docs/products/web-console/overview.mdx): the documentation of the console: a quick start, tutorials (first administrator, data access policies, backups, single sign-on), user guides for every page, how-to guides (deployment, service accounts, LDAP and Active Directory, Keycloak, offboarding, protecting backups, recovering a server), and the API reference (configuration, HTTP endpoints, console tables, privileges, helper processes, and the token authenticator).
 * [`utils/web-console/README.md`](utils/web-console/README.md): building, running a development instance, testing, and packaging.
 * [`utils/web-console/deploy/README.md`](utils/web-console/deploy/README.md): deploying the images, server bundles, protecting the backups, recovering a whole server, and directory sign-in (LDAP).
 * [`docs/custom_dev/`](docs/custom_dev/): the features and user guide (Word) and the solution overview (PowerPoint).

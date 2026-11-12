@@ -1,0 +1,220 @@
+---
+description: 'The HTTP contract between the ClickHouse server and the token authenticator of single sign-on: the request, the responses, the health check, every token check, the user sync, and the log format.'
+sidebarTitle: 'Token authenticator API'
+slug: /web-console/reference/token-authenticator-api
+title: 'Token authenticator API'
+doc_type: 'reference'
+---
+
+This build of ClickHouse does not verify OpenID Connect tokens itself. It asks an HTTP authentication server to check
+the sign-ins of users `IDENTIFIED WITH http SERVER '<name>'` (see [HTTP authentication](/operations/external-authenticators/http)).
+With single sign-on, the console sends the provider's access token as the password, and the token authenticator,
+`utils/web-console/sso_authenticator.mjs`, checks it. This page describes the contract between the server and the
+authenticator, as implemented by `HTTPBasicAuthClient` and `SettingsAuthResponseParser` (`src/Access/`) on the server
+side and by `sso_authenticator.mjs` on the other. For running the authenticator, see
+[Helper processes](/products/web-console/reference/helper-processes#sso-authenticator).
+
+```text
+Browser ──(X-ClickHouse-User: <user>, X-ClickHouse-Key: <access token>)──▶ ClickHouse server
+ClickHouse server ──(GET, Authorization: Basic <user>:<access token>)──▶ token authenticator ──▶ provider's keys (JWKS)
+```
+
+## Request {#request}
+
+For each authentication of a user `IDENTIFIED WITH http SERVER '<name>'`, the server sends one request to the `uri` of
+`http_authentication_servers.<name>` (see [Configuration](/products/web-console/reference/configuration#http-authentication-servers)).
+Over the HTTP interface, every request of the user is authenticated, so the console causes one call per query.
+
+| Part | Value |
+|---|---|
+| Method | `GET` |
+| Path | The path and query of `uri`, for example `/`. |
+| Protocol | HTTP/1.1 |
+| `Authorization` | `Basic` with `base64(<user name>:<password>)`: the user name of the sign-in, and the access token as the password. |
+| Forwarded headers | Each header of the client's request whose name is listed in `forward_headers` (names compared without case). A value with CR, LF, or NUL makes the sign-in fail with `BAD_ARGUMENTS` before any request is sent. |
+| Body | None |
+
+The server uses the timeouts of the configuration, and tries at most `max_tries` times. Only an exception while
+sending or receiving is retried, after `retry_initial_backoff_ms`, doubling up to `retry_max_backoff_ms`; when the last
+attempt fails, the sign-in fails. Any HTTP answer is final.
+
+## Responses {#responses}
+
+The server accepts the sign-in when, and only when, the status is `200 OK`. With `200`, it reads the body as JSON: when
+the body is an object with a key `settings` whose value is an object, each member is a setting applied to the session
+of the user, for example:
+
+```json
+{"settings": {"max_execution_time": "60", "readonly": "1"}}
+```
+
+A body that is not valid JSON, or has no `settings` object, is ignored: the sign-in is still accepted. On a parse
+error the server logs `Failed to parse settings from authentication response. Skip it.` (logger `HTTPAuthentication`,
+level `Information`). Any other status refuses the sign-in.
+
+The token authenticator answers every request with `Content-Type: application/json` and `Cache-Control: no-store`:
+
+| Status | Body | When |
+|---|---|---|
+| `200` | `{}` | The token is accepted for the user. The authenticator returns no settings. |
+| `401` | `{}` | No `Authorization: Basic` header with a `user:password` pair, or the token fails a [check](#checks). |
+| `405` | `{}` | The method is not `GET`. |
+| `503` | `{}` | The provider's keys cannot be fetched: the token cannot be checked, so the sign-in is refused (fail closed). |
+
+### `GET /health` {#health}
+
+A `GET` request to exactly `/health` is not a sign-in. It answers:
+
+| Status | Body | When |
+|---|---|---|
+| `200` | `{"keys": <number of keys>, "issuer": "<SSO_ISSUER>"}` | The provider's keys are loaded. |
+| `503` | The same, with `"keys": 0` | No key is loaded yet. |
+
+## Checks {#checks}
+
+The authenticator checks the token in this order, and refuses at the first check that fails. The refusal is answered
+with `401` and logged with the message `refused`, the user, and the reason below. The token itself is never logged.
+
+| # | Check | Reason logged |
+|---|---|---|
+| 1 | The token has three parts separated by `.`. | `not a signed JWT` |
+| 2 | The header and the payload are base64url-encoded JSON. | `malformed token` |
+| 3 | The algorithm `alg` of the header is `RS256`, `PS256`, or `ES256`. A token signed with `none` or with a shared secret is refused. | `algorithm <alg> is not accepted` |
+| 4 | The provider has a signing key with the key ID `kid` of the header. For an unknown key ID, the keys are fetched again, at most every 30 seconds, because the provider may have rotated them. | `unknown key <kid>` |
+| 5 | When the key names an algorithm, it is the algorithm of the header. | `key <kid> is for <key alg>, not <alg>` |
+| 6 | The signature is valid for that key (SHA-256). | `invalid signature` |
+| 7 | The claim `iss` is `SSO_ISSUER`. | `issuer <iss>` |
+| 8 | Unless `SSO_TOKEN_TYPE` is empty, the claim `typ` is `SSO_TOKEN_TYPE` (default `Bearer`): an access token, not an ID token. | `token type <typ>, not an access token` |
+| 9 | The claim `azp` is `SSO_CLIENT_ID`. | `issued to <azp>, not <SSO_CLIENT_ID>` |
+| 10 | Unless `SSO_AUDIENCE` is empty, the claim `aud` (a string or an array) includes `SSO_AUDIENCE` (default `SSO_CLIENT_ID`). | `audience does not include <SSO_AUDIENCE>` |
+| 11 | The claim `exp` is a number, and `exp` plus 30 seconds is not in the past. | `expired` |
+| 12 | When the claim `nbf` is a number, `nbf` minus 30 seconds is not in the future. | `not valid yet` |
+| 13 | When the claim `iat` is a number, `iat` minus 30 seconds is not in the future. | `issued in the future` |
+| 14 | The claim `SSO_USERNAME_CLAIM` (default `preferred_username`) is exactly the user name of the sign-in. | `the claim <SSO_USERNAME_CLAIM> is not the user name` |
+
+When the keys cannot be fetched during check 4, the answer is `503`, logged as `cannot check the token` with the user
+and the error.
+
+### The provider's keys {#keys}
+
+The keys come from the discovery document `<SSO_ISSUER>/.well-known/openid-configuration`:
+
+- the document's `issuer` must be `SSO_ISSUER`;
+- its `jwks_uri` and `token_endpoint` must use HTTPS, or HTTP on `localhost`, `127.0.0.1`, or `[::1]`; otherwise the
+  authenticator stops with exit code `2`;
+- of the JSON Web Key Set, only keys with a `kid` and with `use` `sig` (or no `use`) are kept; a key that cannot be read
+  is skipped and logged as `skipped a key the authenticator cannot read`.
+
+The keys are loaded at startup. When they cannot be loaded then, the authenticator logs
+`cannot load the keys of the provider yet` and starts anyway; each sign-in tries to load them again, and is refused
+with `503` until it succeeds.
+
+A token is accepted until it expires. The console refreshes it while the user is signed in; a user disabled in the
+provider can no longer refresh, so access ends at the latest when the last token expires (5 minutes by default in
+Keycloak).
+
+## User sync {#user-sync}
+
+With `SSO_SYNC_CLIENT_ID`, the secret, and `CLICKHOUSE_USER`, the authenticator keeps the users of single sign-on in
+line with the provider every `SSO_SYNC_INTERVAL_SECONDS` (default 60), and once at startup. It changes only users
+identified with this authentication server, never a user with a password or another authentication method.
+
+### Calls to the provider {#provider-calls}
+
+The calls use the Keycloak admin API, whose base is the issuer with `/realms/<realm>` replaced by
+`/admin/realms/<realm>`:
+
+| # | Request | Purpose |
+|---|---|---|
+| 1 | `POST <token_endpoint>`, form `grant_type=client_credentials`, `client_id=<SSO_SYNC_CLIENT_ID>`, `client_secret=<secret>` | An access token of the service account. |
+| 2 | `GET <admin base>/groups?search=<SSO_ROLE_PREFIX>&briefRepresentation=true&max=1000`, with `Authorization: Bearer <token>` | The groups, with their subgroups. Only groups whose name starts with `SSO_ROLE_PREFIX` are used. |
+| 3 | `GET <admin base>/groups/<group id>/members?first=<offset>&max=500&briefRepresentation=true` for each such group, paged by 500 | The members. |
+
+The service account needs the roles `view-users` and `query-groups` of the client `realm-management`. The provider
+requests time out after 15 seconds (5 seconds for the token request).
+
+A group `<SSO_ROLE_PREFIX><role>` gives the role `<role>`. Members that are not enabled are skipped. The user name of a
+member is its `username` when `SSO_USERNAME_CLAIM` is `preferred_username`, otherwise the member's attribute of that
+name, or its `username` when it has none. Each member gets the roles of all its groups and `SSO_DEFAULT_ROLES`.
+
+### Reads from ClickHouse {#clickhouse-reads}
+
+| Query | Purpose |
+|---|---|
+| `SELECT u.name, groupArrayIf(g.granted_role_name, ...) FROM system.users AS u LEFT JOIN system.role_grants AS g ... WHERE has(u.auth_type, 'http') GROUP BY u.name` | Users with HTTP authentication, and their granted roles. |
+| `SHOW CREATE USER <name>` for each | Keeps only users whose statement contains `IDENTIFIED WITH http SERVER '<SSO_SERVER_NAME>'`: `system.users` does not show the server of an HTTP user. |
+| `SELECT name FROM system.roles` | The roles that exist. |
+| `SELECT name FROM system.users` | All users, to detect a name taken by another authentication method. |
+
+### Safety check {#safety-check}
+
+When the provider shows no group with the prefix while users identified with this server exist, the sync is refused
+and nothing is changed: a wrong prefix, a wrong realm, or a service account that cannot see the groups must not remove
+every user at once. The error is logged as `sync failed`. Groups whose members all left are a valid answer and do
+remove those users.
+
+### Changes {#changes}
+
+For each member, in order:
+
+| Condition | Statement | Audit action |
+|---|---|---|
+| A role it would get does not exist | None: the role is skipped, logged as `roles that do not exist are skipped`. | — |
+| A user of that name exists with another authentication method | None: the member is skipped, logged as `a user of that name exists with another authentication: skipped`. | — |
+| No user of that name exists | ``CREATE USER `<user>` IDENTIFIED WITH http SERVER '<SSO_SERVER_NAME>' SCHEME 'BASIC'`` | `sso_create_user` |
+| It should have roles it does not have | ``GRANT `<role>`, ... TO `<user>` `` | `sso_grant_roles` |
+| It has roles it should not have | ``REVOKE `<role>`, ... FROM `<user>` `` | `sso_revoke_roles` |
+| Roles were granted or revoked | ``SET DEFAULT ROLE ALL TO `<user>` `` | `sso_default_roles` |
+
+Then, for each user identified with this server that is no longer a member of a prefixed group, or is disabled or
+deleted in the provider: ``DROP USER `<user>` ``, audit action `sso_drop_user`.
+
+The roles compared are all roles granted to the user, so a role granted to a user of single sign-on outside the sync is
+revoked at the next sync. Statements run one after another; a failing statement is logged as `sync statement failed`
+and audited with `failure`, and the sync continues with the next one. At the end it logs `users synced` with the number
+of members and of changes.
+
+### Audit records {#audit-records}
+
+Unless `ADMIN_DATABASE` is empty, each statement is recorded in `<ADMIN_DATABASE>.audit_log`:
+
+| Column | Value |
+|---|---|
+| `correlation_id` | A new UUID per statement. |
+| `scope` | `local` |
+| `target_type` | `user` |
+| `target_name` | The user name. |
+| `action` | `sso_create_user`, `sso_grant_roles`, `sso_revoke_roles`, `sso_default_roles`, or `sso_drop_user`. |
+| `summary` | For example `Create the SSO user <user>`, `Grant <roles> to <user>`, `Revoke <roles> from <user>`, `Enable every role of <user> by default`, or `Drop the SSO user <user>: no longer in a <prefix>* group, or disabled`. |
+| `result` | `success` or `failure`. |
+| `error` | The error of a failed statement. |
+| `details` | `{"by": "sso_authenticator", "server": "<SSO_SERVER_NAME>"}` |
+
+The `actor` of the records is the sync's account (`CLICKHOUSE_USER`). When a record cannot be written, the
+authenticator logs `the audit record could not be written` and continues.
+
+## Log format {#log-format}
+
+The authenticator writes one JSON object per line on standard output:
+
+```json
+{"time": "2026-11-12T10:00:00.000Z", "authenticator": "<host name>-<process ID>", "message": "refused", "user": "kara", "reason": "expired"}
+```
+
+| Message | Fields | When |
+|---|---|---|
+| `keys loaded` | `issuer`, `keys` | At startup, when the keys were loaded. |
+| `cannot load the keys of the provider yet` | `error` | At startup, when they could not be loaded. |
+| `listening` | `address`, `client_id`, `sync` | The HTTP server listens. |
+| `skipped a key the authenticator cannot read` | `kid`, `error` | A key of the JSON Web Key Set cannot be used. |
+| `refused` | `user`, `reason` | A sign-in was refused; see [Checks](#checks). |
+| `cannot check the token` | `user`, `error` | The keys could not be fetched; answered `503`. |
+| `roles that do not exist are skipped` | `user`, `roles` | Sync. |
+| `a user of that name exists with another authentication: skipped` | `user` | Sync. |
+| `sync statement failed` | `user`, `error` | Sync. |
+| `the audit record could not be written` | `action`, `target`, `error` | Sync. |
+| `users synced` | `members`, `changes` | End of a sync. |
+| `sync failed` | `error` | A sync was refused or failed. |
+
+Accepted sign-ins are not logged. Configuration errors are printed to standard error as `sso_authenticator: <message>`,
+and the process exits with code `2`.

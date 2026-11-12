@@ -1,0 +1,137 @@
+---
+description: 'How the Component Access page of the web console decides which components each user and role can open, how it relates to native ClickHouse privileges, and how to set it up.'
+sidebarTitle: 'Component Access'
+slug: /web-console/guides/component-access
+title: 'Component Access'
+doc_type: 'guide'
+---
+
+The **Component Access** page, in the **Administration** category, holds the console access policy: which console components (panels, links, administration pages, and identity provider pages) each user and role can open. Next to each rule it shows the native ClickHouse privileges that actually govern what the component can do, and it keeps the list of protected accounts and platform administrators.
+
+The policy decides what the console lists and opens. It is not a security boundary on its own: the SQL Console, the standalone pages, and other clients reach the server directly, where only native privileges apply. This page explains the model, the setup, and what the policy does not cover. For the tables it uses, see the [console tables reference](/products/web-console/reference/console-tables#administration-tables).
+
+## The policy model {#the-policy-model}
+
+### Subjects {#subjects}
+
+A rule is written for one subject, chosen in **Rules for**:
+
+- **All users**: applies to everyone.
+- **Role** followed by a name: applies to the users who have that role enabled in their session.
+- **User** followed by a name: applies to that user.
+
+A user gets the capabilities of the rules for all users, for the user, and for the roles enabled in the session, which at sign-in are the default roles. Rules only allow: a capability is allowed when any of these rules allows it. The **Component access** tab of a user shows the result both with the default roles and with every granted role, and marks capabilities that the user gets only after `SET ROLE`.
+
+### Components and capabilities {#components-and-capabilities}
+
+Each rule allows four capabilities of a component:
+
+| Capability | What it means | Who enforces it |
+|---|---|---|
+| **Open** | The component is listed on the home page and in the sidebar, and its address opens it. | The console only. |
+| **View data** | The component can show the data it reads. | Native privileges, listed next to the rule. |
+| **Run queries** | The component can run queries, for example the SQL Console or editable Dashboard charts. | Native privileges. |
+| **Administer** | The component can change server state, for example `SYSTEM JEMALLOC` for Jemalloc. | Native privileges. |
+
+The other capabilities need **Open**: ticking one of them also ticks **Open**, and clearing **Open** clears them. A box in the header of each column selects or clears that capability for every component it applies to, and shows whether all, some, or none of them have it.
+
+The policy governs:
+
+- the panels of **Workspace** and **Diagnostics**, and the Reference panel;
+- the links of **Resources**: Source code, Documentation, Website, and Cloud;
+- the administration pages: Users, Roles & Permissions, Data Access Policies, Profiles & Quotas, Audit Activity, Clusters, and Backup & Restore;
+- the **Identity Providers** pages: LDAP and SSO (Keycloak).
+
+For a link, an administration page, and an identity provider page, only **Open** applies (the other columns show `—`). What a user can do on such a page is decided by native privileges, as on every page: the page is listed only when the user can also read what it shows, and each action is a statement the server authorizes.
+
+To give an administration or identity provider page to some roles only, clear **Open** for all users and tick it for those roles.
+
+### Components that are not governed {#components-that-are-not-governed}
+
+- **Home** is not governed.
+- **Component Access** itself is not governed: it stays available to the users who can change the policy (`INSERT` on the policy table) or set it up, so that a policy mistake cannot lock them out of correcting it.
+- A component that no rule mentions yet, such as one added to the console after the policy was set up, is open to everyone. On the page it is marked **No rules yet: open to everyone**. Saving the rules for all users turns that into a rule.
+
+### How the console applies the policy {#how-the-console-applies-the-policy}
+
+At sign-in, the console reads the policy and the roles enabled in the session. A governed component that the user may not open is not listed, and its address says that it is not allowed by the console policy. While the policy loads, panels wait; links to public sites stay usable and disappear if the policy hides them.
+
+The policy has these states, shown on the page under **Policy storage**:
+
+| State | Effect |
+|---|---|
+| Not set up | The console shows every component to every user. **Set up** creates the tables. |
+| No rules | The table exists but is empty: the console shows every component to every user. |
+| Active | The rules apply. Components without a rule that allows **Open** are hidden. |
+| Unreadable | The table exists, but the user cannot read it. The console fails closed: it hides every governed component, and the home page asks for `SELECT` on the policy table. |
+
+The policy is stored on the server the console is connected to only. Other servers of a cluster have their own copy of these tables.
+
+## Native privileges next to the policy {#native-privileges-next-to-the-policy}
+
+The column **Enforced outside the console by** shows, for each component, what governs it on the server, for example:
+
+| Component | Native privileges |
+|---|---|
+| Dashboard | View data: `SELECT` on `system.dashboards`, `system.metric_log`, `system.asynchronous_metric_log`. |
+| Binary visualizer | View data: `INTROSPECTION`. |
+| Merges visualizer | View data: `SELECT ON system.part_log`. |
+| Schema visualizer | View data: `SELECT` on `system.tables`, `system.columns`, `system.dictionaries`. |
+| Jemalloc | View data: `SELECT` on `system.jemalloc_stats`, `system.asynchronous_metrics`. Administer: `SYSTEM JEMALLOC`. |
+| Processors profile | View data: `SELECT` on `system.processors_profile_log`, `system.query_log`. |
+| Reference | View data: `SELECT ON system.documentation`. |
+| SQL Console | Every query is authorized by the grants on the tables it uses. |
+
+For ClickStack, the Web Terminal, the links, and the administration pages, the column explains instead why the policy only hides them in the console. ClickStack has its own connection settings and authorization. The Web Terminal runs `clickhouse-client` on the server as the signed-in user; the `enable_webterminal` server setting turns it on or off for everyone, and `/webterminal` stays reachable to anyone with valid credentials. Hiding a link only removes it from the console: anyone who knows the address of an external site can still visit it.
+
+When **Rules for** is a role or a user, a **Native privileges** column also shows whether its grants (direct and through roles) give the privileges of each capability: **granted**, **partly granted**, or **not granted**. Where the policy and the grants disagree, it offers to make them agree:
+
+- The policy allows a capability, but the privileges are missing: **Grant** grants the missing privileges. You need them `WITH GRANT OPTION`.
+- The policy does not allow a capability, but the grants give it: the data is reachable outside of the console. **Revoke direct grants** revokes the grants made directly to the subject; privileges from broader grants or roles must be changed on the **Permissions** tab.
+
+## Setting up {#setting-up}
+
+The Users, Roles & Permissions, and Profiles & Quotas pages work without setup. The audit log, the component access policy, and the protected accounts need tables. On the **Component Access** page, select **Set up**. The dialog asks:
+
+- **Keep audit records for (days)**: the retention of the audit log, 365 by default; a TTL removes older records.
+- Whether to assign the role `console_admin_reader` to the existing users and roles created with SQL, so that the console can apply the policy to them.
+
+**Review** shows the statements, which:
+
+1. create the database named by the `admin_database` setting (by default `console_admin`);
+2. create the tables `audit_log`, `component_policy`, and `protected_accounts`;
+3. add the initial rules: all users can open every governed component, with **View data** and **Run queries** for the panels and no **Administer**, so nothing changes for users until you edit the policy;
+4. create the role `console_admin_reader` (named `<admin_database>_reader`) with `SELECT` on the policy table, and assign it if you chose so;
+5. record the setup in the audit log.
+
+The setup needs `CREATE TABLE` on the database, and `CREATE DATABASE` if it does not exist. The statements use `IF NOT EXISTS`, so you can run the setup again after fixing an error. To set up without the console, run the statements shown in the review step with `clickhouse-client`.
+
+### The reader role {#the-reader-role}
+
+Users who cannot read the policy table do not see the components it governs. The role `console_admin_reader` gives them `SELECT` on it, and it must be among a user's default roles to apply at sign-in. Users defined in configuration files get this grant in those files.
+
+When you create a user in the console, this role is preselected if you can grant it. A role is used instead of a direct grant because assigning a role needs only the admin option on it, while granting `SELECT` on the table would need it `WITH GRANT OPTION`. The ClickHouse Access Administrator [role template](/products/web-console/guides/users-and-roles#role-templates) includes it `WITH ADMIN OPTION`.
+
+## Editing rules {#editing-rules}
+
+1. Choose the subject in **Rules for**.
+2. Tick or clear the capabilities.
+3. Select **Save rules**, review the changes, and apply them.
+
+**Remove the rules of this subject** removes every rule of a role or user. Changing the policy needs `INSERT` on the policy table; without it, the page is read-only. A change to your own rules warns that it changes what the console shows to you. Each change is recorded in the [audit log](/products/web-console/guides/audit-activity).
+
+Deleting a role keeps its rules in the table, but they no longer apply to anyone.
+
+## Protected accounts {#protected-accounts}
+
+The **Protected accounts** section lists the users that the console does not delete or suspend, with the reason and who protected them. **Protect a user** asks for the user and a reason; **Remove protection** removes it. Changing them needs `INSERT` on `protected_accounts`. This protection is applied by the console only: `DROP USER` run directly still works for anyone with the privilege. See [Protected accounts and platform administrators](/products/web-console/guides/users-and-roles#protected-accounts).
+
+## Platform administrators {#platform-administrators}
+
+The **Platform administrators** section lists the users who can change the policy: `INSERT` on the policy table, directly, through roles, or through broader grants, estimated from `system.grants`. The console refuses to delete or suspend the last of them, or to revoke the last role that makes someone one. It cannot stop the same changes made with SQL directly. To recover, see [Recover access to the console](/products/web-console/how-to/recover-access-to-the-console).
+
+## Limitations {#limitations}
+
+- The console enforces only **Open**. The other capabilities are enforced by native privileges on every access path.
+- The policy tables are local to one server. Other servers of a cluster have their own policy.
+- The tables are ordinary tables: users with `ALTER`, `TRUNCATE`, or `DROP` on them can change or remove rows. Grant only `SELECT` and `INSERT` on them.

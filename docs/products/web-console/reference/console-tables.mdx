@@ -1,0 +1,884 @@
+---
+description: 'Every table the web console creates in its admin database, with every column, type, and meaning, the versioning model, the reader role, and which process writes each table.'
+sidebarTitle: 'Console tables'
+slug: /web-console/reference/console-tables
+title: 'Web console tables'
+doc_type: 'reference'
+---
+
+The console keeps its own state in ordinary tables of one database, named by the `admin_database` setting (default
+`console_admin`; see [Configuration](/products/web-console/reference/configuration#web-console)). The tables are created
+only when an administrator selects **Set up** on a page, with `CREATE DATABASE IF NOT EXISTS` and
+`CREATE TABLE IF NOT EXISTS`, so running a setup again is safe. The DDL below is the one in `programs/server/console.html`
+(`ADMIN_TABLES`, `DAP_TABLES`, `BACKUP_TABLES`, `CLUSTER_TABLES`, `IDP_TABLES`).
+
+The tables are stored on the server the console is connected to and are not replicated. To remove the console's data,
+drop the database; the console then works as if it was never set up.
+
+## Versioning model {#versioning-model}
+
+The tables follow two patterns:
+
+| Pattern | Engine | How a change is written | How it is read |
+|---|---|---|---|
+| Current state | `ReplacingMergeTree(updated_at)` with the key of the object in `ORDER BY` | A new row with the whole object replaces the previous version. Removing the object inserts a row with `deleted = true`. | `FINAL ... WHERE NOT deleted` |
+| History | `MergeTree` | Rows are appended and never updated. | The latest row, or all of them |
+
+The writer and the time of each row are columns the server fills in:
+
+- `updated_by`, `created_by`, `requested_by`, `recorded_by`, `ran_by`, and `actor` are `MATERIALIZED currentUser()`;
+- `updated_at`, `created_at`, `requested_at`, `at`, `ran_at`, and `event_time` are `MATERIALIZED now64(3)`;
+- `server_host` of `audit_log` is `MATERIALIZED hostName()`.
+
+Each such writer column has a `CHECK` constraint (for example `CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()`)
+that rejects any other value, also when `insert_allow_materialized_columns` is enabled. A user who can insert into a
+table therefore cannot write rows in another user's name. The tables are ordinary tables, though: users with `ALTER`,
+`TRUNCATE`, or `DROP` on them can change or remove rows, so they are not tamper-proof. Grant `SELECT` and `INSERT` only,
+and keep `ALTER` and `DROP` to the server administrators.
+
+All times are `DateTime64(3, 'UTC')` unless noted. Columns that hold JSON are `String`.
+
+## Reader role {#reader-role}
+
+The **Set up** of **Component Access** also creates the role `<admin_database>_reader` (by default
+`console_admin_reader`) with `SELECT` on `component_policy`, and offers to grant it to the users and roles created with
+SQL. Users who cannot read the policy do not see the components it governs, so every console user needs this role among
+their default roles (or `SELECT` on the table). A role is used because granting it needs only the admin option on the
+role, while granting `SELECT` on the table directly would need it `WITH GRANT OPTION`.
+
+## Administration tables {#administration-tables}
+
+Created by **Set up** on **Component Access**, which also inserts one rule per governed component for all users
+(`open` true; `view_data` and `run_queries` true for panels; `administer` false), and a `setup` record in the audit log.
+The retention of the audit log is chosen in the dialog: 1 to 36500 days, default 365.
+
+### `audit_log` {#audit-log}
+
+```sql
+CREATE TABLE console_admin.audit_log
+(
+    event_time DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    actor String MATERIALIZED currentUser(),
+    server_host LowCardinality(String) MATERIALIZED hostName(),
+    correlation_id UUID,
+    scope String,
+    target_type LowCardinality(String),
+    target_name String,
+    action LowCardinality(String),
+    summary String,
+    result Enum8('success' = 1, 'failure' = 2, 'partial' = 3),
+    error String,
+    details String,
+    CONSTRAINT actor_is_writer CHECK actor = currentUser(),
+    CONSTRAINT host_is_server CHECK server_host = hostName()
+)
+ENGINE = MergeTree ORDER BY event_time
+TTL toDateTime(event_time) + INTERVAL 365 DAY
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `event_time` | `DateTime64(3, 'UTC')` | When the record was written. Filled in by the server. |
+| `actor` | `String` | The user who wrote the record. Filled in by the server. |
+| `server_host` | `LowCardinality(String)` | Host name of the server that stored the record. Filled in by the server. |
+| `correlation_id` | `UUID` | ID of the change. The console also sets it as the `log_comment` of the statements of the change; for backup and cluster operations, it is the operation ID. |
+| `scope` | `String` | `local`, or `cluster:<name>` for a change applied `ON CLUSTER`. |
+| `target_type` | `LowCardinality(String)` | Kind of object changed, for example `user`, `role`, `platform`, `backup`, or `data_access`. |
+| `target_name` | `String` | Name of the object changed. |
+| `action` | `LowCardinality(String)` | What was done, for example `setup`, `delete_role`, `dap_reconcile`, `server_bundle`, `recovery_rehearsal`, or `sso_create_user`. |
+| `summary` | `String` | One-line description. |
+| `result` | `Enum8` | `success`, `failure`, or `partial` (a change that took effect on some servers or steps only). |
+| `error` | `String` | Sanitized error message: passwords and keys are masked. |
+| `details` | `String` | JSON with the steps and their outcome on each server, and other details of the action. |
+
+To change the retention later: `ALTER TABLE console_admin.audit_log MODIFY TTL toDateTime(event_time) + INTERVAL <days> DAY`.
+
+### `component_policy` {#component-policy}
+
+```sql
+CREATE TABLE console_admin.component_policy
+(
+    subject_type Enum8('all' = 1, 'role' = 2, 'user' = 3),
+    subject String,
+    component LowCardinality(String),
+    open Bool,
+    view_data Bool,
+    run_queries Bool,
+    administer Bool,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY (subject_type, subject, component)
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `subject_type` | `Enum8` | `all` (every user), `role`, or `user`. |
+| `subject` | `String` | Role or user name; empty for `all`. |
+| `component` | `LowCardinality(String)` | A [component ID](/products/web-console/reference/http-endpoints#component-ids). |
+| `open` | `Bool` | The subject may open the component. The only capability the console enforces. |
+| `view_data` | `Bool` | Capability **View data**: compared with the native privileges that govern it. |
+| `run_queries` | `Bool` | Capability **Run queries**. |
+| `administer` | `Bool` | Capability **Administer**. |
+| `deleted` | `Bool` | The rule is removed. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+A capability is allowed when any rule for all users, for the signed-in user, or for one of the roles enabled in the
+session allows it. A component without any row is not governed and stays open to everyone.
+
+### `protected_accounts` {#protected-accounts}
+
+```sql
+CREATE TABLE console_admin.protected_accounts
+(
+    name String,
+    reason String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY name
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `name` | `String` | User name that the console does not delete or suspend. |
+| `reason` | `String` | Why the account is protected. |
+| `deleted` | `Bool` | The protection is removed. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+## Data access tables {#data-access-tables}
+
+Created by **Set up** on the **Access Tests**, **Attributes & Classifications**, **Policy Rules**, or **Policy
+Deployments** tab of **Data Access Policies**. Column permissions, row policies, and effective access need no table.
+
+### `dap_attributes` {#dap-attributes}
+
+```sql
+CREATE TABLE console_admin.dap_attributes
+(
+    attribute String,
+    category Enum8('user' = 1, 'resource' = 2, 'operation' = 3, 'environment' = 4),
+    dynamic Bool,
+    source String,
+    writer String,
+    owner String,
+    max_age_seconds UInt32,
+    description String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY attribute
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `attribute` | `String` | Name of the attribute, for example `department`. |
+| `category` | `Enum8` | `user`, `resource`, `operation`, or `environment`. Rules accept only `user` attributes. |
+| `dynamic` | `Bool` | Evaluated per request. Rules on such attributes are refused. |
+| `source` | `String` | Source of truth. The access policy worker imports only the attributes whose `source` is its `ATTRIBUTE_FEED_SOURCE`. |
+| `writer` | `String` | The database user whose values are trusted. A value written by another user is shown as **Not trusted**. |
+| `owner` | `String` | Who is responsible for the attribute. |
+| `max_age_seconds` | `UInt32` | How long a value stays fresh after `observed_at`. An older value is treated as missing. |
+| `description` | `String` | Free text. |
+| `deleted` | `Bool` | The definition is removed. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### `dap_user_attributes` {#dap-user-attributes}
+
+```sql
+CREATE TABLE console_admin.dap_user_attributes
+(
+    user_name String,
+    attribute String,
+    value String,
+    source String,
+    observed_at DateTime('UTC'),
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY (user_name, attribute)
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `user_name` | `String` | ClickHouse user name. |
+| `attribute` | `String` | Name of a defined attribute. |
+| `value` | `String` | The value. |
+| `source` | `String` | Where the value comes from. |
+| `observed_at` | `DateTime('UTC')` | When the source reported the value; the base of the freshness check. |
+| `deleted` | `Bool` | The value is removed, for example because the feed no longer reports it. |
+| `updated_at`, `updated_by` | | Time and writer of the version. `updated_by` is compared with the `writer` of the definition. |
+
+### `dap_classifications` {#dap-classifications}
+
+```sql
+CREATE TABLE console_admin.dap_classifications
+(
+    database String,
+    table String,
+    column String,
+    label LowCardinality(String),
+    source String,
+    owner String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY (database, table, column)
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `database`, `table`, `column` | `String` | The labeled column. |
+| `label` | `LowCardinality(String)` | The classification, for example `pii`, `financial`, or `secret`. |
+| `source` | `String` | Where the label comes from. |
+| `owner` | `String` | Who is responsible for the label. |
+| `deleted` | `Bool` | The label is removed. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### `dap_rules` {#dap-rules}
+
+```sql
+CREATE TABLE console_admin.dap_rules
+(
+    rule_id String,
+    revision UInt32,
+    name String,
+    spec String,
+    enabled Bool,
+    deleted Bool DEFAULT false,
+    note String,
+    created_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    created_by String MATERIALIZED currentUser(),
+    CONSTRAINT created_by_is_writer CHECK created_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (rule_id, revision)
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `rule_id` | `String` | ID of the rule. |
+| `revision` | `UInt32` | Revision number, from 1. Every change is a new row with the next revision. |
+| `name` | `String` | Name of the rule. |
+| `spec` | `String` | JSON: the conditions on user attributes, what the rule provisions, the behavior for missing or stale attributes, and the exceptions. |
+| `enabled` | `Bool` | The rule is deployed and reconciled. |
+| `deleted` | `Bool` | The rule is removed from this revision on. |
+| `note` | `String` | What the revision did, for example `created` or `edited`. |
+| `created_at` | `DateTime64(3, 'UTC')` | When the revision was written. |
+| `created_by` | `String` | The author of the revision. The access policy worker runs the statements of the rule as this user (`EXECUTE AS`). |
+
+### `dap_owned` {#dap-owned}
+
+```sql
+CREATE TABLE console_admin.dap_owned
+(
+    key String,
+    rule_id String,
+    revision UInt32,
+    deployment_id String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY key
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `key` | `String` | Stable key of a native entity (role, grant, role membership, or row policy) created by the platform. Only entities recorded here are changed or removed by deployments. |
+| `rule_id` | `String` | The rule that generated it. |
+| `revision` | `UInt32` | The revision of that rule. |
+| `deployment_id` | `String` | The deployment or reconciliation that created or removed it. |
+| `deleted` | `Bool` | The entity was removed by the platform. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### `dap_deployments` {#dap-deployments}
+
+```sql
+CREATE TABLE console_admin.dap_deployments
+(
+    deployment_id String,
+    kind Enum8('deploy' = 1, 'reconcile' = 2, 'verify' = 3, 'adopt' = 4),
+    scope String,
+    rules String,
+    steps String,
+    result Enum8('success' = 1, 'failure' = 2, 'partial' = 3, 'no_change' = 4),
+    verification String,
+    created_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    created_by String MATERIALIZED currentUser(),
+    CONSTRAINT created_by_is_writer CHECK created_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY created_at
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `deployment_id` | `String` | ID of the deployment; also the correlation ID of its audit record. |
+| `kind` | `Enum8` | `deploy` (from the console), `reconcile` (by the access policy worker), `verify`, or `adopt`. |
+| `scope` | `String` | The cluster of `ON CLUSTER`, or empty for this server. |
+| `rules` | `String` | JSON array of the rules and revisions: `rule_id`, `revision`, `name`. |
+| `steps` | `String` | JSON array of the steps: for example the description, the entity key, the status (`ok`, `failed`, or `partial`), the outcome on each server, the rule author, and the error. |
+| `result` | `Enum8` | `success`, `failure`, `partial`, or `no_change`. |
+| `verification` | `String` | JSON result of **Verify**; empty for other kinds. |
+| `created_at`, `created_by` | | Time and writer. |
+
+### `dap_access_tests` {#dap-access-tests}
+
+```sql
+CREATE TABLE console_admin.dap_access_tests
+(
+    test_id String,
+    name String,
+    user_name String,
+    database String,
+    table String,
+    columns Array(String),
+    expect Enum8('allowed' = 1, 'denied' = 2),
+    expected_rows Nullable(UInt64),
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY test_id
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `test_id` | `String` | ID of the test. |
+| `name` | `String` | Name of the test. |
+| `user_name` | `String` | The user the test reads as, with `EXECUTE AS`. |
+| `database`, `table` | `String` | The table read. |
+| `columns` | `Array(String)` | Columns read; empty: only the rows are counted. |
+| `expect` | `Enum8` | `allowed` or `denied` (`ACCESS_DENIED`). |
+| `expected_rows` | `Nullable(UInt64)` | Expected number of rows for an allowed read; `NULL`: not checked. |
+| `deleted` | `Bool` | The test is removed. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### `dap_test_runs` {#dap-test-runs}
+
+```sql
+CREATE TABLE console_admin.dap_test_runs
+(
+    run_id String,
+    test_id String,
+    user_name String,
+    outcome Enum8('pass' = 1, 'fail' = 2, 'error' = 3),
+    observed String,
+    path LowCardinality(String),
+    ran_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    ran_by String MATERIALIZED currentUser(),
+    CONSTRAINT ran_by_is_writer CHECK ran_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY ran_at
+TTL toDateTime(ran_at) + INTERVAL 365 DAY
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `run_id` | `String` | ID of the run. |
+| `test_id` | `String` | The test. |
+| `user_name` | `String` | The user the test read as. |
+| `outcome` | `Enum8` | `pass`, `fail`, or `error` (an error other than `ACCESS_DENIED`, including a missing `IMPERSONATE` grant). |
+| `observed` | `String` | What happened: `allowed, <n> rows`, `denied (ACCESS_DENIED)`, or `error: <message>`. Never the data. |
+| `path` | `LowCardinality(String)` | How the test ran: `execute_as`. |
+| `ran_at`, `ran_by` | | Time and the user who ran the test. Rows are removed after 365 days. |
+
+## Backup tables {#backup-tables}
+
+Created by **Set up** on **Backup & Restore** (five tables). Installations set up before `backup_endpoints` existed
+create it with **Set up** in the **Allowed endpoints** section of the **Destinations** tab.
+
+### `backup_destinations` {#backup-destinations}
+
+```sql
+CREATE TABLE console_admin.backup_destinations
+(
+    id String,
+    name String,
+    description String,
+    type Enum8('disk' = 1, 's3' = 2),
+    disk String,
+    named_collection String,
+    endpoint String,
+    bucket String,
+    prefix String,
+    credential_ref String,
+    allow_http Bool DEFAULT false,
+    enabled Bool,
+    allowed_databases Array(String),
+    test_result String,
+    tested_at Nullable(DateTime64(3, 'UTC')),
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY id
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | `String` | ID of the destination. |
+| `name` | `String` | Name users choose the destination by. |
+| `description` | `String` | Free text. |
+| `type` | `Enum8` | `disk` or `s3`. |
+| `disk` | `String` | For `disk`: a disk allowed in `backups.allowed_disk`. |
+| `named_collection` | `String` | For `s3`: the named collection `console_backup_<id>` that holds the access key. The table holds no credential. |
+| `endpoint` | `String` | For `s3`: the endpoint, `https://host[:port]` or `http://host[:port]`. |
+| `bucket` | `String` | For `s3`: the bucket. |
+| `prefix` | `String` | Prefix inside the disk or bucket. It may not contain `..` or start with `/`. |
+| `credential_ref` | `String` | For `s3`: prefix of the environment variables the backup worker reads (`<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY`, `<REF>_REGION`). |
+| `allow_http` | `Bool` | The endpoint uses plain HTTP. |
+| `enabled` | `Bool` | The destination can be used. A new destination is disabled until it passes **Test**. |
+| `allowed_databases` | `Array(String)` | Databases that may be backed up there; empty: any database. |
+| `test_result` | `String` | JSON results of the destination test, of the worker's listing and deletion test, and of the protection check of the bucket. |
+| `tested_at` | `Nullable(DateTime64(3, 'UTC'))` | When the destination was last tested. |
+| `deleted` | `Bool` | The destination is removed. Its backups and named collection are kept. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### `backup_schedules` {#backup-schedules}
+
+```sql
+CREATE TABLE console_admin.backup_schedules
+(
+    id String,
+    name String,
+    enabled Bool,
+    destination_id String,
+    databases Array(String),
+    tables Array(String),
+    structure_only Bool,
+    strategy Enum8('full' = 1, 'incremental' = 2),
+    full_every UInt16,
+    frequency Enum8('hourly' = 1, 'daily' = 2, 'weekly' = 3),
+    minute UInt8,
+    hour UInt8,
+    weekday UInt8,
+    timezone String,
+    keep_chains UInt16,
+    on_missing_base Enum8('fail' = 1, 'full' = 2),
+    verify Bool,
+    notify_ref String,
+    copy_destination_id String DEFAULT '',
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY id
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | `String` | ID of the schedule. |
+| `name` | `String` | Name of the schedule. |
+| `enabled` | `Bool` | The backup worker runs it. |
+| `destination_id` | `String` | The destination of the backups. |
+| `databases` | `Array(String)` | Databases backed up. |
+| `tables` | `Array(String)` | Tables backed up. |
+| `structure_only` | `Bool` | Back up the definitions without the data. |
+| `strategy` | `Enum8` | `full`, or `incremental`. |
+| `full_every` | `UInt16` | For `incremental`: a full backup every this many runs. |
+| `frequency` | `Enum8` | `hourly`, `daily`, or `weekly`. |
+| `minute` | `UInt8` | Minute of the run. |
+| `hour` | `UInt8` | Hour of the run (daily and weekly). |
+| `weekday` | `UInt8` | Day of the run (weekly): `0` is Sunday, `6` Saturday. |
+| `timezone` | `String` | Time zone of `hour`, `minute`, and `weekday`. |
+| `keep_chains` | `UInt16` | Retention: how many chains (a full backup and its incremental backups) to keep at each destination. |
+| `on_missing_base` | `Enum8` | When the base of an incremental run is missing or does not open: `fail` the run, or make a `full` backup. |
+| `verify` | `Bool` | Run a restore test after each backup. |
+| `notify_ref` | `String` | Name of the environment variable of the backup worker that holds the webhook URL called when a scheduled operation fails. |
+| `copy_destination_id` | `String` | Second destination: after each full backup, the worker makes an independent full backup of the same scope there. Empty: none. |
+| `deleted` | `Bool` | The schedule is removed. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### `backup_operations` {#backup-operations}
+
+```sql
+CREATE TABLE console_admin.backup_operations
+(
+    op_id String,
+    kind Enum8('backup' = 1, 'restore' = 2, 'verify' = 3, 'delete' = 4, 'test' = 5, 'bundle' = 6, 'bundle_restore' = 7),
+    requested_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    requested_by String MATERIALIZED currentUser(),
+    server String,
+    destination_id String,
+    artifact String,
+    scope String,
+    strategy String,
+    base_op_id String,
+    schedule_id String,
+    scheduled_for Nullable(DateTime64(3, 'UTC')),
+    target String,
+    parameters String,
+    expected String,
+    CONSTRAINT requested_by_is_writer CHECK requested_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY op_id
+```
+
+One row per operation, written once when it is requested.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `op_id` | `String` | Operation ID. For a backup or restore, also the `id` setting of the native operation in `system.backups`, the `log_comment` of its statements, and the correlation ID of its audit records. Scheduled runs have the deterministic ID `sched-<schedule>-<local time of the run>`. |
+| `kind` | `Enum8` | `backup`, `restore`, `verify` (restore test), `delete`, `test` (destination test), `bundle` (server bundle), or `bundle_restore`. |
+| `requested_at`, `requested_by` | | Time and requester. |
+| `server` | `String` | Host name of the server the console was connected to when it requested the operation; for operations of the backup worker, the host name of the worker host. |
+| `destination_id` | `String` | The destination. |
+| `artifact` | `String` | Name of the backup at the destination. |
+| `scope` | `String` | JSON: databases, tables, partitions, `structure_only`, access entities, and SQL objects. |
+| `strategy` | `String` | `full` or `incremental` for a backup. |
+| `base_op_id` | `String` | The base backup of an incremental backup, the backup a restore or test reads, or the bundle a bundle restore reads. |
+| `schedule_id` | `String` | The schedule of a scheduled run. |
+| `scheduled_for` | `Nullable(DateTime64(3, 'UTC'))` | Time of the scheduled run. |
+| `target` | `String` | JSON: the target databases of a restore. |
+| `parameters` | `String` | JSON: further parameters, for example the `mode` of a bundle restore. |
+| `expected` | `String` | JSON: row counts and fingerprints captured with the backup, to compare restores with. |
+
+### `backup_events` {#backup-events}
+
+```sql
+CREATE TABLE console_admin.backup_events
+(
+    op_id String,
+    at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    recorded_by String MATERIALIZED currentUser(),
+    kind Enum8('state' = 1, 'check' = 2),
+    state Enum8('queued' = 1, 'running' = 2, 'succeeded' = 3, 'failed' = 4, 'unknown' = 5, 'cancelled' = 6, 'deleted' = 7, 'passed' = 8),
+    name String,
+    native_id String,
+    query_id String,
+    error String,
+    num_files UInt64,
+    total_size UInt64,
+    details String,
+    CONSTRAINT recorded_by_is_writer CHECK recorded_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (op_id, at)
+```
+
+The state changes and checks of each operation, appended. The current state of an operation is its latest `state`
+event. Deleting a backup appends a `deleted` event.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `op_id` | `String` | The operation. The heartbeat of a backup worker uses `worker:<WORKER_ID>`. |
+| `at`, `recorded_by` | | Time and writer. |
+| `kind` | `Enum8` | `state` (a state change) or `check` (the result of a check). |
+| `state` | `Enum8` | For `state`: `queued`, `running`, `succeeded`, `failed`, `unknown`, `cancelled`, or `deleted`. For `check`: `passed` or `failed`. |
+| `name` | `String` | For `check`: the name of the check, for example `heartbeat`, `expected_values`, or `rehearsal`. |
+| `native_id` | `String` | ID of the operation in `system.backups`. |
+| `query_id` | `String` | Query ID of the statement. |
+| `error` | `String` | Sanitized error. |
+| `num_files` | `UInt64` | Files written, when the server reported them. |
+| `total_size` | `UInt64` | Bytes written, when the server reported them. |
+| `details` | `String` | JSON: the source of the state, the results of checks, and other details. |
+
+### `backup_endpoints` {#backup-endpoints}
+
+```sql
+CREATE TABLE console_admin.backup_endpoints
+(
+    endpoint String,
+    note String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY endpoint
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `endpoint` | `String` | An S3 endpoint or pattern allowed in the console, in addition to `backup_s3_endpoints`. |
+| `note` | `String` | Why it is allowed. |
+| `deleted` | `Bool` | The endpoint is no longer allowed. Destinations that already use it keep working. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### Server bundle tables {#server-bundle-tables}
+
+The backup worker stores each server bundle in a temporary table `server_bundle_<id>`, where `<id>` is the first 16
+hexadecimal characters of the operation ID, with the columns `part UInt32`, `kind Enum8('header' = 1, 'data' = 2, 'tag' = 3)`,
+and `data String`. It backs the table up with `BACKUP TABLE`, and drops it. A bundle restore brings it back as
+`server_bundle_restore_<id>` and drops it after use. The tables hold only ciphertext.
+
+## Cluster tables {#cluster-tables}
+
+Created by **Set up** on **Clusters**.
+
+### `clusters` {#clusters}
+
+```sql
+CREATE TABLE console_admin.clusters
+(
+    cluster_id String,
+    name String,
+    environment LowCardinality(String),
+    owner String,
+    description String,
+    provider LowCardinality(String),
+    connection String,
+    requirements String,
+    policies String,
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY cluster_id
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `cluster_id` | `String` | ID of the cluster; the object segment of `/console/admin-clusters/<cluster_id>`. |
+| `name` | `String` | Name of the cluster. |
+| `environment` | `LowCardinality(String)` | Environment, for example `lab` or `development`. The agent changes only clusters of its `CLUSTER_AGENT_ENVIRONMENTS`. |
+| `owner` | `String` | Owner. |
+| `description` | `String` | Free text. |
+| `provider` | `LowCardinality(String)` | `docker-compose`, `kubernetes`, or `external` for a registered deployment. |
+| `connection` | `String` | JSON: the endpoints and the credential reference. |
+| `requirements` | `String` | JSON: the inputs of the **Purpose and ownership** step of the creation wizard, such as expected data, growth, concurrency, ingestion, and availability. |
+| `policies` | `String` | JSON: `backup_destination_id`, `maintenance_window`, and `notify_ref`. |
+| `deleted` | `Bool` | The cluster is removed from the inventory. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### `cluster_revisions` {#cluster-revisions}
+
+```sql
+CREATE TABLE console_admin.cluster_revisions
+(
+    cluster_id String,
+    revision UInt32,
+    spec String,
+    source LowCardinality(String),
+    note String,
+    created_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    created_by String MATERIALIZED currentUser(),
+    CONSTRAINT created_by_is_writer CHECK created_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (cluster_id, revision)
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `cluster_id` | `String` | The cluster. |
+| `revision` | `UInt32` | Revision number. |
+| `spec` | `String` | JSON: the desired configuration (topology, images, resources, settings), with secrets referenced, never stored; or the discovered description of a registered deployment. |
+| `source` | `LowCardinality(String)` | Who produced the revision: `console`, `agent`, or `observed` (a discovery of the agent). |
+| `note` | `String` | What the revision changed. |
+| `created_at`, `created_by` | | Time and writer. |
+
+### `cluster_operations` {#cluster-operations}
+
+```sql
+CREATE TABLE console_admin.cluster_operations
+(
+    op_id String,
+    cluster_id String,
+    kind LowCardinality(String),
+    revision UInt32,
+    parameters String,
+    requested_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    requested_by String MATERIALIZED currentUser(),
+    CONSTRAINT requested_by_is_writer CHECK requested_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY op_id
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `op_id` | `String` | Operation ID. |
+| `cluster_id` | `String` | The cluster. |
+| `kind` | `LowCardinality(String)` | The operation, for example `provision`, `configure`, `reconcile`, `resize`, `add_replica`, `add_shard`, `remove_shard`, `remove_replica`, `restart_node`, `backup`, `upgrade`, `retire`, `destroy`, or `release`. |
+| `revision` | `UInt32` | The revision of the desired configuration the operation applies. |
+| `parameters` | `String` | JSON parameters of the operation. |
+| `requested_at`, `requested_by` | | Time and requester. The agent checks the requester's capability with `EXECUTE AS <requested_by> CHECK GRANT`. |
+
+### `cluster_events` {#cluster-events}
+
+```sql
+CREATE TABLE console_admin.cluster_events
+(
+    op_id String,
+    cluster_id String,
+    kind LowCardinality(String),
+    state LowCardinality(String),
+    step String,
+    message String,
+    data String,
+    at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    recorded_by String MATERIALIZED currentUser(),
+    CONSTRAINT recorded_by_is_writer CHECK recorded_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (cluster_id, at) TTL toDateTime(at) + INTERVAL 30 DAY DELETE WHERE kind = 'heartbeat'
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `op_id` | `String` | The operation, or `agent:<AGENT_ID>` for an agent heartbeat, or empty for an event of the cluster. |
+| `cluster_id` | `String` | The cluster; empty for a heartbeat. |
+| `kind` | `LowCardinality(String)` | What the event is, for example `heartbeat`, `observation`, or an event of an operation (its state, a step, a claim). |
+| `state` | `LowCardinality(String)` | The state, for example `queued`, `running`, `succeeded`, `failed`, `rejected`, `cancelled`, `blocked` (**Needs an operator**), `unknown` (**Outcome unknown**), or `alive` for a heartbeat. |
+| `step` | `String` | The step of the operation. |
+| `message` | `String` | Human-readable message. |
+| `data` | `String` | JSON evidence. In a heartbeat: the providers, the environments, whether a state directory is set, the agent's public key and key ID, and the Kubernetes inventory. |
+| `at`, `recorded_by` | | Time and writer. Heartbeat rows are removed after 30 days. |
+
+### `cluster_observations` {#cluster-observations}
+
+```sql
+CREATE TABLE console_admin.cluster_observations
+(
+    cluster_id String,
+    node_id String,
+    role LowCardinality(String),
+    status LowCardinality(String),
+    data String,
+    at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    recorded_by String MATERIALIZED currentUser(),
+    CONSTRAINT recorded_by_is_writer CHECK recorded_by = currentUser()
+)
+ENGINE = MergeTree ORDER BY (cluster_id, node_id, at) TTL toDateTime(at) + INTERVAL 7 DAY
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `cluster_id` | `String` | The cluster. |
+| `node_id` | `String` | The node or Keeper member. |
+| `role` | `LowCardinality(String)` | Role of the member, for example a ClickHouse node or a Keeper member. |
+| `status` | `LowCardinality(String)` | Observed status. |
+| `data` | `String` | JSON: the values collected (version, uptime, replication, merges, disk, memory, Keeper `mntr`, and others). |
+| `at`, `recorded_by` | | Time and writer. Rows are removed after 7 days. |
+
+### `cluster_resources` {#cluster-resources}
+
+```sql
+CREATE TABLE console_admin.cluster_resources
+(
+    cluster_id String,
+    resource_id String,
+    kind LowCardinality(String),
+    name String,
+    owner_op String,
+    disposition LowCardinality(String),
+    retention_until Nullable(Date),
+    evidence String,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY (cluster_id, resource_id)
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `cluster_id` | `String` | The cluster. |
+| `resource_id` | `String` | ID of the provider resource. |
+| `kind` | `LowCardinality(String)` | Kind of resource: `container`, `volume`, `network`, `directory`, or, for Kubernetes, `clickhousecluster`, `keepercluster`, `secret`, `service`, `pvc`, `pv`, or `namespace`. |
+| `name` | `String` | Name of the resource at the provider. |
+| `owner_op` | `String` | The operation that created it. |
+| `disposition` | `LowCardinality(String)` | What happened or happens to it, for example `retained` or `deleted`. |
+| `retention_until` | `Nullable(Date)` | It is not deleted before this date. |
+| `evidence` | `String` | JSON evidence of its state. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+### `cluster_capabilities` {#cluster-capabilities}
+
+```sql
+CREATE TABLE console_admin.cluster_capabilities
+(
+    view_clusters UInt8, register UInt8, create_cluster UInt8, adopt UInt8, configure UInt8, scale UInt8, keeper UInt8,
+    maintain UInt8, upgrade UInt8, recover UInt8, decommission UInt8, retire UInt8, destroy UInt8
+)
+ENGINE = Null
+```
+
+Holds no data. Each column is a capability, granted as `INSERT(<column>)` and checked with `CHECK GRANT`. See
+[Privileges](/products/web-console/reference/privileges#cluster-capabilities).
+
+## Identity provider tables {#identity-provider-tables}
+
+Created by **Set up** on **Identity Providers → SSO (Keycloak)**. It does not add a provider.
+
+### `idp_providers` {#idp-providers}
+
+```sql
+CREATE TABLE console_admin.idp_providers
+(
+    id String,
+    kind Enum8('keycloak' = 1),
+    name String,
+    enabled Bool,
+    base_url String,
+    realm String,
+    client_id String,
+    scopes String,
+    username_claim String,
+    groups_claim String,
+    role_prefix String,
+    default_roles Array(String),
+    test_result String,
+    tested_at Nullable(DateTime64(3, 'UTC')),
+    deleted Bool DEFAULT false,
+    updated_at DateTime64(3, 'UTC') MATERIALIZED now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    CONSTRAINT updated_by_is_writer CHECK updated_by = currentUser()
+)
+ENGINE = ReplacingMergeTree(updated_at) ORDER BY id
+```
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | `String` | ID of the provider. |
+| `kind` | `Enum8` | `keycloak`. |
+| `name` | `String` | Name of the provider. |
+| `enabled` | `Bool` | The provider is enabled. |
+| `base_url` | `String` | URL of the Keycloak server. The issuer is `<base_url>/realms/<realm>`. |
+| `realm` | `String` | The realm. |
+| `client_id` | `String` | The public client of the console. |
+| `scopes` | `String` | Scopes requested. |
+| `username_claim` | `String` | Claim that is the ClickHouse user name. |
+| `groups_claim` | `String` | Claim with the groups of the user; empty: none. |
+| `role_prefix` | `String` | Prefix of the groups that give roles. |
+| `default_roles` | `Array(String)` | Roles every user of the provider gets. |
+| `test_result` | `String` | JSON result of the last connection test. Tokens are never stored. |
+| `tested_at` | `Nullable(DateTime64(3, 'UTC'))` | When the provider was last tested. |
+| `deleted` | `Bool` | The provider is removed. |
+| `updated_at`, `updated_by` | | Time and writer of the version. |
+
+These settings are what **Identity Providers → SSO (Keycloak)** shows and tests. The sign-in page itself uses the
+`sso_*` keys of the server configuration, and the token authenticator its own environment variables.
+
+## Writers of each table {#writers}
+
+| Table | Written by |
+|---|---|
+| `audit_log` | The console, the backup worker, the cluster agent, the access policy worker (`dap_reconcile`), the token authenticator (`sso_*` actions), and the recovery rehearsal (`recovery_rehearsal`). |
+| `component_policy`, `protected_accounts` | The console. |
+| `dap_attributes`, `dap_classifications`, `dap_rules`, `dap_access_tests`, `dap_test_runs` | The console. |
+| `dap_user_attributes` | The console, and the access policy worker when it imports a feed. |
+| `dap_owned`, `dap_deployments` | The console (deployments) and the access policy worker (reconciliations). |
+| `backup_destinations` | The console, and the backup worker, which adds its test results to `test_result`. |
+| `backup_schedules`, `backup_endpoints` | The console. |
+| `backup_operations` | The console, and the backup worker (scheduled runs, copies, server bundles). |
+| `backup_events` | The console, the backup worker, and the recovery rehearsal (`rehearsal` checks). |
+| `clusters`, `cluster_operations` | The console. |
+| `cluster_revisions`, `cluster_events` | The console and the cluster agent. |
+| `cluster_observations`, `cluster_resources` | The cluster agent. |
+| `cluster_capabilities` | Nobody: it holds no data. |
+| `idp_providers` | The console. |
+
+The privileges each process needs are in [Privileges](/products/web-console/reference/privileges#service-accounts).

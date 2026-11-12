@@ -1,0 +1,295 @@
+---
+description: 'A tutorial that sets up backups in the ClickHouse web console: a destination, a manual backup and restore, a daily schedule, the backup worker, a restore test, and an encrypted server bundle.'
+sidebarTitle: 'Back up and restore'
+slug: /web-console/tutorials/backups
+title: 'Tutorial: back up and restore a database'
+doc_type: 'guide'
+---
+
+In this tutorial, you protect a small database with the **Backup & Restore** page of the web console. You add a backup destination on a disk of the server, back up a demo database by hand, restore it under another name, schedule a daily backup with retention, run the backup worker once, verify a backup with a restore test, and finally back up the server configuration as an encrypted server bundle.
+
+It takes about 30 minutes. Every step says what you should see.
+
+## Prerequisites {#prerequisites}
+
+- The server with the console and the backup worker, deployed with Docker Compose as in [Deploy with Docker Compose](/products/web-console/how-to/deploy-with-docker-compose). The commands below run in the deployment directory, next to `compose.yaml` and `.env`.
+- The service account `backup_worker`, created from `service-accounts.sql` with a role made with the **Backup Administrator** template, as in [Create service accounts](/products/web-console/how-to/create-service-accounts).
+- You are signed in to the console as `default`, or as another user with all privileges.
+
+<Tip>
+Without Docker, run the server as usual and the worker with `node utils/web-console/backup_worker.mjs` from a checkout of the repository; the steps in the console are the same.
+</Tip>
+
+## Steps {#steps}
+
+<Steps>
+<Step title="Give the server a backup disk">
+
+A disk destination needs a disk of the server that is allowed in `backups.allowed_disk`. Create `config.d/backups.xml` in the deployment directory:
+
+```xml
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <backups>
+                <type>local</type>
+                <path>/var/lib/clickhouse/backups/</path>
+            </backups>
+        </disks>
+    </storage_configuration>
+    <backups>
+        <allowed_disk>backups</allowed_disk>
+    </backups>
+</clickhouse>
+```
+
+Mount it like `web-console.xml`: add this line to the `volumes` of the `clickhouse` service in `compose.yaml`:
+
+```yaml
+      - ./config.d/backups.xml:/etc/clickhouse-server/config.d/backups.xml:ro
+```
+
+Then recreate the server:
+
+```bash
+docker compose up -d clickhouse
+```
+
+The path is in the data volume of the server, which the `backup-worker` service also mounts, so that the worker can delete backups from it.
+
+**You should see** the disk in the list of disks:
+
+```bash
+set -a; . ./.env; set +a
+docker compose exec -T clickhouse clickhouse-client --password "$CLICKHOUSE_ADMIN_PASSWORD" --query "SELECT name, path FROM system.disks"
+```
+
+```text
+backups	/var/lib/clickhouse/backups/
+default	/var/lib/clickhouse/
+```
+
+</Step>
+<Step title="Set up Backup & Restore">
+
+In the console, open **Administration** → **Backup & Restore**. If the page shows **Set up Backup & Restore**, select **Set up**. The review lists the statements that create the database `console_admin` and five tables in it; select **Apply**.
+
+**You should see** the tabs **Overview**, **Backups**, **Server state**, **Restore**, **Schedules**, **Destinations**, **Operations**, and **Recovery verification**. The **Overview** shows the **Scheduler worker** box with the last heartbeat of the backup worker that `docker compose up -d` started.
+
+</Step>
+<Step title="Add a disk destination">
+
+On **Destinations**, select **Add destination** and fill in:
+
+| Field | Value |
+|---|---|
+| **Type** | **Server backup disk** |
+| **Name** | `local-disk` |
+| **Disk** | `backups (/var/lib/clickhouse/backups/)` |
+| **Prefix** | `console` (the default) |
+| **Allowed databases** | empty: any database |
+
+Select **Review**, then **Apply**.
+
+**You should see** `local-disk` in the table, **Disabled**, with **Never tested** in **Last test**. A destination stays disabled until it passes a test and you enable it.
+
+</Step>
+<Step title="Test and enable the destination">
+
+On the row of `local-disk`, select **Test**. The server writes a small backup under `console/_console_test/` and opens it.
+
+**You should see** `write` and `read` as **ok**, and `list` and `delete` as `tested by the backup worker`: the worker tests them with its own access when it next runs, and removes the test backup. Select **Record result**, then **Apply**.
+
+Then select **Enable** on the row, and **Apply**. **You should see** **Enabled** and a passed test.
+
+</Step>
+<Step title="Optional: add an S3 destination">
+
+To back up to an S3-compatible bucket as well, for example a MinIO server at `http://10.0.4.20:9000` with a bucket `backups`:
+
+1. Choose a name for the credentials of the worker, for example `BACKUP_S3_MAIN`, and put the worker's key into `backup-destinations.env` in the deployment directory, then restart the worker with `docker compose up -d backup-worker`:
+
+   ```text
+   BACKUP_S3_MAIN_ACCESS_KEY_ID=...
+   BACKUP_S3_MAIN_SECRET_ACCESS_KEY=...
+   ```
+
+2. Select **Add destination**, with **Type** **S3-compatible bucket**, a **Name** such as `minio`, the **Endpoint** `http://10.0.4.20:9000`, the **Bucket** `backups`, the server's **Access key ID** and **Secret access key**, and the **Worker credential reference** `BACKUP_S3_MAIN`.
+3. Select **Review**. When the endpoint is not allowed yet, the review includes a step that allows it, with a warning; for plain HTTP, also a warning that data and credentials travel in clear text. Select **Apply**.
+4. Test and enable it as in the previous step.
+
+The secret key goes into a named collection on the server and is never shown again. See [Destinations](/products/web-console/guides/backup-and-restore#destinations) for the allowed endpoints.
+
+</Step>
+<Step title="Create a demo database">
+
+Create a database with one table of 100,000 rows:
+
+```bash
+docker compose exec -T clickhouse clickhouse-client --password "$CLICKHOUSE_ADMIN_PASSWORD" --multiquery <<'EOF'
+CREATE DATABASE demo;
+CREATE TABLE demo.events (id UInt64, at DateTime, kind LowCardinality(String)) ENGINE = MergeTree ORDER BY id;
+INSERT INTO demo.events SELECT number, now() - number, ['view', 'click', 'buy'][number % 3 + 1] FROM numbers(100000);
+EOF
+```
+
+You can run the same statements in the SQL Console of the console instead.
+
+</Step>
+<Step title="Back up the database">
+
+On **Backups**, select **New backup**. The wizard has four steps:
+
+1. **Scope**: keep **What to back up** at **Whole databases** and select `demo`. Under **Server objects**, clear the option that includes the console's tables, to keep the backup small. Select **Next**.
+2. **Destination**: choose `local-disk`. Select **Next**.
+3. **Type**: keep **Full backup**, and keep the option that captures validation values: the row count and a fingerprint of each table, used later to check restores. Select **Next**.
+4. **Review**: the object `demo.events` with its engine `MergeTree` and 100,000 rows, and the consistency statement. Select **Start backup**.
+
+**You should see** the operation followed in a dialog until it is **Succeeded**. Closing the dialog does not stop the backup: it runs in the server. In the inventory, the backup has a row with its short ID, the scope `demo`, the type **full**, the destination, its size, and **Can be deleted** in **Retention**.
+
+</Step>
+<Step title="Restore it under another name">
+
+On **Restore**, select **Restore…** on the backup. The restore wizard has five steps:
+
+1. **Backup and chain**: the contents of the backup, the list of what it does not contain, and **The backup and its chain open: 1 tables.** Select **Next**.
+2. **Target**: the server, the version check, and the privileges, all **Yes**. Select **Next**.
+3. **Names and options**: the field `demo → target database` suggests `restore_demo_<date>_<time>`. Replace it with `demo_restored`. Select **Next**.
+4. **Conflicts**: **No conflicts: demo_restored do not exist and are created by the restore.** Select **Next**.
+5. **Confirm**: type `demo_restored`, and select **Start restore**.
+
+**You should see** the restore succeed, followed by the checks that compare the target with the backup: the tables and their engines, the row counts, and the fingerprints. Check the data yourself:
+
+```bash
+docker compose exec -T clickhouse clickhouse-client --password "$CLICKHOUSE_ADMIN_PASSWORD" --query "SELECT count() FROM demo_restored.events"
+```
+
+```text
+100000
+```
+
+A restore never writes into existing tables: had `demo_restored` existed, the **Conflicts** step would have stopped the restore.
+
+</Step>
+<Step title="Schedule a daily backup with retention">
+
+On **Schedules**, select **Add schedule** and fill in:
+
+| Field | Value |
+|---|---|
+| **Name** | `demo-daily` |
+| **Destination** | `local-disk` |
+| **Databases** | `demo` |
+| **Strategy** | **Full backup each time** |
+| **Frequency** | **Daily** |
+| **Hour**, **Minute** | `2`, `0` |
+| **Time zone** | `UTC` |
+| **Keep** | `7` |
+
+Select **Review**, then **Apply**.
+
+**You should see** `demo-daily` with `daily at 02:00 (UTC)`, its next run, **never** as its last run, and `keep 7 backups` as retention. **Retention preview** shows **No backups of the schedule here yet.**
+
+</Step>
+<Step title="Run the backup worker once">
+
+Schedules are run by the backup worker, not by the browser. Run one cycle of it, next to the worker that is already running (several workers can run at the same time):
+
+<Tabs>
+<Tab title="Docker Compose">
+
+```bash
+docker compose run --rm backup-worker backup-worker --once
+```
+
+</Tab>
+<Tab title="Node.js">
+
+```bash
+CLICKHOUSE_URL=http://127.0.0.1:8123 CLICKHOUSE_USER=backup_worker CLICKHOUSE_PASSWORD=... \
+node utils/web-console/backup_worker.mjs --once
+```
+
+</Tab>
+</Tabs>
+
+The worker logs JSON lines and exits. A cycle records a heartbeat, tests listing and deleting at `local-disk` and removes the test backup, and submits the scheduled run that was due in the last day: a run missed because no worker made it is made once within its period. The worker of the deployment runs the same cycle every 30 seconds, so it may have done some of this already; a run is never submitted twice.
+
+**You should see**, after **Refresh**:
+
+- on **Overview**, **Scheduler worker** with **Last seen** a few seconds ago;
+- on **Destinations**, the last test of `local-disk` with `list: ok, delete: ok`;
+- on **Backups**, a second backup marked `schedule demo-daily`, and on **Schedules**, its state as the last run of `demo-daily`.
+
+From now on, the worker of the deployment makes a backup every day at 02:00 UTC, and deletes the oldest when there are more than 7.
+
+</Step>
+<Step title="Verify a backup">
+
+On **Backups**, select **Check** on the first backup. It opens the backup read-only and reads every table. **You should see** **The backup opens, and every table was read completely.**, with `demo.events` and 100,000 rows read.
+
+Then select **Test restore**, and **Run restore test**. The console restores the backup into a new database `console_verify_<id>_demo`, compares it with the backup and with the values captured when it was made, and drops it.
+
+**You should see** **The test databases were dropped.**, and in the inventory the badges **Artifact opened** and **Restore test passed**. The **Recovery verification** tab lists the test with its checks; **Show** in **Checks** lists each one.
+
+</Step>
+<Step title="Back up the server configuration with a key file">
+
+A database backup does not contain the server configuration or its secrets. The backup worker backs them up as encrypted server bundles. Here, you use a master key in a file.
+
+1. Create the key and staging directories, then the key, with the bundle overlay of the deployment:
+
+   ```bash
+   mkdir -p bundle-keys restore-staging && sudo chown 101:101 bundle-keys restore-staging && sudo chmod 700 bundle-keys restore-staging
+   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker backup-worker bundle-key-init --key-file /keys/bundle.key
+   ```
+
+   **You should see** `Created /keys/bundle.key (readable by its owner only), fingerprint sha256:…`, and the advice to copy the key out of band.
+
+2. Copy `bundle-keys/bundle.key` (readable only by the user `101`, so read it with `sudo`) to a place outside this host and outside the backups, for example a password manager, and record the fingerprint with it. Without this key, no bundle can be decrypted.
+
+3. Check that the worker may store bundles. `service-accounts.sql` already contains this grant; if you created the account otherwise, run it:
+
+   ```sql
+   GRANT CREATE TABLE, DROP TABLE, INSERT, SELECT, BACKUP ON console_admin.server_bundle* TO backup_worker;
+   ```
+
+4. Restart the worker with the overlay:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.bundles.yaml up -d backup-worker
+   ```
+
+5. On **Server state**, the **Backup worker** box shows the worker, **Master key** **Key file on the worker host** with the fingerprint you recorded, and **Included** `/deploy/config.d`. Select **Back up the server state…**, choose `local-disk` as the **Destination**, and select **Request the bundle**.
+
+6. Within 30 seconds, the worker makes the bundle. **You should see**, after **Refresh**, a row in **Server bundles** that is **Succeeded**, with its files, its encrypted size, and the key `file` with its fingerprint.
+
+7. Select **Compare** on the row, then **Request the comparison**. **You should see** under **Restores**, after the next cycle of the worker, a result such as `2 same, 0 changed, 0 missing on the host, 0 not in the bundle`: the key, the bundle, and the destination all work.
+
+</Step>
+</Steps>
+
+## Clean up {#clean-up}
+
+Drop the restored database when you no longer need it:
+
+```sql
+DROP DATABASE demo_restored;
+```
+
+To remove the demo backups, select **Delete** on their rows and type their short IDs; the worker deletes them in its next cycle. Remove the schedule with **Remove** on **Schedules**.
+
+## What you learned {#what-you-learned}
+
+- A destination is approved by an administrator, tested from the server, and enabled; users choose it by name.
+- A backup records its operation before it is submitted, runs in the server, and can capture values that later restores are checked against.
+- A restore always goes into new databases and stops on conflicts.
+- Schedules, retention, deletions, and destination checks are done by the backup worker.
+- A restore test proves that a backup opens and matches on this server.
+- Server bundles back up what `BACKUP` cannot reach, encrypted with a master key that you keep out of band.
+
+Next:
+
+- [Backup & Restore](/products/web-console/guides/backup-and-restore): every tab, state, and privilege.
+- [Protect backups](/products/web-console/how-to/protect-backups): choose a key provider, rotate it, and protect the backup storage.
+- [Recover a whole server](/products/web-console/how-to/recover-a-server): the recovery procedure and its rehearsal.

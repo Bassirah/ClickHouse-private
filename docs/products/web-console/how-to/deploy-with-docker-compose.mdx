@@ -1,0 +1,217 @@
+---
+description: 'Deploy the ClickHouse server with the web console and its helper processes on one Docker host with Docker Compose, then upgrade or roll back.'
+sidebarTitle: 'Deploy with Docker Compose'
+slug: /web-console/how-to/deploy-with-docker-compose
+title: 'Deploy with Docker Compose'
+doc_type: 'guide'
+---
+
+Use this guide to deploy the ClickHouse server with the web console, and its helper processes, on one Docker host,
+from the image archives and the `deploy/` directory of a release of the console. Every environment gets the same
+images; what differs is in `.env` and `config.d/`.
+
+For Kubernetes, see [Deploy on Kubernetes](/products/web-console/how-to/deploy-on-kubernetes). For the components and
+how they fit together, see [Architecture](/products/web-console/overview#architecture).
+
+## Before you begin {#before-you-begin}
+
+- Docker with Compose v2 (`docker compose`).
+- The release of the console, made by `package_images.sh` (see
+  [Build and package the images](/products/web-console/how-to/build-and-package-images)):
+
+  | File | Content |
+  |---|---|
+  | `clickhouse-server-console-<version>-amd64.tar.gz` | The image `clickhouse-server-console:<version>`: the official `clickhouse/clickhouse-server` image of the same release, with the server binary of this build, which serves the console at `/console`. Every setting and environment variable of the official image applies. |
+  | `clickhouse-console-tools-<version>-amd64.tar.gz` | The image `clickhouse-console-tools:<version>`: Node.js with the helper processes. The first argument chooses the process: `backup-worker`, `cluster-agent`, `access-policy-worker`, or `sso-authenticator`. |
+  | `MANIFEST.txt` | The commit, the base image digest, and the image IDs. |
+  | `SHA256SUMS` | The checksums of the archives. |
+  | `deploy/` | `compose.yaml` and its overrides, `kubernetes.yaml`, `.env.example`, `config.d/`, `service-accounts.sql`, and `README.md`. |
+
+  The version is `<ClickHouse release>-console.<commit>`.
+
+## Load and verify the images {#load-and-verify-the-images}
+
+In the directory of the release:
+
+```bash
+sha256sum -c SHA256SUMS
+docker load -i clickhouse-server-console-<version>-amd64.tar.gz
+docker load -i clickhouse-console-tools-<version>-amd64.tar.gz
+```
+
+`sha256sum` prints `OK` for each archive, and `docker load` prints the name of each image. Compare the image IDs with
+`MANIFEST.txt`:
+
+```bash
+docker image inspect clickhouse-server-console:<version> clickhouse-console-tools:<version> --format '{{.Id}}'
+```
+
+To use a registry instead, tag and push both images, then use the registry names in `compose.yaml`:
+
+```bash
+docker tag clickhouse-server-console:<version> registry.example.com/clickhouse/clickhouse-server-console:<version>
+docker push registry.example.com/clickhouse/clickhouse-server-console:<version>
+```
+
+## Configure the environment {#configure-the-environment}
+
+Work in the `deploy/` directory.
+
+1. Create `.env`, readable by its owner only, and fill it in:
+
+   ```bash
+   cp .env.example .env && chmod 600 .env
+   ```
+
+   | Variable | Meaning |
+   |---|---|
+   | `CONSOLE_VERSION` | The version of the images, already set by `package_images.sh`. |
+   | `CONSOLE_BIND`, `CONSOLE_HTTP_PORT`, `CONSOLE_NATIVE_PORT` | The address and ports the server publishes on the host (default `127.0.0.1`, `8123`, `9000`). Use the host's address, or `0.0.0.0`, only behind a firewall or a TLS-terminating proxy: otherwise the console sends passwords over plain HTTP. |
+   | `CLICKHOUSE_ADMIN_PASSWORD` | The password of `default`, the first administrator (with access management). |
+   | `BACKUP_WORKER_PASSWORD`, `ACCESS_POLICY_WORKER_PASSWORD`, `CLUSTER_AGENT_PASSWORD` | The passwords of the service accounts of the helpers. |
+   | `ACCESS_POLICY_INTERVAL_SECONDS`, `ATTRIBUTE_FEED`, `ATTRIBUTE_FEED_SOURCE`, `ATTRIBUTE_FEED_TOKEN` | The access policy worker: its interval, and an optional attribute feed. |
+   | `DOCKER_GID`, `CLUSTER_AGENT_UID`, `CLUSTER_AGENT_STATE_DIR`, `CLUSTER_AGENT_ENVIRONMENTS`, `CLUSTER_AGENT_KUBECONFIG`, `CLUSTER_AGENT_K8S_NAMESPACES` | The cluster agent (`compose.cluster-agent.yaml`). |
+   | `BUNDLE_KEY_PROVIDER`, `VAULT_ADDR`, `VAULT_TRANSIT_KEY`, `BUNDLE_DESTINATION`, `BUNDLE_EVERY_HOURS` | Server bundles (`compose.bundles.yaml`). |
+   | `SSO_NAME`, `SSO_ISSUER`, `SSO_CLIENT_ID`, `SSO_SYNC_CLIENT_ID`, `SSO_SYNC_PASSWORD`, `SSO_ROLE_PREFIX`, `SSO_DEFAULT_ROLES` | Single sign-on (`compose.sso.yaml`). |
+
+   Every variable is described in [Configuration](/products/web-console/reference/configuration).
+
+2. Edit `config.d/web-console.xml`: the links of the Resources group (internal mirrors, or empty on a network without
+   Internet access), the database of the console tables (`admin_database`, default `console_admin`), and the S3
+   endpoints allowed for backups (`backup_s3_endpoints`). A configuration reload applies changes without a restart.
+   See [`web_console`](/products/web-console/reference/configuration#web-console).
+3. Optionally, create `backup-destinations.env` with the S3 credentials of the backup destinations, named after their
+   credential reference: `<REF>_ACCESS_KEY_ID` and `<REF>_SECRET_ACCESS_KEY`. Keep it readable by its owner only.
+
+Further server configuration goes into more files mounted into `/etc/clickhouse-server/config.d/` and
+`/etc/clickhouse-server/users.d/`, as for the official image: add a line to the `volumes` of the `clickhouse` service
+for each.
+
+## Start the server {#start-the-server}
+
+```bash
+docker compose up -d clickhouse
+docker compose ps clickhouse
+```
+
+The service becomes `healthy` when `/ping` answers. It keeps its data and logs in the volumes `clickhouse-data` and
+`clickhouse-logs`.
+
+## Sign in and set up {#sign-in-and-set-up}
+
+1. Open `http://<host>:<CONSOLE_HTTP_PORT>/console`, and sign in as `default` with `CLICKHOUSE_ADMIN_PASSWORD`.
+2. Under **Administration**, select **Set up** on **Component Access**, **Backup & Restore**, **Clusters**, and the
+   tabs of **Data Access Policies** that you use. This creates the console tables. See
+   [Setting up](/products/web-console/guides/component-access#setting-up).
+3. Create the service accounts of the helpers, as described in
+   [Create the service accounts](/products/web-console/how-to/create-service-accounts):
+
+   ```bash
+   set -a; . ./.env; set +a
+   docker compose exec -T clickhouse clickhouse-client --password "$CLICKHOUSE_ADMIN_PASSWORD" \
+       --param_backup_pw="$BACKUP_WORKER_PASSWORD" --param_policy_pw="$ACCESS_POLICY_WORKER_PASSWORD" \
+       --param_agent_pw="$CLUSTER_AGENT_PASSWORD" \
+       --multiquery < service-accounts.sql
+   ```
+
+   Every password in the command must be set in `.env`. For a helper you do not deploy, for example the cluster agent,
+   delete its section of `service-accounts.sql` and its `--param_...` argument instead of passing an empty password.
+   The section of `sso_sync` is commented out: with single sign-on, uncomment it and add
+   `--param_sso_pw="$SSO_SYNC_PASSWORD"`.
+
+## Start the helpers {#start-the-helpers}
+
+```bash
+docker compose up -d
+```
+
+This starts the backup worker and the access policy worker next to the server. Their heartbeats appear on the Backup &
+Restore **Overview** and on the Cluster Inventory.
+
+Optional parts are override files, added with `-f` to `compose.yaml`. Use the same list of files in every later
+`docker compose` command:
+
+| File | Adds | Guide |
+|---|---|---|
+| `compose.cluster-agent.yaml` | The cluster agent, which creates and operates clusters on this host. | [Cluster agent on a Docker host](#cluster-agent-on-a-docker-host) |
+| `compose.bundles.yaml` | Server bundles in the backup worker: the configuration of this deployment and its secrets, encrypted. | [Server bundles](/products/web-console/guides/backup-and-restore#server-bundles) |
+| `compose.sso.yaml` | The token authenticator, and `config.d/sso.xml` in the server, for single sign-on with Keycloak. | [Configure single sign-on with Keycloak](/products/web-console/how-to/configure-keycloak-sso) |
+
+For example, with the cluster agent and single sign-on:
+
+```bash
+docker compose -f compose.yaml -f compose.cluster-agent.yaml -f compose.sso.yaml up -d
+```
+
+### Cluster agent on a Docker host {#cluster-agent-on-a-docker-host}
+
+The agent uses the host network and the Docker socket. Access to the socket is equivalent to root on the host: run the
+agent only where that is acceptable. Its state directory (`CLUSTER_AGENT_STATE_DIR`) is mounted at the same path as on
+the host, because the Docker daemon resolves the paths of the deployments it generates, and must be writable by
+`CLUSTER_AGENT_UID`:
+
+```bash
+sudo mkdir -p /var/lib/clickhouse-console/clusters && sudo chown 1000 /var/lib/clickhouse-console/clusters
+stat -c %g /var/run/docker.sock                    # the value of DOCKER_GID
+docker compose -f compose.yaml -f compose.cluster-agent.yaml up -d
+```
+
+- Back up the state directory: it holds the agent's key pair (`agent-key.pem`) and the secrets of the clusters it
+  created.
+- The images of the clusters (`clickhouse/clickhouse-server:<version>`, and `contentsquareplatform/chproxy:<version>`
+  for client routing) must be on the host: the agent does not pull images.
+- Set `CLUSTER_AGENT_KUBECONFIG` to a kubeconfig on the host to enable the kubernetes provider as well.
+- On Docker Desktop, the host network is that of Docker Desktop's virtual machine: enable host networking in its
+  settings (**Resources → Network**). The agent then reaches the published ports of the server.
+
+See [Clusters](/products/web-console/guides/clusters#cluster-agent).
+
+### Server bundles {#server-bundles}
+
+With `BUNDLE_KEY_PROVIDER=file` (the default), create the master key once, keep a copy out of band with its
+fingerprint, then start the worker with the override:
+
+```bash
+mkdir -p bundle-keys restore-staging && sudo chown 101:101 bundle-keys restore-staging && sudo chmod 700 bundle-keys restore-staging
+docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker backup-worker bundle-key-init --key-file /keys/bundle.key
+docker compose -f compose.yaml -f compose.bundles.yaml up -d backup-worker
+```
+
+Without the key, no bundle can be decrypted. See [Server bundles](/products/web-console/guides/backup-and-restore#server-bundles)
+for the other key providers.
+
+## Verify {#verify}
+
+- `docker compose ps` shows every service running, and the server `healthy`.
+- `docker compose logs backup-worker access-policy-worker` shows no connection or authentication errors.
+- In the console, **Backup & Restore → Overview** shows the heartbeat of the backup worker.
+
+## Upgrade {#upgrade}
+
+1. Load and verify the new archives, as in [Load and verify the images](#load-and-verify-the-images).
+2. Set `CONSOLE_VERSION` in `.env` to the new version.
+3. Apply, with the same list of files as before:
+
+   ```bash
+   docker compose up -d
+   ```
+
+The data stays in the volumes.
+
+## Roll back {#roll-back}
+
+Set the previous version in `CONSOLE_VERSION` again, and run `docker compose up -d`.
+
+<Warning>
+Rolling back to a server older than the ClickHouse release of the data is not supported by ClickHouse. Keep the
+release of the base image when you roll back the console: a version with the same `<ClickHouse release>` part.
+</Warning>
+
+## Troubleshooting {#troubleshooting}
+
+| Symptom | Cause and fix |
+|---|---|
+| `set CONSOLE_VERSION in .env` (or another `set ... in .env`) | A required variable is empty in `.env`. |
+| The helpers do not start | They wait until the server is `healthy`. Check `docker compose logs clickhouse`. |
+| A helper logs an authentication error | Its service account does not exist, or its password differs from `.env`: run `service-accounts.sql` again with the same passwords. |
+| The console cannot be reached from another machine | `CONSOLE_BIND` is `127.0.0.1` by default. Put a TLS-terminating proxy in front, or bind to the host's address behind a firewall. |

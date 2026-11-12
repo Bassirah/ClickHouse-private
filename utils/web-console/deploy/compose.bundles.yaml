@@ -7,12 +7,12 @@
 # a sealed envelope), with its fingerprint: without it, no bundle can be decrypted.
 #
 #   mkdir -p bundle-keys restore-staging && sudo chown 101:101 bundle-keys restore-staging && sudo chmod 700 bundle-keys restore-staging
-#   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker bundle-key-init --key-file /keys/bundle.key
+#   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker backup-worker bundle-key-init --key-file /keys/bundle.key
 #
 # With BUNDLE_KEY_PROVIDER=vault, set VAULT_ADDR and VAULT_TRANSIT_KEY in .env, and put a token that may only encrypt and
 # decrypt with that key in bundle-keys/vault-token (mode 600). With a passphrase, bundles are made by a person:
 #
-#   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker bundle --destination <name>
+#   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker backup-worker bundle --destination <name>
 services:
   backup-worker:
     environment:

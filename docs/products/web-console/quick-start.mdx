@@ -1,0 +1,117 @@
+---
+description: 'Start a ClickHouse server with the web console in Docker, sign in, run a query, and set up the administration pages, in about ten minutes.'
+sidebarTitle: 'Quick start'
+slug: /web-console/quick-start
+title: 'Quick start'
+doc_type: 'guide'
+---
+
+In this quick start you run the ClickHouse server image that includes the web console, sign in as the administrator,
+run a query, and set up the administration pages. It takes about ten minutes on a machine with Docker.
+
+## Before you begin {#before-you-begin}
+
+- Docker 24 or later.
+- The image archive `clickhouse-server-console-<version>-amd64.tar.gz` and its `SHA256SUMS`, from the release of the
+  console. To build them yourself, see [Build and package the images](/products/web-console/how-to/build-and-package-images).
+- A browser on the same machine.
+
+If you already run a ClickHouse server built with the console, skip to [Sign in](#sign-in): the console is at
+`/console` on its HTTP port.
+
+## Start the server {#start-the-server}
+
+<Steps>
+<Step title="Load the image">
+
+Check the archive and load it:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+docker load -i clickhouse-server-console-<version>-amd64.tar.gz
+```
+
+`docker load` prints `Loaded image: clickhouse-server-console:<version>`.
+
+</Step>
+<Step title="Run the server">
+
+Choose a password for the `default` user, and start the server. The HTTP port is published on `127.0.0.1` only, so the
+server is not reachable from other machines:
+
+```bash
+docker run -d --name clickhouse-console \
+    -p 127.0.0.1:8123:8123 \
+    -e CLICKHOUSE_PASSWORD='choose-a-password' \
+    -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+    --ulimit nofile=262144:262144 \
+    clickhouse-server-console:<version>
+```
+
+`CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1` lets `default` create users and roles, which the administration pages need.
+The server image is the official `clickhouse/clickhouse-server` image with this build's binary, so all of its
+settings and environment variables apply.
+
+</Step>
+<Step title="Check that it answers">
+
+```bash
+curl http://127.0.0.1:8123/ping
+```
+
+The answer is `Ok.`.
+
+</Step>
+</Steps>
+
+## Sign in {#sign-in}
+
+Open `http://localhost:8123/console`. Sign in with the username `default` and the password you chose.
+
+The home page lists the panels your user can open, grouped as in the sidebar: **Workspace**, **Diagnostics**,
+**Administration**, **Identity Providers**, and **Resources**. The console checks with the server which panels your user
+may use, so another user may see fewer of them.
+
+<Note>
+The password stays in the memory of the browser tab. Reloading the page signs you out.
+</Note>
+
+## Run a query {#run-a-query}
+
+1. Select **SQL Console**. The console signs in to it for you.
+2. Run:
+
+   ```sql
+   SELECT version(), uptime()
+   ```
+
+3. Select **Dashboard** in the sidebar to see the server's metrics. Panels keep their state while you switch between
+   them.
+
+## Set up the administration pages {#set-up-the-administration-pages}
+
+The Users, Roles & Permissions, and Profiles & Quotas pages work at once. The audit log and the component access
+policy need tables, which you create once:
+
+1. In the sidebar, under **Administration**, select **Component Access**.
+2. Select **Set up**, keep the default retention of the audit records, and select **Review**.
+3. Read the statements that will run, and select **Apply**.
+
+The console creates the database `console_admin` with its tables, a policy rule that lets every user open every
+component, and the role `console_admin_reader`. Nothing changes for users until you edit the policy.
+
+Select **Audit Activity**: the setup is the first record.
+
+## Clean up {#clean-up}
+
+```bash
+docker rm -f clickhouse-console
+```
+
+## Next steps {#next-steps}
+
+- Create users and roles, and decide who sees which component:
+  [Set up the console as its first administrator](/products/web-console/tutorials/first-administrator).
+- Deploy for real, with the helper processes: [Deploy with Docker Compose](/products/web-console/how-to/deploy-with-docker-compose)
+  or [Deploy on Kubernetes](/products/web-console/how-to/deploy-on-kubernetes).
+- Learn the console: [The console](/products/web-console/guides/console).

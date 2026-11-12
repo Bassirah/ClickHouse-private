@@ -1,0 +1,104 @@
+---
+description: 'Remove the access of a person who leaves: suspend the ClickHouse user, revoke its roles, delete it, and check the audit log; for LDAP and single sign-on users, disable them in the directory or identity provider.'
+sidebarTitle: 'Offboard a user'
+slug: /web-console/how-to/offboard-a-user
+title: 'Offboard a user'
+doc_type: 'guide'
+---
+
+Use this procedure to end the access of a person who leaves, or of a service account that is retired, so that new logins are rejected, open sessions lose their privileges, and the change is recorded.
+
+How you offboard depends on where the user comes from. Check its **Source** on the **Users** page first:
+
+| Source | Procedure |
+|---|---|
+| **SQL**, **SQL (replicated)**, **SQL (memory)**, with a password or another method | [A user created with SQL](#a-user-created-with-sql). |
+| **SQL** with the authentication `http` (single sign-on) | [A single sign-on user](#a-single-sign-on-user). |
+| **LDAP** | [An LDAP directory user](#an-ldap-directory-user). |
+| **Configuration** | Remove the user from the configuration file (`users.xml` or a file in `users.d`). The console cannot change it. |
+
+## Prerequisites {#prerequisites}
+
+- A console user with `ALTER USER` and `DROP USER` on the user, for example a role created from the ClickHouse Access Administrator [role template](/products/web-console/guides/users-and-roles#role-templates) whose name pattern matches the user.
+- To revoke roles: `ROLE ADMIN`, or the roles granted to you `WITH ADMIN OPTION`.
+- To stop running queries: `KILL QUERY`.
+- To check the result: `SELECT` on the console audit log and on `system.query_log`.
+
+## A user created with SQL {#a-user-created-with-sql}
+
+<Steps>
+<Step title="Open the user">
+On **Users**, search for the name and select the user. If its page says **Protected account**, the console does not suspend or delete it. If the protection is no longer needed, select **Remove protection** for it on the **Component Access** page first (see [Protected accounts](/products/web-console/guides/users-and-roles#protected-accounts)).
+</Step>
+<Step title="Suspend the user">
+Select **Suspend**. To end the queries the user is running now, also select **Also stop the queries the user is running now (KILL QUERY)**. Select **Review**, then **Suspend**.
+
+The console runs:
+
+```sql
+ALTER USER alice VALID UNTIL '2000-01-01 00:00:00 UTC';
+KILL QUERY WHERE user = 'alice' ASYNC;
+```
+
+New logins are rejected over every interface, and HTTP clients of the user stop working at their next request. The state of the user becomes **Suspended**. See [Suspending a user](/products/web-console/guides/users-and-roles#suspending-a-user) for the exact effect.
+</Step>
+<Step title="Revoke the roles and privileges">
+Native connections that are already open, such as `clickhouse-client` and pooled driver connections, keep working after a suspension until they disconnect. To cut them off, revoke what gives them access, which applies to open sessions at their next query:
+
+1. On the **Roles** tab, select **Revoke** for each role.
+2. On the **Permissions** tab, select **Revoke** for each direct privilege.
+
+For example:
+
+```sql
+REVOKE analyst, developer FROM alice;
+REVOKE ALL ON *.* FROM alice;
+```
+</Step>
+<Step title="Delete the user">
+When the account is no longer needed, select **Delete**. The dialog lists what depends on the user. Before you confirm, handle these:
+
+- **Views and tables that run as this user (DEFINER)**: views with `SQL SECURITY DEFINER` stop working until their definer is changed. Change the definer to a service account first.
+- **Quotas naming this user** and **Row policies naming this user**: review them.
+- **Queries running now**: stop them, or wait for them to finish.
+
+Type the name of the user and select **Review**, then **Delete**. This runs `DROP USER alice` and cannot be undone. Keeping the user suspended instead preserves its configuration for a later review.
+</Step>
+</Steps>
+
+## A single sign-on user {#a-single-sign-on-user}
+
+A user of single sign-on is `IDENTIFIED WITH http` and created by the user sync of the token authenticator. Offboard it in the identity provider:
+
+1. In Keycloak, disable the user, or remove it from every group whose name starts with the role prefix (`clickhouse-` by default).
+2. The console of a signed-in user cannot refresh the access token any more, so it signs the user out at the next refresh. An access token that was already issued stays valid until it expires, which is 5 minutes by default in Keycloak.
+3. The user sync drops the ClickHouse user within its interval (`SSO_SYNC_INTERVAL_SECONDS`, 60 seconds by default), and records `sso_drop_user` in the audit log.
+
+Do not delete such a user in the console while it is still enabled in the provider: the sync creates it again at its next run. Roles you revoke in the console are also granted again if the groups still give them. Without the user sync, delete the user in the console after disabling it in the provider, as for a [user created with SQL](#a-user-created-with-sql). See [Identity Providers](/products/web-console/guides/identity-providers#sso) and the [user sync reference](/products/web-console/reference/token-authenticator-api#user-sync).
+
+## An LDAP directory user {#an-ldap-directory-user}
+
+Directory users cannot be suspended or deleted in the console: ClickHouse gets them from the directory at each sign-in.
+
+1. In the directory, disable the user, or remove it from the groups that give ClickHouse roles.
+2. The change takes effect after the `verification_cooldown` of the LDAP server configuration (the console's configuration form proposes 300 seconds): until then, the server may reuse a successful password check.
+
+If a local user (SQL or configuration) has the same name, it comes first and is not affected: offboard it as well. See [Identity Providers](/products/web-console/guides/identity-providers#ldap) and the [LDAP authenticator](/operations/external-authenticators/ldap).
+
+## Verify {#verify}
+
+1. On **Users**, the state of the user is **Suspended**, or the user is no longer listed.
+2. On **Audit Activity**, the **Console actions** tab shows the records of the suspension, the revocations, and the deletion, with the result **Success**. Search for the user name.
+3. The **Access changes seen by the server** tab shows the statements. A change marked **Outside the console** was made with SQL or by another tool, such as the user sync.
+4. The **Access decisions** tab shows queries of the user that the server refused after the revocation.
+
+## Troubleshooting {#troubleshooting}
+
+| Symptom | Cause and fix |
+|---|---|
+| **Suspend** or **Delete** is disabled with `Protected account.` | Remove the protection on the **Component Access** page first. |
+| The dialog says that the change would leave no platform administrator. | The user is the last one who can change the console policy. Grant the Platform Administrator role to another user first. |
+| **Suspend** is disabled with `Your user does not have ALTER USER for this user.` | You can manage only the users whose names match your grants. Ask an administrator. |
+| The user still runs queries after the suspension. | An open native connection. Revoke the roles and privileges, or stop the queries with **KILL QUERY**. |
+| A deleted single sign-on user comes back. | The user is still in a group of the provider. Disable it in the provider. |
+| The partial result says that some steps did not run. | The steps marked **Done** took effect. Review the current state and run the missing steps again. |

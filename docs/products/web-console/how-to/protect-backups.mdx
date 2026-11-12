@@ -1,0 +1,204 @@
+---
+description: 'How to choose and set up the master key of server bundles in the ClickHouse web console, rotate it, test it with a restore rehearsal, and protect the backup storage.'
+sidebarTitle: 'Protect backups'
+slug: /web-console/how-to/protect-backups
+title: 'Protect backups and server bundles'
+doc_type: 'guide'
+---
+
+This guide sets up the master key that encrypts the [server bundles](/products/web-console/guides/backup-and-restore#server-bundles) of the backup worker, rotates it, proves that it works, and protects the storage of the backups against loss, deletion, and disclosure.
+
+## Prerequisites {#prerequisites}
+
+- The console with Backup & Restore set up and at least one enabled [destination](/products/web-console/guides/backup-and-restore#destinations).
+- The [backup worker](/products/web-console/guides/backup-and-restore#backup-worker) running on the server host, with its service account. With Docker Compose, the commands below use the overlay `compose.bundles.yaml` of the deployment directory, which mounts the deployment's `config.d`, a key directory `bundle-keys`, and a staging directory `restore-staging` into the worker.
+- The grant for the bundle tables of the worker (included in `service-accounts.sql`):
+
+  ```sql
+  GRANT CREATE TABLE, DROP TABLE, INSERT, SELECT, BACKUP ON console_admin.server_bundle* TO backup_worker;
+  ```
+
+## Choose a key provider {#choose-a-key-provider}
+
+Each bundle is encrypted with its own random data key, wrapped by the master key. The master key is never stored with a bundle. Without it, no bundle can be decrypted, so where it lives decides both who can read the bundles and what you need to recover.
+
+| `BUNDLE_KEY_PROVIDER` | Where the master key is | Bundles from the console and on a schedule | Needed to restore |
+|---|---|---|---|
+| `file` | A file on the worker host, readable by its owner only | Yes | A copy of the key file, kept out of band |
+| `vault` | The Transit secrets engine of HashiCorp Vault; the key never leaves Vault | Yes | Vault, reachable from the worker, and a token |
+| `passphrase` | Nowhere: derived from a passphrase with scrypt | No: a person makes and restores bundles on the worker host | The passphrase |
+
+Choose `vault` when you run Vault already; `file` otherwise; `passphrase` only when no key may be stored on the host and a person can make each bundle.
+
+## Use a key file {#use-a-key-file}
+
+1. Create the key and staging directories, then the key:
+
+   ```bash
+   mkdir -p bundle-keys restore-staging && sudo chown 101:101 bundle-keys restore-staging && sudo chmod 700 bundle-keys restore-staging
+   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker backup-worker bundle-key-init --key-file /keys/bundle.key
+   ```
+
+   Without Compose, run `node utils/web-console/backup_worker.mjs bundle-key-init --key-file <path>` as the user of the worker.
+
+   The command prints the fingerprint of the key:
+
+   ```text
+   Created /keys/bundle.key (readable by its owner only), fingerprint sha256:….
+   ```
+
+   It refuses to replace an existing file: a replaced key makes every bundle encrypted with it unreadable.
+
+2. Copy the key out of band, away from this host and from the backups: a password manager, or a sealed envelope. Record the fingerprint with it. The worker never copies the key, and never includes it in a bundle, even when it lies under `BUNDLE_PATHS`.
+3. Configure the worker. `compose.bundles.yaml` sets `BUNDLE_KEY_PROVIDER` to `file` by default and `BUNDLE_KEY_FILE` to `/keys/bundle.key`. Without Compose, set:
+
+   ```text
+   BUNDLE_KEY_PROVIDER=file
+   BUNDLE_KEY_FILE=<path>
+   ```
+
+   The file must have mode `600`: the worker refuses a key file that other users can read.
+4. Start the worker:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.bundles.yaml up -d backup-worker
+   ```
+
+## Use HashiCorp Vault Transit {#use-vault-transit}
+
+1. In Vault, enable the Transit secrets engine and create a key, for example `clickhouse-bundles`:
+
+   ```bash
+   vault secrets enable transit
+   vault write -f transit/keys/clickhouse-bundles
+   ```
+
+2. Create a policy that allows only `encrypt` and `decrypt` with that key. The worker calls `POST /v1/<mount>/encrypt/<key>` and `POST /v1/<mount>/decrypt/<key>`, and nothing else:
+
+   ```text
+   path "transit/encrypt/clickhouse-bundles" {
+     capabilities = ["update"]
+   }
+   path "transit/decrypt/clickhouse-bundles" {
+     capabilities = ["update"]
+   }
+   ```
+
+   Save it as `bundle-worker.hcl`, then create the policy and a token with it:
+
+   ```bash
+   vault policy write clickhouse-bundle-worker bundle-worker.hcl
+   vault token create -policy=clickhouse-bundle-worker
+   ```
+
+3. Give the token to the worker. With Docker Compose, put it into `bundle-keys/vault-token` with mode `600` (owned by the user `101`), and set in `.env`:
+
+   ```text
+   BUNDLE_KEY_PROVIDER=vault
+   VAULT_ADDR=https://vault.example.com:8200
+   VAULT_TRANSIT_KEY=clickhouse-bundles
+   ```
+
+   Without Compose, set `VAULT_ADDR`, `VAULT_TRANSIT_KEY`, and `VAULT_TOKEN` or `VAULT_TOKEN_FILE`; `VAULT_TRANSIT_MOUNT` if the engine is not mounted at `transit`, and `VAULT_NAMESPACE` for a Vault namespace.
+4. Start the worker:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.bundles.yaml up -d backup-worker
+   ```
+
+The key appears in the console as `vault:<mount>/<key>`, for example `vault:transit/clickhouse-bundles`. Vault must be reachable to restore a bundle: keep its own backups and recovery separate from those of this server.
+
+## Use a passphrase {#use-a-passphrase}
+
+1. Set `BUNDLE_KEY_PROVIDER=passphrase` for the worker. Automatic bundles (`BUNDLE_DESTINATION`, `BUNDLE_EVERY_HOURS`) are not possible: the long-running worker never has the passphrase, and the console cannot request bundles.
+2. Make each bundle on the worker host, in a terminal. The passphrase has at least 12 characters, and is read without echo:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.bundles.yaml run --rm backup-worker backup-worker bundle --destination <name>
+   ```
+
+   Without Compose: `node utils/web-console/backup_worker.mjs bundle --destination <name>`.
+3. Keep the passphrase out of band. Restores also need it: `backup-worker bundle-restore --bundle <ID> --mode compare|stage`.
+
+## Verify {#verify}
+
+1. On **Administration** → **Backup & Restore** → **Server state**, the **Backup worker** box shows the provider, the key fingerprint (or `vault:<mount>/<key>`), the included paths, and no error.
+2. Select **Back up the server state…**, a **Destination**, and **Request the bundle**. After the next cycle of the worker, the bundle is **Succeeded**, with the key in its **Key** column.
+3. Select **Compare** on the bundle, then **Request the comparison**. The result lists the files that are the same, changed, missing on the host, or not in the bundle. A comparison proves that the master key, the bundle, and the destination all still work: repeat it regularly, for example after every change of the configuration.
+
+To make bundles automatically, set `BUNDLE_DESTINATION` to the name of a destination and `BUNDLE_EVERY_HOURS` to an interval, then restart the worker. The box shows **Automatic bundles**.
+
+## Rotate the master key {#rotate-the-master-key}
+
+Each bundle records the key that encrypted it, and the worker refuses to decrypt a bundle made with another key: `The bundle was encrypted with the master key …; this worker has …`. Keep every old key as long as bundles made with it are kept.
+
+- **Key file.** Move the old key aside without deleting it, for example to `bundle-keys/bundle-2026-11-12.key`, create a new key at `/keys/bundle.key` with `bundle-key-init`, copy it out of band with its fingerprint, and restart the worker. New bundles show the new fingerprint. To restore an older bundle, run the restore command with the old key:
+
+  ```bash
+  docker compose -f compose.yaml -f compose.bundles.yaml run --rm -e BUNDLE_KEY_FILE=/keys/bundle-2026-11-12.key \
+      backup-worker backup-worker bundle-restore --bundle <ID> --mode compare
+  ```
+
+- **Vault Transit.** Rotate the key in Vault with `vault write -f transit/keys/clickhouse-bundles/rotate`. The name of the key, and therefore the key shown in the console, stays the same, and Vault decrypts data keys wrapped with its older versions as long as you keep them decryptable.
+- **Passphrase.** Use the new passphrase for new bundles. Older bundles still need the passphrase they were made with.
+
+After a rotation, make a bundle and compare it, as in [Verify](#verify).
+
+## Rehearse a recovery {#rehearse-a-recovery}
+
+A comparison proves the key; a rehearsal proves the whole recovery. Stage the latest bundle (**Stage…** on **Server state**, or `bundle-restore --mode stage`), then run the recovery rehearsal on the server host with the staging directory:
+
+```bash
+node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user <admin> --password <password> \
+    --binary /usr/bin/clickhouse --staged <staging directory of a server bundle>
+```
+
+It starts an isolated server from the staged configuration, restores the latest backup of each database from its real destination, and compares the data. `--staged` needs a bundle that includes `/etc/clickhouse-server`, the default of `BUNDLE_PATHS`; the Compose overlay includes only `/deploy/config.d`, so omit `--staged` there. The result is shown as **Recovery rehearsed** in the inventory. Delete the staging directory afterwards: it holds secrets in clear. See [Recover a whole server](/products/web-console/how-to/recover-a-server#rehearse-the-recovery).
+
+## Protect the backup storage {#protect-the-backup-storage}
+
+The **Overview** checks the backups of the last 7 days against the 3-2-1-1 rule (**Resilience (3-2-1-1)**), and **Destinations** shows what protects each destination in its **Protection** column.
+
+| Rule | How |
+|---|---|
+| Two copies | Give each schedule a **Second copy to** destination: after each full backup, the worker makes a new, independent full backup of the same databases there. Retention keeps the same number at each destination. |
+| One off-site | Make the second destination an S3 bucket in another place: another region, account, or provider. A disk of the server, and an endpoint on this host, are the same site. |
+| One immutable | Enable Object Lock with a default retention on that bucket. Nothing, not even the worker, can then delete a backup before its retention ends: a deletion only adds delete markers, and the console says so. Keep the console retention at least as long as the lock. |
+| Encrypted at rest | Enable default encryption on the bucket (SSE-KMS, or SSE-S3); the server then needs no encryption setting. For a disk destination, use an `encrypted` disk. Server bundles are always encrypted by the worker. |
+| Least privilege | Give the server a key that can write and read backups but not delete them, and the worker a separate key that can delete. |
+
+**Destinations** → **Recommended S3 permissions and bucket settings** has both policies:
+
+```json
+{
+  "server_key": {
+    "Effect": "Allow",
+    "Action": ["s3:PutObject", "s3:GetObject", "s3:ListBucket", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+    "Resource": ["arn:aws:s3:::BUCKET", "arn:aws:s3:::BUCKET/PREFIX/*"]
+  },
+  "worker_key": {
+    "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:ListBucket", "s3:DeleteObject", "s3:GetEncryptionConfiguration", "s3:GetBucketObjectLockConfiguration", "s3:GetBucketVersioning"],
+    "Resource": ["arn:aws:s3:::BUCKET", "arn:aws:s3:::BUCKET/PREFIX/*"]
+  }
+}
+```
+
+The server key goes into the destination form (**Access key ID**, **Secret access key**); the worker key into the worker's environment, under the destination's **Worker credential reference** (`<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY`). The worker reads the encryption, Object Lock, and versioning of each S3 bucket after every destination test and every 6 hours, with its own key. A setting it cannot read is shown as unknown, never as met.
+
+Also:
+
+- Do not configure bucket lifecycle rules that expire objects of a backup prefix: they can delete the base of an incremental backup.
+- Do not grant `READ ON S3`, `WRITE ON S3`, `READ ON DISK`, or `WRITE ON DISK` to users who should not reach every S3 URL or every disk: these privileges are not limited to the destinations.
+
+## Troubleshooting {#troubleshooting}
+
+| Message | Cause and fix |
+|---|---|
+| `No backup worker makes server bundles.` | No worker has `BUNDLE_KEY_PROVIDER` set. Set it and its key settings, and restart the worker. |
+| `BUNDLE_KEY_PROVIDER is file, but BUNDLE_KEY_FILE is not set.` | Set `BUNDLE_KEY_FILE`. |
+| `The key file … is readable by other users (mode …): make it 600.` | Run `chmod 600` on the key file. |
+| `The bundle was encrypted with the master key …; this worker has ….` | The bundle was made with another key: restore it with the key whose fingerprint it shows. |
+| `The vault key provider needs VAULT_ADDR, a token (VAULT_TOKEN or VAULT_TOKEN_FILE), and VAULT_TRANSIT_KEY.` | Set the missing variables. |
+| `Vault encrypt with the key … failed: HTTP 403 …` | The token's policy does not allow the operation on that key, or the token expired. |
+| `The passphrase must have at least 12 characters.` | Use a longer passphrase. |

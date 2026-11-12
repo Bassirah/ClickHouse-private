@@ -1,0 +1,264 @@
+---
+description: 'The privileges each panel and page of the web console needs to be listed and to act, the capability checks the console runs, the cluster capabilities, and the service accounts of the helper processes.'
+sidebarTitle: 'Privileges'
+slug: /web-console/reference/privileges
+title: 'Web console privileges'
+doc_type: 'reference'
+---
+
+Every query and statement of the console runs with the credentials of the signed-in user and is authorized by the
+ClickHouse server. The console asks the server what the user can do only to decide what to list and which buttons to
+offer: a wrong or stale answer shows or hides a button, it does not grant anything. See
+[Security model](/products/web-console/guides/console#security-model) and
+[GRANT](/sql-reference/statements/grant).
+
+A component is listed when both hold:
+
+1. the server allows what the component reads: the [probe queries](#panels) of a panel, or one of the
+   [capability checks](#capability-checks) of an administration page;
+2. the component access policy allows **Open** for the user or one of the roles enabled in the session, or no rule
+   mentions the component yet. **Home** and **Component Access** are not governed by the policy.
+
+## Panels {#panels}
+
+After sign-in, the console runs the probe queries of each panel once, joined with `UNION ALL`. When the server refuses
+them, the panel is not listed; when a system table does not exist, it is shown as unavailable. The capability columns
+show the native privileges the **Component Access** page compares with the policy (`COMPONENT_NATIVE`).
+
+| Component | Probe queries | **View data** | **Run queries** | **Administer** |
+|---|---|---|---|---|
+| `sql` SQL Console | None | Same as **Run queries** | Every query is authorized by the grants on the tables it uses. | — |
+| `dashboard` Dashboard | `SELECT 1 FROM system.dashboards LIMIT 0` | `SELECT` on `system.dashboards`, `system.metric_log`, `system.asynchronous_metric_log` | Charts can be edited to run any query the user is allowed to run. | — |
+| `clickstack` ClickStack | None (a `HEAD` request to its path) | Its own connection settings and authorization | — | — |
+| `terminal` Web Terminal | None (a `HEAD` request to `/webterminal`) | — | Every query is authorized by the grants of the user. Enabled for everyone by `enable_webterminal`. | — |
+| `binary` Binary visualizer | `SELECT addressToSymbol(toUInt64(0)) LIMIT 0 SETTINGS allow_introspection_functions = 1` | `INTROSPECTION` | — | — |
+| `merges` Merges visualizer | `SELECT 1 FROM system.part_log LIMIT 0` | `SELECT` on `system.part_log` | — | — |
+| `schema` Schema visualizer | `SELECT 1 FROM system.tables LIMIT 0`, `SELECT 1 FROM system.columns LIMIT 0` | `SELECT` on `system.tables`, `system.columns`, `system.dictionaries` | — | — |
+| `jemalloc` Jemalloc | `SELECT 1 FROM system.jemalloc_stats LIMIT 0` | `SELECT` on `system.jemalloc_stats`, `system.asynchronous_metrics` | — | `SYSTEM JEMALLOC` |
+| `processors-profile` Processors profile | `SELECT 1 FROM system.processors_profile_log LIMIT 0`, `SELECT 1 FROM system.query_log LIMIT 0` | `SELECT` on `system.processors_profile_log`, `system.query_log` | — | — |
+| `reference` Reference | `SELECT 1 FROM system.documentation LIMIT 0` | `SELECT` on `system.documentation` | — | — |
+
+Links of **Resources** need no privilege; the policy only lists or hides them.
+
+## Pages {#pages}
+
+An administration page is listed when at least one of its checks passes, and the policy allows **Open**. What the user
+can do on it is decided by native privileges (`ADMIN_NATIVE`); the console offers each action only when the matching
+check passes.
+
+| Page | Listed when any of these checks passes | To read | To act |
+|---|---|---|---|
+| **Users** (`admin-users`) | `read_users` | `SHOW USERS` | `CREATE USER`, `ALTER USER`, `DROP USER`, possibly limited to name patterns |
+| **Roles & Permissions** (`admin-roles`) | `read_roles` | `SHOW ROLES` and `SELECT` on `system.grants` | `CREATE ROLE`; `GRANT` with the grant or admin option |
+| **Data Access Policies** (`admin-data-access`) | `read_grants` | `SELECT` on `system.grants`, `system.role_grants`, and `system.row_policies` | `GRANT` with the grant option, `CREATE ROW POLICY`, and `IMPERSONATE` (for verification) |
+| **Component Access** (`admin-access`) | `write_policy`, `setup` | `SELECT` on `component_policy` | `INSERT` on `component_policy` and `protected_accounts`; **Set up** needs `CREATE TABLE` on the admin database (and `CREATE DATABASE` if it does not exist) |
+| **Profiles & Quotas** (`admin-limits`) | `read_profiles`, `read_quotas` | `SHOW SETTINGS PROFILES` and `SHOW QUOTAS` | `CREATE`, `ALTER`, `DROP SETTINGS PROFILE` and `QUOTA` |
+| **Audit Activity** (`admin-audit`) | `read_audit`, `read_query_log` | `SELECT` on `audit_log` and on `system.query_log` | — |
+| **Clusters** (`admin-clusters`) | `read_cluster_tables`, `setup` | `SELECT` on the cluster tables | The [cluster capabilities](#cluster-capabilities), checked again by the cluster agent |
+| **Backup & Restore** (`admin-backups`) | `read_backups`, `setup` | `SELECT` on the backup tables | `BACKUP`, `READ` and `WRITE` on the destinations, and `INSERT` on the backup tables (see [Backup actions](#backup-actions)) |
+| **LDAP** (`idp-ldap`) | `read_directories` | `SELECT` on `system.user_directories` | None: the directories are server configuration, which the console generates but does not change |
+| **SSO (Keycloak)** (`idp-sso`) | `read_idp`, `setup` | `SELECT` on `idp_providers` | `INSERT` on `idp_providers`, to change the provider settings and record connection tests |
+
+With `setup` among the checks, a user who can create the tables sees the page, with **Set up**, before the tables exist.
+
+## Capability checks {#capability-checks}
+
+`adminChecks` in `programs/server/console.html`. A read check runs `SELECT 1 FROM <table> LIMIT 0` for every table,
+joined with `UNION ALL`, and passes when the query succeeds. A grant check runs `CHECK GRANT <privilege>` and passes when
+the server answers `1`. `<db>` is the admin database; the checks on its tables are skipped when `admin_database` is not
+a valid name.
+
+| Key | Check |
+|---|---|
+| `read_users` | Read `system.users` |
+| `read_roles` | Read `system.roles`, `system.role_grants`, `system.grants` |
+| `read_grants` | Read `system.grants`, `system.role_grants` |
+| `read_profiles` | Read `system.settings_profiles`, `system.settings_profile_elements` |
+| `read_quotas` | Read `system.quotas`, `system.quota_limits` |
+| `read_query_log` | `CHECK GRANT SELECT ON system.query_log` |
+| `read_session_log` | Read `system.session_log` |
+| `read_tables` | Read `system.tables` |
+| `read_privileges` | Read `system.privileges` |
+| `read_directories` | Read `system.user_directories` |
+| `read_clusters` | Read `system.clusters` |
+| `read_processes` | Read `system.processes` |
+| `read_audit` | Read `<db>.audit_log` |
+| `read_row_policies` | Read `system.row_policies` |
+| `read_dap` | Read all eight [data access tables](/products/web-console/reference/console-tables#data-access-tables) |
+| `write_dap_attributes` | `CHECK GRANT INSERT ON <db>.dap_attributes` |
+| `write_dap_values` | `CHECK GRANT INSERT ON <db>.dap_user_attributes` |
+| `write_dap_classifications` | `CHECK GRANT INSERT ON <db>.dap_classifications` |
+| `write_dap_rules` | `CHECK GRANT INSERT ON <db>.dap_rules` |
+| `write_dap_deploy` | `CHECK GRANT INSERT ON <db>.dap_owned` |
+| `write_dap_tests` | `CHECK GRANT INSERT ON <db>.dap_access_tests` |
+| `read_policy` | Read `<db>.component_policy` |
+| `read_idp` | Read `<db>.idp_providers` |
+| `write_idp` | `CHECK GRANT INSERT ON <db>.idp_providers` |
+| `read_protected` | Read `<db>.protected_accounts` |
+| `write_audit` | `CHECK GRANT INSERT ON <db>.audit_log` |
+| `write_policy` | `CHECK GRANT INSERT ON <db>.component_policy` |
+| `write_protected` | `CHECK GRANT INSERT ON <db>.protected_accounts` |
+| `setup` | `CHECK GRANT CREATE TABLE ON <db>.*` |
+| `create_database` | `CHECK GRANT CREATE DATABASE ON <db>.*` |
+| `create_user`, `alter_user`, `drop_user` | `CHECK GRANT CREATE USER ON *.*`, `ALTER USER ON *.*`, `DROP USER ON *.*` |
+| `create_role`, `alter_role`, `drop_role` | `CHECK GRANT CREATE ROLE ON *.*`, `ALTER ROLE ON *.*`, `DROP ROLE ON *.*` |
+| `role_admin` | `CHECK GRANT ROLE ADMIN ON *.*` |
+| `create_profile`, `alter_profile`, `drop_profile` | `CHECK GRANT CREATE SETTINGS PROFILE ON *.*`, `ALTER SETTINGS PROFILE ON *.*`, `DROP SETTINGS PROFILE ON *.*` |
+| `create_quota`, `alter_quota`, `drop_quota` | `CHECK GRANT CREATE QUOTA ON *.*`, `ALTER QUOTA ON *.*`, `DROP QUOTA ON *.*` |
+| `kill_query` | `CHECK GRANT KILL QUERY ON *.*` |
+| `read_backups` | Read `<db>.backup_operations`, `backup_events`, `backup_destinations`, `backup_schedules` |
+| `write_backup_ops` | `CHECK GRANT INSERT ON <db>.backup_operations` |
+| `write_backup_events` | `CHECK GRANT INSERT ON <db>.backup_events` |
+| `write_destinations` | `CHECK GRANT INSERT ON <db>.backup_destinations` |
+| `write_schedules` | `CHECK GRANT INSERT ON <db>.backup_schedules` |
+| `read_endpoints` | Read `<db>.backup_endpoints` |
+| `write_endpoints` | `CHECK GRANT INSERT ON <db>.backup_endpoints` |
+| `read_cluster_tables` | Read `<db>.clusters`, `cluster_revisions`, `cluster_operations`, `cluster_events`, `cluster_observations`, `cluster_resources` |
+| `write_clusters` | `CHECK GRANT INSERT ON <db>.cluster_operations` |
+| `cap_<capability>` | `CHECK GRANT INSERT(<capability>) ON <db>.cluster_capabilities`, for each [cluster capability](#cluster-capabilities) |
+| `read_system_backups` | Read `system.backups` |
+| `read_backup_log` | `CHECK GRANT SELECT ON system.backup_log` |
+| `create_named_collection` | `CHECK GRANT CREATE NAMED COLLECTION ON *.*` |
+| `read_disk` | `CHECK GRANT READ ON DISK` |
+| `write_disk` | `CHECK GRANT WRITE ON DISK` |
+
+`CHECK GRANT ... ON *.*` does not report user and role management granted for name patterns
+(`GRANT ALTER USER ON app_* TO ...`). The console reads those patterns from the user's own `SHOW GRANTS FINAL` and offers
+the actions for the matching names; per-user actions are checked with `CHECK GRANT` on the user.
+
+## Backup actions {#backup-actions}
+
+| Action | Privileges |
+|---|---|
+| See the page | `SELECT` on `backup_operations`, `backup_events`, `backup_destinations`, `backup_schedules` |
+| Back up | `BACKUP` on the scope; `READ, WRITE ON DISK`, or `NAMED COLLECTION` on the destination's collection and `READ, WRITE ON S3`; `INSERT` on `backup_operations`, `backup_events`, and `audit_log` |
+| Restore | `READ ON DISK` or `READ ON S3` and the collection; `CREATE DATABASE`, `CREATE TABLE`, `CREATE VIEW`, `CREATE DICTIONARY`, `INSERT` on the target; for access entities, the access management privileges |
+| Test restore | As restore, on `console_verify_*`, and `DROP DATABASE` on it |
+| Check an artifact | `CREATE DATABASE, DROP DATABASE ON console_inspect_*.*` (the artifact is opened with the `Backup` database engine) |
+| Manage destinations | `INSERT` on `backup_destinations`; for S3, `CREATE NAMED COLLECTION`, `ALTER NAMED COLLECTION`, `DROP NAMED COLLECTION` on `console_backup_*` |
+| Allow S3 endpoints | `SELECT` and `INSERT` on `backup_endpoints` |
+| Manage schedules | `INSERT` on `backup_schedules` |
+| Cancel | `KILL QUERY` |
+
+`READ ON S3` and `WRITE ON S3` apply to every S3 URL, not only to the configured destinations, and `READ ON DISK` and
+`WRITE ON DISK` to every disk: grant them only to users trusted with that. The role templates that bundle these
+privileges are described in [Backup & Restore](/products/web-console/guides/backup-and-restore).
+
+## Cluster capabilities {#cluster-capabilities}
+
+Each capability is a column of the `cluster_capabilities` table (engine `Null`), granted as `INSERT(<column>)`, for
+example `GRANT INSERT(scale) ON console_admin.cluster_capabilities TO cluster_operator`. The console checks them with
+`CHECK GRANT` to offer actions; the cluster agent checks them again with `EXECUTE AS <requester> CHECK GRANT` before it
+executes an operation. Requesting an operation also needs `INSERT` on `cluster_operations`, `cluster_events`, and
+`cluster_revisions`.
+
+| Capability | Label in the console |
+|---|---|
+| `view_clusters` | View clusters |
+| `register` | Register existing deployments |
+| `create_cluster` | Create clusters |
+| `adopt` | Adopt or release management |
+| `configure` | Edit configuration |
+| `scale` | Scale resources and topology |
+| `keeper` | Manage Keeper |
+| `maintain` | Perform maintenance and backups |
+| `upgrade` | Upgrade versions |
+| `recover` | Initiate recovery |
+| `decommission` | Decommission nodes |
+| `retire` | Retire clusters |
+| `destroy` | Permanently delete infrastructure or data |
+
+| Template | Grants |
+|---|---|
+| Cluster Viewer | `SELECT` on the cluster tables and `backup_destinations`; `view_clusters`. |
+| Cluster Operator | The viewer's, plus requesting operations, and `register`, `configure`, `maintain`, `scale`, `decommission`. |
+| Cluster Administrator | Every capability, optionally including `destroy`, and `INSERT` on `clusters`. |
+
+## Service accounts {#service-accounts}
+
+`utils/web-console/deploy/service-accounts.sql` creates the accounts of the helper processes with these privileges. Run
+it as an administrator after **Set up** on the pages that create the console tables, with the passwords as query
+parameters:
+
+```bash
+clickhouse-client --user default --password ... --param_backup_pw=... --param_policy_pw=... --param_agent_pw=... --param_sso_pw=... \
+    --multiquery < service-accounts.sql
+```
+
+Lines with a placeholder in angle brackets are commented out: replace the placeholder and remove the comment marker.
+The statements below use the default admin database `console_admin`. For the procedure, see
+[Create service accounts](/products/web-console/how-to/create-service-accounts).
+
+### Backup worker {#backup-worker-account}
+
+```sql
+CREATE USER IF NOT EXISTS backup_worker IDENTIFIED WITH sha256_password BY {backup_pw:String};
+-- GRANT <role made with the Backup Administrator template> TO backup_worker;
+GRANT CREATE TABLE, DROP TABLE, INSERT, SELECT, BACKUP ON console_admin.server_bundle* TO backup_worker;
+```
+
+The role is made with the **Backup Administrator** template on **Roles & Permissions**, for the databases of the
+schedules; the template lists its exact privileges before it creates the role. The worker also needs `SELECT` on those
+databases for fingerprints, and `INSERT` on the backup tables and `audit_log`. The grant on `server_bundle*` is needed only
+with `BUNDLE_KEY_PROVIDER`.
+
+### Access policy worker {#access-policy-worker-account}
+
+```sql
+CREATE USER IF NOT EXISTS access_policy_worker IDENTIFIED WITH sha256_password BY {policy_pw:String};
+GRANT SELECT ON console_admin.* TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_owned TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_deployments TO access_policy_worker;
+GRANT INSERT ON console_admin.audit_log TO access_policy_worker;
+GRANT INSERT ON console_admin.dap_user_attributes TO access_policy_worker;      -- only with an attribute feed
+GRANT SELECT ON system.users TO access_policy_worker;
+GRANT SELECT ON system.roles TO access_policy_worker;
+GRANT SELECT ON system.role_grants TO access_policy_worker;
+GRANT SELECT ON system.grants TO access_policy_worker;
+GRANT SELECT ON system.row_policies TO access_policy_worker;
+GRANT SHOW USERS, SHOW ROLES, SHOW ROW POLICIES ON *.* TO access_policy_worker;
+-- GRANT IMPERSONATE ON <each rule author> TO access_policy_worker;
+```
+
+The worker holds no privilege to grant anything: it runs each statement as `EXECUTE AS <rule author>`, so the server
+checks the author's own privileges, including the grant option and `CLUSTER` for `ON CLUSTER`. `IMPERSONATE` needs
+`allow_impersonate_user` on the server.
+
+### Token authenticator {#sso-sync-account}
+
+Checking tokens needs no account. The user sync needs:
+
+```sql
+CREATE USER IF NOT EXISTS sso_sync IDENTIFIED WITH sha256_password BY {sso_pw:String};
+GRANT CREATE USER, ALTER USER, DROP USER ON *.* TO sso_sync;
+GRANT SHOW USERS, SHOW ROLES ON *.* TO sso_sync;
+GRANT SELECT ON system.users TO sso_sync;
+GRANT SELECT ON system.roles TO sso_sync;
+GRANT SELECT ON system.role_grants TO sso_sync;
+GRANT INSERT ON console_admin.audit_log TO sso_sync;
+-- GRANT <role> TO sso_sync WITH ADMIN OPTION;
+```
+
+Grant each role the groups give `WITH ADMIN OPTION`, so that the sync can grant only those, or `ROLE ADMIN` for every
+role. Roles named in `SSO_DEFAULT_ROLES` also need the admin option.
+
+### Cluster agent {#cluster-agent-account}
+
+```sql
+CREATE USER IF NOT EXISTS cluster_agent IDENTIFIED WITH sha256_password BY {agent_pw:String};
+GRANT SELECT, INSERT ON console_admin.clusters TO cluster_agent;
+GRANT SELECT, INSERT ON console_admin.cluster_revisions TO cluster_agent;
+GRANT SELECT, INSERT ON console_admin.cluster_operations TO cluster_agent;
+GRANT SELECT, INSERT ON console_admin.cluster_events TO cluster_agent;
+GRANT SELECT, INSERT ON console_admin.cluster_observations TO cluster_agent;
+GRANT SELECT, INSERT ON console_admin.cluster_resources TO cluster_agent;
+GRANT SELECT ON console_admin.cluster_capabilities TO cluster_agent;
+GRANT SELECT ON console_admin.backup_destinations TO cluster_agent;
+GRANT INSERT ON console_admin.audit_log TO cluster_agent;
+-- GRANT IMPERSONATE ON <each user who requests cluster operations> TO cluster_agent;
+```
+
+### Recovery rehearsal {#recovery-rehearsal-account}
+
+`service-accounts.sql` creates no account for the recovery rehearsal. The user given with `--user` needs `SELECT` on the
+console tables and `INSERT` on `backup_events` and `audit_log`.

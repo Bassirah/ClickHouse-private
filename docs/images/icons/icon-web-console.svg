@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" role="img" aria-label="web console">
+<style>
+  rect, path { stroke: rgb(80, 80, 80); }
+  @media (prefers-color-scheme: dark) {
+    rect, path { stroke: rgb(200, 200, 200); }
+  }
+</style>
+<rect x="2.5" y="3.5" width="19" height="17" rx="2" stroke-width="1.6"/>
+<path d="M2.5 8h19M9 8v12.5" stroke-width="1.6"/>
+<path d="M12.5 12h5.5M12.5 15h5.5M12.5 18h3" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,131 @@
+---
+description: 'Deploy the ClickHouse server with the web console, the backup worker, the access policy worker, and the cluster agent on Kubernetes with kubernetes.yaml.'
+sidebarTitle: 'Deploy on Kubernetes'
+slug: /web-console/how-to/deploy-on-kubernetes
+title: 'Deploy on Kubernetes'
+doc_type: 'guide'
+---
+
+Use this guide to deploy the ClickHouse server with the web console, and its helper processes, on Kubernetes, with the
+manifest `kubernetes.yaml` of the `deploy/` directory of a release of the console.
+
+For one Docker host, see [Deploy with Docker Compose](/products/web-console/how-to/deploy-with-docker-compose).
+
+## What the manifest creates {#what-the-manifest-creates}
+
+All objects are in the namespace `clickhouse-console`:
+
+| Object | Purpose |
+|---|---|
+| ConfigMap `web-console-config` | `web-console.xml`, mounted into `/etc/clickhouse-server/config.d/` of the server: the Resources links, `admin_database`, and `backup_s3_endpoints`. |
+| StatefulSet `clickhouse` | The server with the console, one replica, with a 20 GiB volume `data` at `/var/lib/clickhouse`. It requests 1 CPU and 2 GiB of memory, with a limit of 4 GiB, and is ready when `/ping` answers. |
+| Service `clickhouse` | The ports 8123 (HTTP, with the console) and 9000 (native). |
+| Deployment `backup-worker` | The backup worker, as `backup_worker`. |
+| Deployment `access-policy-worker` | The access policy worker, as `access_policy_worker`, every 60 seconds. |
+| ServiceAccount, ClusterRole, and ClusterRoleBinding `cluster-agent` | What the cluster agent does with `kubectl`, and nothing more. |
+| ConfigMap `cluster-agent-kubeconfig` | A kubeconfig that uses the service account of the pod. |
+| PersistentVolumeClaim `cluster-agent-state` | 1 GiB for the state of the agent, including its key pair. |
+| Deployment `cluster-agent` | The cluster agent with the kubernetes provider only, as `cluster_agent`. |
+
+The cluster agent manages clusters with the ClickHouse operator in the same Kubernetes cluster, in the namespaces that
+match `CLUSTER_AGENT_K8S_NAMESPACES` (`chc-*`). Kubernetes RBAC cannot express a namespace prefix, so the agent
+restricts the namespaces itself. The agent's key pair for administrator passwords is kept in its volume: losing it
+makes queued creations undecryptable. If you do not manage clusters, remove the part of the agent from the manifest.
+See [Kubernetes provider](/products/web-console/guides/clusters#kubernetes-provider).
+
+## Before you begin {#before-you-begin}
+
+- A Kubernetes cluster and `kubectl` with the rights to create a namespace, cluster roles, and the objects above.
+- The image archives and the `deploy/` directory of the release (see
+  [Deploy with Docker Compose](/products/web-console/how-to/deploy-with-docker-compose#before-you-begin)).
+  `package_images.sh` sets the version tags of the images in `kubernetes.yaml`.
+- For the cluster agent, the ClickHouse operator in the cluster.
+
+## Deploy {#deploy}
+
+<Steps>
+<Step title="Make the images available to the nodes">
+
+Either push both images to your registry and change the `image:` lines of `kubernetes.yaml` to the registry names, or
+import the archives on every node: with k3d, `k3d image import`; with containerd, `ctr -n k8s.io images import`.
+
+The containers use `imagePullPolicy: IfNotPresent`.
+
+</Step>
+<Step title="Create the Secret with the passwords">
+
+```bash
+kubectl create namespace clickhouse-console
+kubectl -n clickhouse-console create secret generic clickhouse-console-passwords \
+    --from-literal=admin=... --from-literal=backup_worker=... --from-literal=access_policy_worker=... \
+    --from-literal=cluster_agent=...
+```
+
+`admin` is the password of `default`, the first administrator (with access management). The other keys are the
+passwords of the service accounts.
+
+</Step>
+<Step title="Adjust the configuration">
+
+Edit the ConfigMap `web-console-config` in `kubernetes.yaml`: the Resources links (internal mirrors, or empty on a
+network without Internet access), the admin database, and the S3 endpoints allowed for backups. See
+[`web_console`](/products/web-console/reference/configuration#web-console).
+
+For S3 credentials of backup destinations, uncomment the `envFrom` of the backup worker, and create the Secret
+`clickhouse-console-backup-destinations` with the keys `<REF>_ACCESS_KEY_ID` and `<REF>_SECRET_ACCESS_KEY`.
+
+</Step>
+<Step title="Apply the manifest">
+
+```bash
+kubectl apply -f kubernetes.yaml
+kubectl -n clickhouse-console rollout status statefulset/clickhouse
+```
+
+</Step>
+<Step title="Open the console">
+
+```bash
+kubectl -n clickhouse-console port-forward svc/clickhouse 8123:8123
+```
+
+Open `http://localhost:8123/console`, and sign in as `default` with the password of the key `admin`.
+
+</Step>
+<Step title="Set up and create the service accounts">
+
+Under **Administration**, select **Set up** on **Component Access**, **Backup & Restore**, **Clusters**, and the tabs
+of **Data Access Policies** that you use. Then create the service accounts with `service-accounts.sql`, running
+`clickhouse-client` with `kubectl -n clickhouse-console exec -i clickhouse-0 --`: see
+[Create the service accounts](/products/web-console/how-to/create-service-accounts#run-the-file).
+
+Once the accounts exist, the heartbeats of the workers appear on **Backup & Restore → Overview** and on
+the Cluster Inventory.
+
+</Step>
+</Steps>
+
+## Expose the console {#expose-the-console}
+
+For access from outside the cluster, put an Ingress with TLS in front of the Service `clickhouse`: the console sends
+passwords in HTTP headers, so they must not travel over plain HTTP.
+
+## More configuration {#more-configuration}
+
+Further server configuration, such as an [LDAP user directory](/products/web-console/how-to/configure-ldap), goes into
+more keys of a ConfigMap, mounted into `/etc/clickhouse-server/config.d/` like `web-console.xml`. A new user directory
+needs a restart of the server:
+
+```bash
+kubectl -n clickhouse-console rollout restart statefulset/clickhouse
+```
+
+## Upgrade and roll back {#upgrade-and-roll-back}
+
+Make the new images available to the nodes, change the image tags in `kubernetes.yaml`, and run
+`kubectl apply -f kubernetes.yaml`. The data stays in the volumes. To roll back, set the previous tags again and apply.
+
+<Warning>
+Rolling back to a server older than the ClickHouse release of the data is not supported by ClickHouse. Keep the
+release of the base image when you roll back the console.
+</Warning>
