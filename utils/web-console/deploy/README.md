@@ -229,6 +229,28 @@ signed in. The users of `users.xml` and those created with SQL keep working, and
 | Access reviews | ClickHouse cannot list the directory: review group membership in LDAP. The Users page shows directory users that have signed in since the server started. |
 | Transport | Passwords travel with every request: serve the console over HTTPS, and never use LDAP without TLS. |
 
+### Attributes from the directory
+
+The rules of **Data Access Policies** can grant roles, filter rows, and require clearances from user attributes. The
+access policy worker can read those attributes from the LDAP directory instead of a feed file, so that the directory is
+the trusted source of, for example, the department or branch of each user:
+
+1. On **Data Access Policies → Attributes & Classifications**, define each attribute with the source `ldap`, the access
+   policy worker's account as its writer, and a freshness limit (for example 86400 s).
+2. Give the worker a read-only service account of the directory, and put its password in `ldap/password` (mode 600)
+   and the certificate authority of the directory in `ldap/ca.crt`.
+3. Set `LDAP_ATTRIBUTES_URL`, `LDAP_ATTRIBUTES_BIND_DN`, `LDAP_ATTRIBUTES_BASE_DN`, `LDAP_ATTRIBUTES_USER` (the LDAP
+   attribute that is the ClickHouse user name: `uid`, or `sAMAccountName` for Active Directory), and
+   `LDAP_ATTRIBUTES_MAP` (for example `department=departmentNumber,branch=l`) in `.env`, and start the worker with
+   `docker compose -f compose.yaml -f compose.ldap-attributes.yaml up -d access-policy-worker`.
+
+Each cycle, the worker reads the users of the directory over LDAPS or StartTLS (plain LDAP is refused, and the
+certificate of the directory is always checked), with paged results for directories that cap a search. A changed
+attribute changes the value; a user who leaves the directory, or loses an attribute, loses the value, and rules on it
+close for them. A multi-valued LDAP attribute gives its first value. A search that finds no user while values exist is
+refused, not applied, so that a wrong filter or base DN cannot remove every value at once: the values then age and
+become untrusted after their freshness limit.
+
 ## 9. Single sign-on (Keycloak)
 
 Users can sign in with Keycloak (or another OpenID Connect provider): the console signs them in with the Authorization

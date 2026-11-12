@@ -29,6 +29,20 @@
 ///   ATTRIBUTE_FEED        a JSON file or an https:// URL: [{"user": "...", "attributes": {"department": "..."}}]
 ///   ATTRIBUTE_FEED_SOURCE name of the feed's source, as in the attribute definitions (default: feed)
 ///   ATTRIBUTE_FEED_TOKEN  bearer token for an https feed
+///
+/// Or the attributes come from an LDAP directory (instead of ATTRIBUTE_FEED), read with ldap_client.mjs:
+///   LDAP_ATTRIBUTES_URL           ldaps://host[:636], or ldap://host[:389] with LDAP_ATTRIBUTES_STARTTLS=1 (plain LDAP is refused)
+///   LDAP_ATTRIBUTES_CA_FILE       the certificate authority of the server (default: the system's); the certificate is checked
+///   LDAP_ATTRIBUTES_BIND_DN       a read-only service account of the directory
+///   LDAP_ATTRIBUTES_PASSWORD_FILE its password, in a file readable by the worker only (or LDAP_ATTRIBUTES_PASSWORD)
+///   LDAP_ATTRIBUTES_BASE_DN       where the users are, for example ou=users,dc=example,dc=org
+///   LDAP_ATTRIBUTES_FILTER        which entries are users (default (objectClass=person))
+///   LDAP_ATTRIBUTES_USER          the LDAP attribute that is the ClickHouse user name (default uid; sAMAccountName for AD)
+///   LDAP_ATTRIBUTES_MAP           <attribute>=<LDAP attribute>, comma-separated: department=departmentNumber,branch=l
+///   ATTRIBUTE_FEED_SOURCE         defaults to ldap: the source of the attribute definitions the directory fills
+/// A multi-valued LDAP attribute gives its first value. A user who leaves the directory, or loses an LDAP attribute,
+/// loses the value, and rules on it close for them. A search that finds no user while values exist is refused, not
+/// applied: a wrong filter or base DN must not remove every value at once; the values then become stale.
 /// Arguments: --once runs one cycle and exits.
 
 import crypto from 'node:crypto';
@@ -37,6 +51,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
+import {LdapClient} from './ldap_client.mjs';
 
 const URL_BASE = (process.env.CLICKHOUSE_URL || 'http://127.0.0.1:8123').replace(/\/+$/, '');
 const USER = process.env.CLICKHOUSE_USER || 'default';
@@ -46,8 +61,10 @@ const CLUSTER = process.env.CLUSTER || '';
 const INTERVAL = Number(process.env.INTERVAL_SECONDS || 60) * 1000;
 const CONSOLE_HTML = process.env.CONSOLE_HTML || path.join(path.dirname(fileURLToPath(import.meta.url)), '../../programs/server/console.html');
 const FEED = process.env.ATTRIBUTE_FEED || '';
-const FEED_SOURCE = process.env.ATTRIBUTE_FEED_SOURCE || 'feed';
+const LDAP = process.env.LDAP_ATTRIBUTES_URL || '';
+const FEED_SOURCE = process.env.ATTRIBUTE_FEED_SOURCE || (LDAP ? 'ldap' : 'feed');
 const FEED_TOKEN = process.env.ATTRIBUTE_FEED_TOKEN || '';
+if (FEED && LDAP) throw new Error('Set ATTRIBUTE_FEED or LDAP_ATTRIBUTES_URL, not both: one worker imports from one source.');
 const ONCE = process.argv.includes('--once');
 const WORKER_ID = `${os.hostname()}-${process.pid}`;
 
@@ -125,7 +142,7 @@ const table = name => `${q(DB)}.${q(name)}`;
 /// feed no longer reports (a user who left the feed loses the attributes, and rules revoke what they gave).
 /// When the feed cannot be read, nothing is written: the values age, and become stale after the freshness limit
 /// of their attribute.
-async function importFeed() {
+async function readFeed() {
     let text;
     if (/^https:\/\//.test(FEED)) {
         const response = await fetch(FEED, {headers: FEED_TOKEN ? {Authorization: `Bearer ${FEED_TOKEN}`} : {}, signal: AbortSignal.timeout(30000)});
@@ -136,6 +153,37 @@ async function importFeed() {
     }
     const entries = JSON.parse(text);
     if (!Array.isArray(entries)) throw new Error('The attribute feed must be a JSON array');
+    return entries;
+}
+
+/// The users of the directory with the mapped attributes, as feed entries: [{user, attributes}].
+async function readLdap() {
+    const env = name => process.env[`LDAP_ATTRIBUTES_${name}`] || '';
+    const map = env('MAP').split(',').map(pair => pair.trim()).filter(Boolean).map(pair => {
+        const [attribute, ldap_attribute] = pair.split('=').map(x => x && x.trim());
+        if (!attribute || !ldap_attribute) throw new Error(`LDAP_ATTRIBUTES_MAP: "${pair}" is not <attribute>=<LDAP attribute>.`);
+        return [attribute, ldap_attribute.toLowerCase()];
+    });
+    if (!map.length) throw new Error('LDAP_ATTRIBUTES_MAP is empty: name the attributes to read, for example department=departmentNumber.');
+    for (const required of ['BIND_DN', 'BASE_DN']) if (!env(required)) throw new Error(`LDAP_ATTRIBUTES_${required} is not set.`);
+    const password = env('PASSWORD_FILE') ? fs.readFileSync(env('PASSWORD_FILE'), 'utf8').trim() : env('PASSWORD');
+    const user_attribute = (env('USER') || 'uid').toLowerCase();
+    const client = new LdapClient({url: LDAP, starttls: env('STARTTLS') === '1', ca: env('CA_FILE') ? fs.readFileSync(env('CA_FILE'), 'utf8') : null});
+    try {
+        await client.connect();
+        await client.bind(env('BIND_DN'), password);
+        const found = await client.search(env('BASE_DN'), env('FILTER') || '(objectClass=person)', [user_attribute, ...map.map(([, a]) => a)]);
+        return found.filter(e => (e.attributes[user_attribute] || []).length).map(e => ({
+            user: e.attributes[user_attribute][0],
+            attributes: Object.fromEntries(map.filter(([, a]) => (e.attributes[a] || []).length).map(([attribute, a]) => [attribute, e.attributes[a][0]])),
+        }));
+    } finally {
+        client.close();
+    }
+}
+
+async function importFeed() {
+    const entries = LDAP ? await readLdap() : await readFeed();
     const definitions = await query(`SELECT attribute FROM ${table('dap_attributes')} FINAL WHERE NOT deleted AND source = {source:String} AND category = 'user'`, {params: {source: FEED_SOURCE}});
     const known = new Set(definitions.map(d => d.attribute));
     const now = Math.floor(Date.now() / 1000);
@@ -150,6 +198,9 @@ async function importFeed() {
         }
     }
     const current = await query(`SELECT user_name, attribute FROM ${table('dap_user_attributes')} FINAL WHERE NOT deleted AND source = {source:String}`, {params: {source: FEED_SOURCE}});
+    if (LDAP && !entries.length && current.length) {
+        throw new Error(`The directory returned no user, and ${current.length} values exist: refusing to remove them all. Check LDAP_ATTRIBUTES_BASE_DN and LDAP_ATTRIBUTES_FILTER.`);
+    }
     for (const row of current.filter(r => known.has(r.attribute) && !reported.has(`${r.user_name}\u0000${r.attribute}`))) {
         rows.push({user_name: row.user_name, attribute: row.attribute, value: '', source: FEED_SOURCE, observed_at: now, deleted: true});
     }
@@ -185,12 +236,12 @@ async function loadState() {
 }
 
 async function cycle() {
-    if (FEED) {
+    if (FEED || LDAP) {
         try {
             const result = await importFeed();
-            log('attribute feed imported', result);
+            log('attribute feed imported', {source: FEED_SOURCE, from: LDAP ? 'ldap' : 'feed', ...result});
         } catch (e) {
-            log('attribute feed failed: values keep aging and become stale after their freshness limit', {error: e.message});
+            log('attribute feed failed: values keep aging and become stale after their freshness limit', {source: FEED_SOURCE, error: e.message});
         }
     }
     const state = await loadState();
