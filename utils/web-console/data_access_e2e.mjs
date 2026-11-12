@@ -236,6 +236,18 @@ async function tearDown() {
 // ---------------------------------------------------------------------------------------------
 // Stage 1: native column permissions and row policies
 
+/// On a server without the console tables, such as a new one, those of the administration pages (the audit log and the
+/// role console_admin_reader, which the users of the checks get) are created first, through the console's own setup.
+if (await admin(`SELECT count() FROM system.tables WHERE database = '${ADMIN_DB}' AND name IN ('audit_log', 'component_policy', 'protected_accounts')`) !== '3') {
+    await signIn();
+    await page.evaluate(() => { history.pushState(null, '', '/console/admin-access'); dispatchEvent(new PopStateEvent('popstate')); });
+    await idle();
+    await view().locator('button', {hasText: 'Set up'}).first().click();
+    await dialog().locator('.dialog-actions button', {hasText: 'Review'}).click();
+    await sleep(400);
+    check((await applyPlan()).text.includes('Applied.'), 'the setup of the administration pages failed');
+}
+
 try {
     await setUp();
 } catch (e) {

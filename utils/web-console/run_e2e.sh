@@ -60,6 +60,7 @@ VAULT_PORT=39200
 LDAP_CONTAINER=console-e2e-ldap
 LDAP_IMAGE=bitnamilegacy/openldap:2.6.8
 LDAP_PORT=39636
+LDAP_STARTTLS_PORT=39389   # the plain port, for StartTLS
 LDAP_ADMIN_PASSWORD=e2e-ldap-admin
 KEYCLOAK_CONTAINER=console-e2e-keycloak
 KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7
@@ -91,7 +92,7 @@ fi
 if has_suite backup; then
     docker image inspect "$MINIO_IMAGE" > /dev/null 2>&1 || die "the image $MINIO_IMAGE is not on this host"
 fi
-for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT $LDAP_PORT $KEYCLOAK_PORT $SSO_AUTHENTICATOR_PORT; do
+for port in $HTTP_PORT $TCP_PORT $KEEPER_PORT $RAFT_PORT $MINIO_PORT $VAULT_PORT $LDAP_PORT $LDAP_STARTTLS_PORT $KEYCLOAK_PORT $SSO_AUTHENTICATOR_PORT; do
     ! ss -ltn | grep -q ":$port " || die "port $port is in use: is another run still going? (stop it, or remove what --keep left)"
 done
 
@@ -343,7 +344,7 @@ END_OF_LDIF
     # The image runs as the user 1001: it must read the tree and the certificates (throwaway test material only).
     chmod -R a+rX "$RUN/ldap"
     docker rm -f "$LDAP_CONTAINER" > /dev/null 2>&1 || true
-    docker run -d --name "$LDAP_CONTAINER" -p "127.0.0.1:$LDAP_PORT:1636" -e LDAP_ROOT=dc=example,dc=org -e LDAP_ADMIN_USERNAME=admin \
+    docker run -d --name "$LDAP_CONTAINER" -p "127.0.0.1:$LDAP_PORT:1636" -p "127.0.0.1:$LDAP_STARTTLS_PORT:1389" -e LDAP_ROOT=dc=example,dc=org -e LDAP_ADMIN_USERNAME=admin \
         -e LDAP_ADMIN_PASSWORD="$LDAP_ADMIN_PASSWORD" -e LDAP_CUSTOM_LDIF_DIR=/ldifs -e LDAP_ENABLE_TLS=yes -e LDAP_TLS_CERT_FILE=/tls/ldap.crt \
         -e LDAP_TLS_KEY_FILE=/tls/ldap.key -e LDAP_TLS_CA_FILE=/tls/ca.crt -v "$RUN/ldap/ldif:/ldifs:ro" -v "$RUN/ldap/tls:/tls:ro" "$LDAP_IMAGE" > /dev/null
     for _ in $(seq 60); do
@@ -479,7 +480,8 @@ run_suite sso sso_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --keyc
     --sign-in --keycloak-admin "admin:$KEYCLOAK_ADMIN_PASSWORD" --outsider pia:Pia-Kc-Pw-1 --token-lifespan 60
 # Last: it installs an LDAP directory and restarts the server, and removes the directory again at the end.
 run_suite ldap ldap_e2e.mjs --url "$BASE" --admin "default:$ADMIN_PASSWORD" --config-dir "$SERVER/config.d" --server-restart "$RUN/restart-server.sh" \
-    --ldap-port "$LDAP_PORT" --ldap-ca "$RUN/ldap/tls/ca.crt" --ldap-container "$LDAP_CONTAINER" --ldap-admin-password "$LDAP_ADMIN_PASSWORD"
+    --ldap-port "$LDAP_PORT" --ldap-starttls-port "$LDAP_STARTTLS_PORT" --ldap-ca "$RUN/ldap/tls/ca.crt" --ldap-container "$LDAP_CONTAINER" \
+    --ldap-admin-password "$LDAP_ADMIN_PASSWORD" --policy-worker "$HERE/access_policy_worker.mjs" --console-html "$ROOT/programs/server/console.html"
 
 if [ "$KEEP" = 1 ]; then
     echo "Kept: the server at $BASE (default:$ADMIN_PASSWORD), MinIO $MINIO_CONTAINER, agent pid ${AGENT_PID:-none}. Stop them before the next run."
