@@ -54,7 +54,7 @@ The worker finds a bundle and its destination in the console tables of the serve
 
 ## Rehearse the recovery {#rehearse-the-recovery}
 
-`utils/web-console/recovery_rehearsal.mjs` proves the procedure without touching production. It:
+The recovery rehearsal, the process `recovery-rehearsal` of the tools image (`utils/web-console/recovery_rehearsal.mjs`), proves the procedure without touching production. It:
 
 - starts an isolated server that listens on `127.0.0.1` only, on its own ports, with its own data directory and its own embedded Keeper;
 - with `--staged`, starts it from the staged configuration of a server bundle, with its storage, Keeper, clusters, and paths replaced, so that it can never write to production; this checks that the configuration of the bundle starts;
@@ -64,18 +64,42 @@ The worker finds a bundle and its destination in the console tables of the serve
 
 Production is read (destinations, backups, and the values recorded when they were made) and receives only the result.
 
-1. **Choose the host.** Run the rehearsal on the server host, or a host that mounts the backups: a disk destination is read from its path on this host. It needs Node.js 18 or later and a `clickhouse` binary.
+1. **Choose where it runs.** The isolated server runs the `clickhouse` binary of the server image. With Docker Compose, `compose.rehearsal.yaml` runs it on the Docker host of `compose.yaml`: the service `rehearsal-binary` copies `/usr/bin/clickhouse` from the server image into a volume, and the service `recovery-rehearsal` mounts the server's data volume read-only, so that disk destinations are readable. On Kubernetes, the CronJob `recovery-rehearsal` of `kubernetes.yaml` runs it, with an init container that copies the binary; it reads S3 destinations only, because a disk destination is in the volume of the server. On a host with a source checkout, you can also run `recovery_rehearsal.mjs` with Node.js 18 or later and a `clickhouse` binary; a disk destination is then read from its path on that host.
 
-2. **Prepare the account and the credentials.** The user needs `SELECT` on the console tables and `INSERT` on `backup_events` and `audit_log`. For S3 destinations, export the worker's credentials: `<REF>_ACCESS_KEY_ID` and `<REF>_SECRET_ACCESS_KEY`.
+2. **Prepare the account and the credentials.** The Compose service and the CronJob run as the backup worker's account, `backup_worker`, whose role (the Backup Administrator template) has the grants the rehearsal needs: `SELECT` on the console tables and `INSERT` on `backup_events` and `audit_log`. For S3 destinations, they read the worker's credentials, `<REF>_ACCESS_KEY_ID` and `<REF>_SECRET_ACCESS_KEY`: from `backup-destinations.env` with Compose, and from the Secret `clickhouse-console-backup-destinations` on Kubernetes. On a host with a source checkout, export them.
 
-3. **Optional: stage a bundle.** Select **Stage…** on the latest bundle on **Server state**, or run `bundle-restore --mode stage`. `--staged` needs a bundle that includes `/etc/clickhouse-server` (the default of `BUNDLE_PATHS`).
+3. **Optional: stage a bundle.** Select **Stage…** on the latest bundle on **Server state**, or run `bundle-restore --mode stage`. `--staged` needs a bundle that includes `/etc/clickhouse-server` (the default of `BUNDLE_PATHS`). With Compose, the `restore-staging` directory of `compose.bundles.yaml` is mounted at `/staging`.
 
-4. **Run it**, for example monthly:
+4. **Run it**, for example monthly. With Docker Compose, in the `deploy/` directory:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal
+   ```
+
+   Arguments after the service name replace the default ones, for example to rehearse one backup:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal \
+       recovery-rehearsal --binary /rehearsal-bin/clickhouse --backup <operation ID>
+   ```
+
+   `--staged` needs a bundle that includes `/etc/clickhouse-server`; the bundles of `compose.bundles.yaml` include only `/deploy/config.d`, so a Compose deployment rehearses the backups without it.
+
+   On Kubernetes, the CronJob is suspended: set `suspend: false` to run it monthly (`0 3 1 * *`), or run it once:
+
+   ```bash
+   kubectl -n clickhouse-console create job --from=cronjob/recovery-rehearsal recovery-rehearsal-now
+   kubectl -n clickhouse-console logs -f job/recovery-rehearsal-now
+   ```
+
+   On a host with a source checkout:
 
    ```bash
    node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user <admin> --password <password> \
        --binary /usr/bin/clickhouse [--staged <staging directory of a server bundle>]
    ```
+
+   The command of the tools image is `recovery-rehearsal --binary <clickhouse> [--backup <operation ID>]... [--staged <directory>] [--work-dir <directory>]`, with the account from `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD`. The arguments:
 
    | Argument | Meaning |
    |---|---|

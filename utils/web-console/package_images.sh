@@ -2,7 +2,8 @@
 # Builds the two images of the web console and packages them for distribution as archives (see README.md):
 #
 #   clickhouse-server-console:<version>   the ClickHouse server with the console (Dockerfile), on the official image
-#   clickhouse-console-tools:<version>    the backup worker, the cluster agent, and the access policy worker (Dockerfile.tools)
+#   clickhouse-console-tools:<version>    the backup worker, the cluster agent, the access policy worker, the SSO token
+#                                         authenticator, and the recovery rehearsal (Dockerfile.tools)
 #
 #   utils/web-console/package_images.sh [--binary <path>] [--base-image <image>] [--out <dir>] [--allow-dirty]
 #
@@ -15,7 +16,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HERE="$ROOT/utils/web-console"
 BINARY="$ROOT/build_release/programs/clickhouse"
-BASE_IMAGE="clickhouse/clickhouse-server:26.9.8.3"
+BASE_IMAGE="clickhouse/clickhouse-server:26.10.2.103"
 OUT=""
 ALLOW_DIRTY=0
 
@@ -70,7 +71,8 @@ mkdir -p "$STAGE/server" "$STAGE/tools" "$OUT"
 
 # Debug information only: the symbols stay, so that stack traces in the server log keep their function names.
 llvm-strip-22 --strip-debug -o "$STAGE/server/clickhouse" "$BINARY" 2>/dev/null || strip --strip-debug -o "$STAGE/server/clickhouse" "$BINARY"
-cp "$HERE/backup_worker.mjs" "$HERE/server_bundle.mjs" "$HERE/cluster_agent.mjs" "$HERE/access_policy_worker.mjs" "$HERE/ldap_client.mjs" "$HERE/sso_authenticator.mjs" "$HERE/tools-entrypoint.sh" "$STAGE/tools/"
+cp "$HERE/backup_worker.mjs" "$HERE/server_bundle.mjs" "$HERE/cluster_agent.mjs" "$HERE/access_policy_worker.mjs" "$HERE/ldap_client.mjs" \
+    "$HERE/sso_authenticator.mjs" "$HERE/recovery_rehearsal.mjs" "$HERE/tools-entrypoint.sh" "$STAGE/tools/"
 cp "$ROOT/programs/server/console.html" "$STAGE/tools/"
 echo "$VERSION $REVISION" > "$STAGE/tools/VERSION"
 
@@ -95,19 +97,31 @@ SERVER_VERSION="$(docker exec "$NAME" clickhouse-client --password smoke-test-pa
 case "$SERVER_VERSION" in "$BINARY_VERSION"|"$BINARY_VERSION".*) ;; *) die "the server reports version $SERVER_VERSION, the binary $BINARY_VERSION" ;; esac
 CONSOLE_STATUS="$(docker exec "$NAME" sh -c 'wget -q -S -O /dev/null http://127.0.0.1:8123/console 2>&1 | grep -m1 "HTTP/" | tr -d "\r"')"
 case "$CONSOLE_STATUS" in *" 200"*) ;; *) die "/console answered: $CONSOLE_STATUS" ;; esac
-docker exec "$NAME" sh -c 'wget -q -O - http://127.0.0.1:8123/console | grep -q "admin-data-access"' || die "/console does not serve the page of this build"
+# The page of this build: the newest pages and features must be in it.
+for marker in admin-data-access admin-clusters idp-ldap idp-sso guide-cards guide-toc; do
+    docker exec "$NAME" sh -c "wget -q -O - http://127.0.0.1:8123/console | grep -q '$marker'" || die "/console does not serve the page of this build: no $marker"
+done
+# The Console Guide, embedded in the binary: the pages of docs/products/web-console/.
+GUIDE_PAGES="$(docker exec "$NAME" sh -c 'wget -q -O - http://127.0.0.1:8123/console/guide.json' | grep -o '"sidebar_title"' | wc -l)"
+EXPECTED_PAGES="$(grep -o '"sidebar_title"' "$ROOT/programs/server/console_guide.json" | wc -l)"
+[ "$GUIDE_PAGES" -gt 0 ] && [ "$GUIDE_PAGES" = "$EXPECTED_PAGES" ] \
+    || die "/console/guide.json has $GUIDE_PAGES pages, programs/server/console_guide.json $EXPECTED_PAGES: rebuild the binary"
 cleanup_smoke
-echo "Server smoke test: version $SERVER_VERSION, /console served"
+echo "Server smoke test: version $SERVER_VERSION, /console served with the pages of this build, Console Guide with $GUIDE_PAGES pages"
 
-for process in backup-worker cluster-agent access-policy-worker; do
-    # Without a server to connect to, each process must start, load its code, and fail on the connection, not earlier.
-    output="$(docker run --rm --network none -e CLICKHOUSE_URL=http://127.0.0.1:1 -e CLUSTER_AGENT_STATE_DIR=/tmp/agent "$TOOLS_IMAGE" "$process" --once 2>&1 || true)"
+for process in "backup-worker --once" "cluster-agent --once" "access-policy-worker --once" "sso-authenticator --check-config" \
+    "recovery-rehearsal --work-dir /tmp/rehearsal"; do
+    # Without a server or a provider to connect to, each process must start, load its code, and fail on the connection,
+    # not earlier.
+    # shellcheck disable=SC2086 # the process and its arguments
+    output="$(docker run --rm --network none -e CLICKHOUSE_URL=http://127.0.0.1:1 -e CLUSTER_AGENT_STATE_DIR=/tmp/agent \
+        -e SSO_ISSUER=http://127.0.0.1:1/realms/smoke -e SSO_CLIENT_ID=smoke "$TOOLS_IMAGE" $process 2>&1 || true)"
     case "$output" in
-        *SyntaxError*|*"Cannot find module"*|*ERR_MODULE_NOT_FOUND*|*ENOENT*console.html*) die "$process does not start: $output" ;;
+        *SyntaxError*|*"Cannot find module"*|*ERR_MODULE_NOT_FOUND*|*ENOENT*console.html*|*"Unknown process"*) die "$process does not start: $output" ;;
     esac
 done
 docker run --rm --entrypoint sh "$TOOLS_IMAGE" -c 'docker --version && docker compose version && kubectl version --client && node --version' > /dev/null
-echo "Tools smoke test: the three processes start; docker, compose, kubectl, and node present"
+echo "Tools smoke test: the five processes start; docker, compose, kubectl, and node present"
 
 # --- Package
 
@@ -121,7 +135,7 @@ save "$SERVER_IMAGE" "$SERVER_FILE"
 save "$TOOLS_IMAGE" "$TOOLS_FILE"
 rm -rf "$OUT/deploy" && cp -r "$HERE/deploy" "$OUT/deploy"
 sed -i "s/^CONSOLE_VERSION=.*/CONSOLE_VERSION=$VERSION/" "$OUT/deploy/.env.example"
-sed -i "s/clickhouse-server-console:VERSION/clickhouse-server-console:$VERSION/; s/clickhouse-console-tools:VERSION/clickhouse-console-tools:$VERSION/" "$OUT/deploy/kubernetes.yaml"
+sed -i "s/clickhouse-server-console:VERSION/clickhouse-server-console:$VERSION/; s/clickhouse-console-tools:VERSION/clickhouse-console-tools:$VERSION/" "$OUT"/deploy/kubernetes*.yaml
 
 cat > "$OUT/MANIFEST.txt" <<EOF
 ClickHouse web console $VERSION

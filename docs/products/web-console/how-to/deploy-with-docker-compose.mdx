@@ -22,10 +22,10 @@ how they fit together, see [Architecture](/products/web-console/overview#archite
   | File | Content |
   |---|---|
   | `clickhouse-server-console-<version>-amd64.tar.gz` | The image `clickhouse-server-console:<version>`: the official `clickhouse/clickhouse-server` image of the same release, with the server binary of this build, which serves the console at `/console`. Every setting and environment variable of the official image applies. |
-  | `clickhouse-console-tools-<version>-amd64.tar.gz` | The image `clickhouse-console-tools:<version>`: Node.js with the helper processes. The first argument chooses the process: `backup-worker`, `cluster-agent`, `access-policy-worker`, or `sso-authenticator`. |
+  | `clickhouse-console-tools-<version>-amd64.tar.gz` | The image `clickhouse-console-tools:<version>`: Node.js with the helper processes. The first argument chooses one of the five processes: `backup-worker`, `cluster-agent`, `access-policy-worker`, `sso-authenticator`, or `recovery-rehearsal`. |
   | `MANIFEST.txt` | The commit, the base image digest, and the image IDs. |
   | `SHA256SUMS` | The checksums of the archives. |
-  | `deploy/` | `compose.yaml` and its overrides, `kubernetes.yaml`, `.env.example`, `config.d/`, `service-accounts.sql`, and `README.md`. |
+  | `deploy/` | `compose.yaml` and its override files (`compose.cluster-agent.yaml`, `compose.bundles.yaml`, `compose.rehearsal.yaml`, `compose.ldap-attributes.yaml`, `compose.sso.yaml`), `kubernetes.yaml` and `kubernetes.sso.yaml`, `.env.example`, `config.d/`, `service-accounts.sql`, and `README.md`. |
 
   The version is `<ClickHouse release>-console.<commit>`.
 
@@ -135,6 +135,8 @@ Optional parts are override files, added with `-f` to `compose.yaml`. Use the sa
 |---|---|---|
 | `compose.cluster-agent.yaml` | The cluster agent, which creates and operates clusters on this host. | [Cluster agent on a Docker host](#cluster-agent-on-a-docker-host) |
 | `compose.bundles.yaml` | Server bundles in the backup worker: the configuration of this deployment and its secrets, encrypted. | [Server bundles](/products/web-console/guides/backup-and-restore#server-bundles) |
+| `compose.rehearsal.yaml` | The recovery rehearsal, run on demand (the profile `rehearsal`): `docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal`. | [Rehearse the recovery](/products/web-console/how-to/recover-a-server#rehearse-the-recovery) |
+| `compose.ldap-attributes.yaml` | User attributes of Data Access Policies read from an LDAP directory by the access policy worker. | [Import user attributes](/products/web-console/how-to/import-user-attributes) |
 | `compose.sso.yaml` | The token authenticator, and `config.d/sso.xml` in the server, for single sign-on with Keycloak. | [Configure single sign-on with Keycloak](/products/web-console/how-to/configure-keycloak-sso) |
 
 For example, with the cluster agent and single sign-on:
