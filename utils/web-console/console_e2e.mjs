@@ -734,12 +734,26 @@ await test('Console Guide: deep links survive the sign-in, search, links between
     check(await page.getAttribute('.guide-nav a[aria-current="page"]', 'href') === '/console/guide/how-to/configure-ldap', 'current page not marked');
     check((await page.title()).includes('Console Guide'), `title: ${await page.title()}`);
 
+    /// The article fills the width of the window: "On this page" is a column on the right of a wide window.
+    const widths = await page.evaluate(() => {
+        const view = document.querySelector('#admin-view').getBoundingClientRect();
+        const toc = document.querySelector('.guide-toc').getBoundingClientRect();
+        return {gap: Math.round(view.right - toc.right), article: Math.round(document.querySelector('.guide-article').getBoundingClientRect().width)};
+    });
+    check(widths.gap < 40, `empty space on the right of the guide: ${widths.gap}px`);
+    check(widths.article > 600, `the article is narrow: ${widths.article}px`);
+    check(await page.isHidden('details.guide-contents'), '"On this page" is shown twice');
+
     /// An anchor of the page scrolls to its heading and is kept in the address.
-    await page.evaluate(() => { document.querySelector('details.guide-contents').open = true; });
-    await page.click('details.guide-contents a[href="#active-directory"]');
+    await page.click('.guide-toc a[href="#active-directory"]');
     await waitUntil(page, () => location.hash === '#active-directory');
     const top = await page.evaluate(() => document.querySelector('#active-directory').getBoundingClientRect().top);
     check(top >= 0 && top < 250, `the heading of the anchor is not at the top: ${top}`);
+
+    /// A narrower window has "On this page" at the top of the article instead.
+    await page.setViewportSize({width: 1100, height: 900});
+    check(await page.isHidden('.guide-toc') && await page.isVisible('details.guide-contents'), '"On this page" of a narrower window');
+    await page.setViewportSize({width: 1400, height: 900});
 
     /// Search: the results replace the navigation, and the query is kept on the page of a result.
     await page.fill('.guide-nav input[type="search"]', 'keycloak realm');
