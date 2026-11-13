@@ -62,6 +62,7 @@
     --warning-bg: #fff4e0;
     --info-bg: #eaf1fd;
     --shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+    --shadow-raised: 0 4px 14px rgb(0 0 0 / 0.08);
     /* Administration pages, in the colors of ClickStack. */
     --hairline: #e6e7e9;
     --input-bg: #fbfcff;
@@ -102,6 +103,7 @@
     --warning-bg: #3a2c17;
     --info-bg: #1f2c44;
     --shadow: none;
+    --shadow-raised: 0 4px 14px rgb(0 0 0 / 0.35);
     --hairline: #353532;
     --input-bg: #2a2a27;
     --input-border: #3b3b38;
@@ -391,41 +393,46 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 /* Console Guide */
 
 .guide-help { text-decoration: none; display: inline-flex; align-items: center; gap: 0.3rem; }
-.guide-layout { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+/* The guide reads like a documentation site: a centered column, body text of 16px, and lines of about 70 characters. */
+.guide-layout { display: grid; grid-template-columns: 16rem minmax(0, 46rem); gap: 2.5rem; align-items: start; justify-content: center; width: 100%; max-width: 68rem; margin: 0 auto; padding-top: 1rem; }
 /* Below the sticky header of the page (52px). */
-.guide-nav { position: sticky; top: 60px; display: flex; flex-direction: column; gap: 0.6rem; max-height: calc(100vh - var(--header-height) - 76px); overflow-y: auto; padding: 0.25rem 0.25rem 1rem 0; }
-.guide-nav input[type="search"] { width: 100%; min-height: 2.2rem; padding: 0.35rem 0.6rem; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg); font: inherit; color: inherit; }
-#admin-view .admin-page .guide-nav h2 { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0.4rem 0 0.1rem; }
+.guide-nav { position: sticky; top: 68px; font-size: 15px; display: flex; flex-direction: column; gap: 0.6rem; max-height: calc(100vh - var(--header-height) - 76px); overflow-y: auto; padding: 0.25rem 0.25rem 1rem 0; }
+.guide-nav input[type="search"] { width: 100%; min-height: 2.4rem; padding: 0.35rem 0.6rem; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg); font: inherit; color: inherit; }
+#admin-view .admin-page .guide-nav h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0.4rem 0 0.1rem; }
 .guide-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
-.guide-nav a { display: block; padding: 0.25rem 0.5rem; border-radius: 4px; color: var(--text); text-decoration: none; }
+.guide-nav a { display: block; padding: 0.3rem 0.6rem; line-height: 1.4; border-radius: 4px; color: var(--text); text-decoration: none; }
 .guide-nav a:hover { background: var(--surface-hover); }
 .guide-nav a[aria-current="page"] { background: var(--selected); font-weight: 600; }
-.guide-results .snippet { display: block; color: var(--muted); font-size: 0.8rem; font-weight: 400; }
+.guide-results .snippet { display: block; color: var(--muted); font-size: 13px; font-weight: 400; }
 .guide-results mark { background: var(--accent); color: var(--accent-text); border-radius: 2px; }
-.guide-article { max-width: 52rem; min-width: 0; font-size: 14px; line-height: 1.6; }
-.guide-article > .note { font-size: 0.95rem; margin: 0 0 1rem; }
+/* `position: relative` keeps the absolutely positioned `.visually-hidden` texts of the links inside the scrolling view:
+   without it, they extended the document below the console and gave the window a second scroll bar. */
+.guide-article { position: relative; min-width: 0; font-size: 16px; line-height: 1.65; }
+#admin-view .admin-page h1.guide-page-title { font-size: 30px; font-weight: 700; line-height: 1.25; margin: 0 0 0.6rem; letter-spacing: -0.01em; }
+#admin-view .admin-page h1.guide-page-title:focus { outline: none; }
+#admin-view .guide-article > .note { font-size: 18px; line-height: 1.55; margin: 0 0 1.4rem; }
 .guide-content > :first-child { margin-top: 0; }
 .guide-content :is(h2, h3, h4) { scroll-margin-top: 64px; line-height: 1.3; }
-#admin-view .admin-page .guide-content h2 { font-size: 1.2rem; font-weight: 600; margin: 1.8rem 0 0.6rem; padding-top: 0.4rem; border-top: 1px solid var(--hairline); }
-#admin-view .admin-page .guide-content h3 { font-size: 1.02rem; font-weight: 600; margin: 1.4rem 0 0.5rem; }
-#admin-view .admin-page .guide-content h4 { font-size: 0.95rem; font-weight: 600; margin: 1.2rem 0 0.4rem; }
-.guide-content p { margin: 0.6rem 0; }
-.guide-content :is(ul, ol) { margin: 0.5rem 0; padding-left: 1.4rem; }
-.guide-content li { margin: 0.2rem 0; }
+#admin-view .admin-page .guide-content h2 { font-size: 24px; font-weight: 600; margin: 2.4rem 0 0.8rem; padding-top: 1rem; border-top: 1px solid var(--hairline); }
+#admin-view .admin-page .guide-content h3 { font-size: 19px; font-weight: 600; margin: 1.8rem 0 0.6rem; }
+#admin-view .admin-page .guide-content h4 { font-size: 16px; font-weight: 600; margin: 1.4rem 0 0.5rem; }
+.guide-content p { margin: 0.9rem 0; }
+.guide-content :is(ul, ol) { margin: 0.8rem 0; padding-left: 1.5rem; }
+.guide-content li { margin: 0.35rem 0; }
 .guide-content li > p { margin: 0.3rem 0; }
 .guide-content a { color: var(--link); }
-.guide-content code { background: var(--bg-subtle); border: 1px solid var(--hairline); border-radius: 3px; padding: 0 0.25em; overflow-wrap: anywhere; }
-.guide-code { position: relative; margin: 0.7rem 0; }
-.guide-code pre { margin: 0; padding: 0.7rem 0.8rem; overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-subtle); font-size: 12.5px; line-height: 1.5; }
+.guide-content code { background: var(--bg-subtle); border: 1px solid var(--hairline); border-radius: 3px; padding: 0.05em 0.3em; font-size: 0.875em; overflow-wrap: anywhere; }
+.guide-code { position: relative; margin: 1rem 0; }
+.guide-code pre { margin: 0; padding: 0.9rem 1rem; overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-subtle); font-size: 14px; line-height: 1.55; }
 .guide-code pre code { background: none; border: 0; padding: 0; overflow-wrap: normal; }
-.guide-code-language { position: absolute; top: 0.3rem; right: 4.6rem; font-size: 0.72rem; color: var(--muted); }
+.guide-code-language { position: absolute; top: 0.3rem; right: 4.6rem; font-size: 12px; color: var(--muted); }
 .guide-code .copy { position: absolute; top: 0.25rem; right: 0.3rem; }
-.guide-table { overflow-x: auto; margin: 0.7rem 0; border: 1px solid var(--border); border-radius: 6px; }
-.guide-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.guide-table :is(th, td) { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.guide-table { overflow-x: auto; margin: 1rem 0; border: 1px solid var(--border); border-radius: 6px; }
+.guide-table table { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.5; }
+.guide-table :is(th, td) { text-align: left; padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
 .guide-table tr:last-child td { border-bottom: 0; }
 .guide-table th { background: var(--bg-subtle); font-weight: 600; }
-.guide-callout { margin: 0.8rem 0; padding: 0.6rem 0.9rem; border-radius: 6px; border: 1px solid var(--border); border-left-width: 4px; background: var(--info-bg); }
+.guide-callout { margin: 1rem 0; padding: 0.8rem 1rem; border-radius: 6px; border: 1px solid var(--border); border-left-width: 4px; background: var(--info-bg); }
 .guide-callout > :last-child { margin-bottom: 0; }
 .guide-callout-title { font-weight: 600; margin: 0 0 0.2rem !important; }
 .guide-tip { background: var(--success-bg); border-left-color: var(--success); }
@@ -439,68 +446,74 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
     display: grid; place-items: center; font-weight: 600; font-size: 0.85rem; background: var(--primary-bg); color: var(--primary-text);
 }
 .guide-steps > li:last-child { border-left-color: transparent; }
-.guide-step-title { font-weight: 600; font-size: 1rem; margin: 0.15rem 0 0.4rem !important; }
+.guide-step-title { font-weight: 600; font-size: 17px; margin: 0.15rem 0 0.4rem !important; }
 .guide-tabs { margin: 0.8rem 0; }
 .guide-tabs [role="tablist"] { display: flex; gap: 0.15rem; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .guide-tabs [role="tab"] { padding: 0.45rem 0.8rem; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: none; color: var(--muted); font: inherit; cursor: pointer; }
 .guide-tabs [role="tab"][aria-selected="true"] { border-bottom-color: var(--accent-border); color: var(--text); font-weight: 600; }
 .guide-diagram { margin: 0.8rem 0; }
-.guide-diagram figcaption { font-size: 0.85rem; color: var(--muted); }
+.guide-diagram figcaption { font-size: 14px; color: var(--muted); }
 .guide-pager { display: flex; justify-content: space-between; gap: 1rem; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--hairline); flex-wrap: wrap; }
-.guide-pager a { text-decoration: none; display: flex; flex-direction: column; padding: 0.5rem 0.8rem; border: 1px solid var(--border); border-radius: 6px; color: var(--text); max-width: 48%; }
+.guide-pager a { text-decoration: none; display: flex; flex-direction: column; padding: 0.5rem 0.8rem; border: 1px solid var(--border); border-radius: 6px; color: var(--text); max-width: 48%; font-size: 15px; font-weight: 500; }
 .guide-pager a:hover { border-color: var(--border-hover); background: var(--surface-hover); }
 .guide-pager a.next { margin-left: auto; text-align: right; }
-.guide-pager .note { font-size: 0.78rem; }
-details.guide-contents { margin: 0 0 1rem; font-size: 0.92em; border: 1px solid var(--hairline); border-radius: 6px; padding: 0.4rem 0.8rem; }
+#admin-view .guide-pager .note { font-size: 13px; }
+details.guide-contents { margin: 0 0 1.4rem; font-size: 15px; border: 1px solid var(--hairline); border-radius: 6px; padding: 0.4rem 0.8rem; }
 details.guide-contents summary { cursor: pointer; font-weight: 600; }
 details.guide-contents ul { margin: 0.3rem 0 0.2rem; padding-left: 1.1rem; }
 details.guide-contents li.level-3 { margin-left: 1rem; }
 .guide-home-link { display: flex !important; align-items: center; gap: 0.4rem; font-weight: 600; }
-.guide-landing-body { max-width: 64rem; width: 100%; display: flex; flex-direction: column; gap: 1.4rem; padding-top: 0.6rem; }
+.guide-landing-body { max-width: 68rem; width: 100%; margin: 0 auto; font-size: 16px; line-height: 1.6; display: flex; flex-direction: column; gap: 1.4rem; padding-top: 0.6rem; }
 .guide-rule { border: 0; border-top: 1px solid var(--hairline); margin: 0; }
-#admin-view .admin-page .guide-landing-body h2 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.5rem; }
+#admin-view .admin-page .guide-landing-body h2 { font-size: 22px; font-weight: 600; margin: 0 0 0.5rem; }
 .guide-welcome { display: flex; flex-direction: column; gap: 0.6rem; }
-.guide-welcome > .note { font-size: 0.95rem; max-width: 46rem; }
+#admin-view .guide-welcome > .note { font-size: 17px; line-height: 1.55; max-width: 46rem; }
 .guide-search { display: flex; align-items: center; gap: 0.5rem; max-width: 36rem; padding: 0 0.7rem; border: 1px solid var(--border); border-radius: 6px; background: var(--input-bg); }
 .guide-search:focus-within { outline: 2px solid var(--focus); outline-offset: 1px; }
 #admin-view .guide-search input[type="search"]
 {
     flex: 1; min-width: 0; min-height: 2.5rem; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none;
-    font: inherit; font-size: 14px; color: inherit; outline: none;
+    font: inherit; font-size: 16px; color: inherit; outline: none;
 }
 .guide-search .icon { color: var(--muted); }
 .guide-landing-results ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.4rem; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); }
-.guide-landing-results a { display: block; padding: 0.55rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; text-decoration: none; color: var(--text); font-weight: 600; }
+.guide-landing-results a { display: block; padding: 0.65rem 0.85rem; font-size: 15px; border: 1px solid var(--border); border-radius: 6px; text-decoration: none; color: var(--text); font-weight: 600; }
 .guide-landing-results a:hover { border-color: var(--border-hover); background: var(--surface-hover); }
-.guide-get-started .note { margin-top: 0.6rem; }
+#admin-view .guide-get-started .note { font-size: 15px; margin-top: 0.6rem; }
 .guide-get-started .button { text-decoration: none; display: inline-flex; align-items: center; gap: 0.4rem; }
 .guide-get-started a:not(.button) { color: var(--link); }
 .guide-sections { display: flex; flex-direction: column; gap: 1.8rem; }
 .guide-section { display: flex; flex-direction: column; gap: 0.4rem; scroll-margin-top: 64px; }
 .guide-section-head { display: flex; align-items: baseline; gap: 0.6rem; }
 #admin-view .admin-page .guide-section-head h2 { margin: 0; }
-.guide-section > .note { margin-bottom: 0.4rem; }
-.guide-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr)); }
+#admin-view .guide-section > .note { font-size: 15px; margin-bottom: 0.4rem; }
+.guide-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 1.1rem; grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr)); }
 .guide-card
 {
-    position: relative; display: flex; flex-direction: column; gap: 0.6rem; padding: 1rem 1.1rem; border: 1px solid var(--border);
-    border-radius: 6px; background: var(--surface); transition: border-color 0.12s, background-color 0.12s;
+    position: relative; display: flex; flex-direction: column; gap: 0.7rem; padding: 1.4rem 1.5rem; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--surface); transition: border-color 0.12s, box-shadow 0.12s;
 }
-.guide-card:hover { border-color: var(--border-hover); background: var(--surface-hover); }
+.guide-card:hover { border-color: var(--border-hover); box-shadow: var(--shadow-raised); }
 .guide-card:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
-.guide-card-head { display: flex; align-items: center; gap: 0.6rem; }
-.guide-card-head .icon { width: 1.25rem; height: 1.25rem; flex: none; }
-#admin-view .admin-page .guide-card h3 { flex: 1; min-width: 0; font-size: 1rem; font-weight: 600; margin: 0; }
+/* The icon in a tinted tile, and the badge of the type of the page across from it. */
+.guide-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.6rem; margin-bottom: 0.2rem; }
+.guide-card-icon
+{
+    display: flex; align-items: center; justify-content: center; flex: none; width: 2.75rem; height: 2.75rem;
+    border-radius: 8px; background: var(--bg-subtle); border: 1px solid var(--hairline); color: var(--text);
+}
+.guide-card-icon .icon { width: 1.5rem; height: 1.5rem; }
+#admin-view .admin-page .guide-card h3 { font-size: 18px; font-weight: 600; line-height: 1.35; margin: 0; }
 .guide-card h3 a { color: var(--text); text-decoration: none; outline: none; }
 /* The link of the title covers the card. */
-.guide-card h3 a::after { content: ''; position: absolute; inset: 0; border-radius: 6px; }
+.guide-card h3 a::after { content: ''; position: absolute; inset: 0; border-radius: 10px; }
 .guide-card .badge { flex: none; }
 .guide-card p
 {
-    margin: 0; color: var(--muted); font-size: 0.9rem; line-height: 1.5;
+    margin: 0; color: var(--muted); font-size: 15px; line-height: 1.55;
     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
-.guide-card-more { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.9rem; font-weight: 500; margin-top: auto; }
+.guide-card-more { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 14px; font-weight: 500; margin-top: auto; padding-top: 0.4rem; }
 .guide-card:hover .guide-card-more { text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) { .guide-card { transition: none; } }
 @media (max-width: 60rem)
@@ -509,6 +522,8 @@ details.guide-contents li.level-3 { margin-left: 1rem; }
     .guide-nav { position: static; max-height: none; }
     .guide-nav .guide-groups { display: none; }
     .guide-nav.open .guide-groups { display: flex; flex-direction: column; gap: 0.4rem; }
+    #admin-view .guide-nav .guide-toggle.button { min-height: 2.4rem; font-size: 15px; }
+    #admin-view .admin-page h1.guide-page-title { font-size: 26px; }
 }
 @media (min-width: 60.01rem) { .guide-nav .guide-toggle { display: none; } }
 pre.code
@@ -3399,13 +3414,14 @@ async function showGuide(c, route) {
     const group = guide.groups.find(g => g.pages.includes(key));
     const crumbs = [h('a', {href: componentPath('guide'), dataset: {route: ''}}, c.title), group && group.title ? ` › ${group.title}` : null];
     const header = pageHeader(c, page.title, crumbs);
-    header.querySelector('h1').id = 'guide-title';
+    header.querySelector('h1').replaceWith(h('span', {className: 'page-title'}, page.sidebar_title));
+    const title = h('h1', {id: 'guide-title', className: 'guide-page-title', tabIndex: -1}, page.title);
 
     const contents = page.headings.filter(heading => heading.level === 2 || heading.level === 3);
     const content = h('div', {className: 'guide-content'});
     content.innerHTML = page.html;
     prepareGuideContent(content);
-    put(article, h('p', {className: 'note'}, page.description),
+    put(article, title, h('p', {className: 'note'}, page.description),
         contents.length > 2 ? h('details', {className: 'guide-contents', open: contents.length <= 12},
             h('summary', {}, 'On this page'),
             h('ul', {}, contents.map(heading => h('li', {className: `level-${heading.level}`}, h('a', {href: `#${heading.id}`}, heading.text))))) : null,
@@ -3415,7 +3431,7 @@ async function showGuide(c, route) {
 
     view.replaceChildren(h('div', {className: 'admin-page'}, header, h('div', {className: 'guide-layout'}, nav, article)));
     scrollGuideToHash(view);
-    focusHeading(header.querySelector('h1'));
+    focusHeading(title);
 }
 
 /// The links of the guide to the documentation site keep their path; they go to the configured documentation.
@@ -3653,16 +3669,23 @@ function renderGuideCard(guide, key, section) {
     const page = guide.pages[key];
     const id = `guide-card-${key.replace(/[^a-z0-9]+/g, '-')}`;
     return h('li', {className: 'guide-card'},
-        h('div', {className: 'guide-card-head'}, icon(GUIDE_PAGE_ICONS[key] || section.icon),
-            h('h3', {id}, h('a', {href: guidePath(key), dataset: {route: ''}}, page.sidebar_title)),
-            h('span', {className: 'badge'}, section.badge)),
+        guideCardHead(GUIDE_PAGE_ICONS[key] || section.icon, section.badge),
+        h('h3', {id}, h('a', {href: guidePath(key), dataset: {route: ''}}, page.sidebar_title)),
         h('p', {}, page.description),
         h('span', {className: 'guide-card-more', 'aria-hidden': 'true'}, 'Read more', icon('chevron', 'icon-small')));
 }
 
+/// The top of a card: the icon in a tile, and the badge.
+function guideCardHead(icon_name, badge_text) {
+    return h('div', {className: 'guide-card-head'},
+        h('span', {className: 'guide-card-icon', 'aria-hidden': 'true'}, icon(icon_name)),
+        h('span', {className: 'badge'}, badge_text));
+}
+
 function guideResourceCard(title, icon_name, badge_text, description, link) {
     return h('li', {className: 'guide-card'},
-        h('div', {className: 'guide-card-head'}, icon(icon_name), h('h3', {}, link), h('span', {className: 'badge'}, badge_text)),
+        guideCardHead(icon_name, badge_text),
+        h('h3', {}, link),
         h('p', {}, description),
         h('span', {className: 'guide-card-more', 'aria-hidden': 'true'}, 'Open', icon(link.target === '_blank' ? 'external' : 'chevron', 'icon-small')));
 }
