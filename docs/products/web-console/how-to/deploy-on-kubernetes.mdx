@@ -1,5 +1,5 @@
 ---
-description: 'Deploy the ClickHouse server with the web console, the backup worker, the access policy worker, and the cluster agent on Kubernetes with kubernetes.yaml.'
+description: 'Deploy the ClickHouse server with the web console, the backup worker, the access policy worker, the cluster agent, and the recovery rehearsal on Kubernetes with kubernetes.yaml, and single sign-on with kubernetes.sso.yaml.'
 sidebarTitle: 'Deploy on Kubernetes'
 slug: /web-console/how-to/deploy-on-kubernetes
 title: 'Deploy on Kubernetes'
@@ -7,7 +7,8 @@ doc_type: 'guide'
 ---
 
 Use this guide to deploy the ClickHouse server with the web console, and its helper processes, on Kubernetes, with the
-manifest `kubernetes.yaml` of the `deploy/` directory of a release of the console.
+manifest `kubernetes.yaml` of the `deploy/` directory of a release of the console, and optionally single sign-on with
+`kubernetes.sso.yaml`.
 
 For one Docker host, see [Deploy with Docker Compose](/products/web-console/how-to/deploy-with-docker-compose).
 
@@ -17,15 +18,16 @@ All objects are in the namespace `clickhouse-console`:
 
 | Object | Purpose |
 |---|---|
-| ConfigMap `web-console-config` | `web-console.xml`, mounted into `/etc/clickhouse-server/config.d/` of the server: the Resources links, `admin_database`, and `backup_s3_endpoints`. |
+| ConfigMap `web-console-config` | `web-console.xml` and `sso.xml`, mounted into `/etc/clickhouse-server/config.d/` of the server. `web-console.xml` has the Resources links, `admin_database`, and `backup_s3_endpoints`; `sso.xml` has the token authenticator of single sign-on and reads `SSO_NAME`, `SSO_ISSUER`, and `SSO_CLIENT_ID` from the optional ConfigMap `web-console-sso` (without it, the issuer is empty and single sign-on is off). The backup worker mounts the same ConfigMap at `/deploy/config.d` for server bundles. |
 | StatefulSet `clickhouse` | The server with the console, one replica, with a 20 GiB volume `data` at `/var/lib/clickhouse`. It requests 1 CPU and 2 GiB of memory, with a limit of 4 GiB, and is ready when `/ping` answers. |
 | Service `clickhouse` | The ports 8123 (HTTP, with the console) and 9000 (native). |
-| Deployment `backup-worker` | The backup worker, as `backup_worker`. |
-| Deployment `access-policy-worker` | The access policy worker, as `access_policy_worker`, every 60 seconds. |
+| Deployment `backup-worker` | The backup worker, as `backup_worker`, with the optional server bundles and S3 destination credentials. Staged restores go to an `emptyDir` at `/staging`. |
+| Deployment `access-policy-worker` | The access policy worker, as `access_policy_worker`, every 60 seconds, with the optional user attributes from LDAP. |
 | ServiceAccount, ClusterRole, and ClusterRoleBinding `cluster-agent` | What the cluster agent does with `kubectl`, and nothing more. |
 | ConfigMap `cluster-agent-kubeconfig` | A kubeconfig that uses the service account of the pod. |
 | PersistentVolumeClaim `cluster-agent-state` | 1 GiB for the state of the agent, including its key pair. |
 | Deployment `cluster-agent` | The cluster agent with the kubernetes provider only, as `cluster_agent`. |
+| CronJob `recovery-rehearsal` | The [recovery rehearsal](/products/web-console/how-to/recover-a-server#rehearse-the-recovery), as `backup_worker`, suspended; with `suspend: false`, it runs monthly (`0 3 1 * *`). An init container copies the `clickhouse` binary of the server image for the isolated server. It reads S3 destinations only: a disk destination is in the volume of the server. The restored tables go to an `emptyDir` of up to 50 GiB: size it for the largest database. |
 
 The cluster agent manages clusters with the ClickHouse operator in the same Kubernetes cluster, in the namespaces that
 match `CLUSTER_AGENT_K8S_NAMESPACES` (`chc-*`). Kubernetes RBAC cannot express a namespace prefix, so the agent
@@ -33,12 +35,16 @@ restricts the namespaces itself. The agent's key pair for administrator password
 makes queued creations undecryptable. If you do not manage clusters, remove the part of the agent from the manifest.
 See [Kubernetes provider](/products/web-console/guides/clusters#kubernetes-provider).
 
+`kubernetes.sso.yaml`, applied after `kubernetes.yaml` when you use single sign-on, creates the ConfigMap
+`web-console-sso`, the Deployment and Service `sso-authenticator` (port 29700), and a NetworkPolicy that lets only the
+pods of the server reach it. See [Single sign-on](#single-sign-on).
+
 ## Before you begin {#before-you-begin}
 
 - A Kubernetes cluster and `kubectl` with the rights to create a namespace, cluster roles, and the objects above.
 - The image archives and the `deploy/` directory of the release (see
   [Deploy with Docker Compose](/products/web-console/how-to/deploy-with-docker-compose#before-you-begin)).
-  `package_images.sh` sets the version tags of the images in `kubernetes.yaml`.
+  `package_images.sh` sets the version tags of the images in `kubernetes.yaml` and `kubernetes.sso.yaml`.
 - For the cluster agent, the ClickHouse operator in the cluster.
 
 ## Deploy {#deploy}
@@ -71,8 +77,9 @@ Edit the ConfigMap `web-console-config` in `kubernetes.yaml`: the Resources link
 network without Internet access), the admin database, and the S3 endpoints allowed for backups. See
 [`web_console`](/products/web-console/reference/configuration#web-console).
 
-For S3 credentials of backup destinations, uncomment the `envFrom` of the backup worker, and create the Secret
-`clickhouse-console-backup-destinations` with the keys `<REF>_ACCESS_KEY_ID` and `<REF>_SECRET_ACCESS_KEY`.
+For S3 credentials of backup destinations, create the Secret `clickhouse-console-backup-destinations` with the keys
+`<REF>_ACCESS_KEY_ID` and `<REF>_SECRET_ACCESS_KEY`. The backup worker and the recovery rehearsal read it when it
+exists.
 
 </Step>
 <Step title="Apply the manifest">
@@ -110,6 +117,64 @@ the Cluster Inventory.
 For access from outside the cluster, put an Ingress with TLS in front of the Service `clickhouse`: the console sends
 passwords in HTTP headers, so they must not travel over plain HTTP.
 
+## Optional features {#optional-features}
+
+`kubernetes.yaml` applies as it is everywhere: each optional feature reads an optional ConfigMap or Secret, and is off
+until it exists. After creating or changing one, restart the workload that reads it:
+`kubectl -n clickhouse-console rollout restart deployment/<name>`, or `statefulset/clickhouse` for the server.
+
+| Feature | ConfigMap and Secret | Read by | Guide |
+|---|---|---|---|
+| S3 credentials of backup destinations | Secret `clickhouse-console-backup-destinations`: `<REF>_ACCESS_KEY_ID`, `<REF>_SECRET_ACCESS_KEY` | `backup-worker`, `recovery-rehearsal` | [Back up and restore](/products/web-console/guides/backup-and-restore) |
+| Server bundles | ConfigMap `backup-worker-bundles`: `BUNDLE_KEY_PROVIDER`, `BUNDLE_DESTINATION`, `BUNDLE_EVERY_HOURS`, `VAULT_ADDR`, `VAULT_TRANSIT_KEY`. Secret `clickhouse-console-bundle-key`: `bundle.key` or `vault-token`, mounted at `/keys` | `backup-worker` | [Protect the backups](/products/web-console/how-to/protect-backups) |
+| User attributes from LDAP | ConfigMap `access-policy-ldap`: `ATTRIBUTE_FEED_SOURCE=ldap` and the `LDAP_ATTRIBUTES_*` settings. Secret `clickhouse-console-ldap`: `password`, `ca.crt` | `access-policy-worker` | [Import user attributes](/products/web-console/how-to/import-user-attributes#import-from-ldap) |
+| Single sign-on | ConfigMap `web-console-sso` (created by `kubernetes.sso.yaml`); Secret `clickhouse-console-sso`: `sync-secret`, `sso_sync_password` for the user sync | `clickhouse`, `sso-authenticator` | [Single sign-on](#single-sign-on) |
+
+For server bundles, the worker backs up the configuration of the deployment, the ConfigMap `web-console-config`
+mounted at `/deploy/config.d` (`BUNDLE_PATHS`). Create the key with the tools image on a trusted host, keep a copy out of
+band, and store it in the Secret:
+
+```bash
+docker run --rm -v "$PWD":/out clickhouse-console-tools:<version> backup-worker bundle-key-init --key-file /out/bundle.key
+kubectl -n clickhouse-console create secret generic clickhouse-console-bundle-key --from-file=bundle.key
+kubectl -n clickhouse-console create configmap backup-worker-bundles \
+  --from-literal=BUNDLE_KEY_PROVIDER=file --from-literal=BUNDLE_DESTINATION=<destination> --from-literal=BUNDLE_EVERY_HOURS=24
+kubectl -n clickhouse-console rollout restart deployment/backup-worker
+```
+
+For Vault, put `vault-token` in the Secret instead, and `VAULT_ADDR` and `VAULT_TRANSIT_KEY` in the ConfigMap. Staged
+restores go to the `emptyDir` of the pod: copy them out with `kubectl cp` before the pod restarts.
+
+### Single sign-on {#single-sign-on}
+
+Set the values of the ConfigMap `web-console-sso` in `kubernetes.sso.yaml` (`SSO_NAME`, `SSO_ISSUER`, `SSO_CLIENT_ID`,
+and `SSO_SYNC_CLIENT_ID`, empty to turn the user sync off). For the user sync, create the Secret with the secret of its
+client and the password of `sso_sync`:
+
+```bash
+kubectl -n clickhouse-console create secret generic clickhouse-console-sso \
+  --from-literal=sync-secret=... --from-literal=sso_sync_password=...
+```
+
+Then apply the file, and restart the server once, because it reads the settings of `sso.xml` at start:
+
+```bash
+kubectl apply -f kubernetes.sso.yaml
+kubectl -n clickhouse-console rollout restart statefulset/clickhouse
+kubectl -n clickhouse-console exec deploy/sso-authenticator -- clickhouse-console-tools sso-authenticator --check-config
+```
+
+See [Configure single sign-on with Keycloak](/products/web-console/how-to/configure-keycloak-sso).
+
+### Recovery rehearsal {#recovery-rehearsal}
+
+The CronJob `recovery-rehearsal` is suspended. Set `suspend: false` to run it monthly, or run it once:
+
+```bash
+kubectl -n clickhouse-console create job --from=cronjob/recovery-rehearsal recovery-rehearsal-now
+kubectl -n clickhouse-console logs -f job/recovery-rehearsal-now
+```
+
 ## More configuration {#more-configuration}
 
 Further server configuration, such as an [LDAP user directory](/products/web-console/how-to/configure-ldap), goes into
@@ -122,8 +187,8 @@ kubectl -n clickhouse-console rollout restart statefulset/clickhouse
 
 ## Upgrade and roll back {#upgrade-and-roll-back}
 
-Make the new images available to the nodes, change the image tags in `kubernetes.yaml`, and run
-`kubectl apply -f kubernetes.yaml`. The data stays in the volumes. To roll back, set the previous tags again and apply.
+Make the new images available to the nodes, change the image tags in `kubernetes.yaml` (and `kubernetes.sso.yaml`),
+and run `kubectl apply -f kubernetes.yaml`, and `kubectl apply -f kubernetes.sso.yaml` when you use it. The data stays in the volumes. To roll back, set the previous tags again and apply.
 
 <Warning>
 Rolling back to a server older than the ClickHouse release of the data is not supported by ClickHouse. Keep the

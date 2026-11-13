@@ -9,7 +9,7 @@ doc_type: 'reference'
 The console runs in the browser and can only send queries to the server. What a browser cannot do, such as running
 schedules, deleting backups, creating containers, or checking single sign-on tokens, is done by helper processes in
 `utils/web-console/`. Each is one Node.js script without packages (Node.js 18 or later), configured with environment
-variables, and documented in its header comment. All but the recovery rehearsal are also in the [tools image](#tools-image).
+variables, and documented in its header comment. All five are also in the [tools image](#tools-image).
 
 All of them except the token authenticator connect to the HTTP interface of the server with a service account
 (`CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`), send credentials in the `X-ClickHouse-User` and
@@ -22,7 +22,7 @@ The privileges of each account are in [Privileges](/products/web-console/referen
 | [Cluster agent](#cluster-agent) | `cluster_agent.mjs` | `cluster-agent` | Continuously, on the infrastructure host |
 | [Access policy worker](#access-policy-worker) | `access_policy_worker.mjs` | `access-policy-worker` | Continuously |
 | [Token authenticator](#sso-authenticator) | `sso_authenticator.mjs` | `sso-authenticator` | Continuously, reachable only by the server |
-| [Recovery rehearsal](#recovery-rehearsal) | `recovery_rehearsal.mjs` | None | On demand, on the server host |
+| [Recovery rehearsal](#recovery-rehearsal) | `recovery_rehearsal.mjs` | `recovery-rehearsal` | On demand, or monthly: with `compose.rehearsal.yaml`, or the CronJob `recovery-rehearsal` of `kubernetes.yaml` |
 
 ## Backup worker {#backup-worker}
 
@@ -374,12 +374,33 @@ as a `recovery_rehearsal` audit record. See [Recover a server](/products/web-con
 
 ### Running the recovery rehearsal {#running-the-recovery-rehearsal}
 
+In the tools image, the command is
+`recovery-rehearsal --binary <clickhouse> [--backup <operation ID>]... [--staged <directory>] [--work-dir <directory>]`,
+with the account from `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD`. The isolated server runs the
+`clickhouse` binary of the server image, copied for it:
+
+| Where | How |
+|---|---|
+| Docker Compose | `compose.rehearsal.yaml`, in the profile `rehearsal`: the service `rehearsal-binary` copies `/usr/bin/clickhouse` from the server image into a volume, and the service `recovery-rehearsal` runs as the user `101:101` with the account `backup_worker` (`BACKUP_WORKER_PASSWORD`), the S3 credentials of `backup-destinations.env`, the server's data volume mounted read-only (so that disk destinations are readable), and `./restore-staging` at `/staging`. |
+| Kubernetes | The CronJob `recovery-rehearsal` of `kubernetes.yaml`, suspended, monthly (`0 3 1 * *`) with `suspend: false`: an init container copies the binary, and the job runs as `backup_worker`, with the S3 credentials of the Secret `clickhouse-console-backup-destinations`. S3 destinations only. |
+| A host with a source checkout | `node utils/web-console/recovery_rehearsal.mjs`, on the server host or on a host that mounts the backups: a disk destination is read from its path on this host. |
+
 ```bash
+# Docker Compose, in deploy/
+docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal
+docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal \
+    recovery-rehearsal --binary /rehearsal-bin/clickhouse --backup <operation ID>
+
+# Kubernetes
+kubectl -n clickhouse-console create job --from=cronjob/recovery-rehearsal recovery-rehearsal-now
+
+# A host with a source checkout
 node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user <admin> --password <password> \
     --binary /usr/bin/clickhouse [--staged <staging directory of a server bundle>]
 ```
 
-Run it on the server host, or on a host that mounts the backups: a disk destination is read from its path on this host.
+The Compose service and the CronJob run as the backup worker's account, whose role (the Backup Administrator template)
+has the grants the rehearsal needs.
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -425,7 +446,7 @@ its first argument. It is built by `package_images.sh`; see
 |---|---|
 | Base | `node:22.22.0-bookworm-slim` |
 | Tools | The `docker` CLI and its Compose plugin from `docker:28.5.2-cli`; `kubectl` `v1.31.5` (linux/amd64), checked against its SHA-256 |
-| Files | `/opt/clickhouse-console/`: `backup_worker.mjs`, `server_bundle.mjs`, `cluster_agent.mjs`, `access_policy_worker.mjs`, `sso_authenticator.mjs`, `console.html`, and `VERSION` |
+| Files | `/opt/clickhouse-console/`: `backup_worker.mjs`, `server_bundle.mjs`, `cluster_agent.mjs`, `access_policy_worker.mjs`, `ldap_client.mjs`, `sso_authenticator.mjs`, `recovery_rehearsal.mjs`, `console.html`, and `VERSION` |
 | Entry point | `clickhouse-console-tools` (`tools-entrypoint.sh`), default command `help` |
 | User | `node` |
 | Working directory | `/opt/clickhouse-console` |
@@ -443,9 +464,10 @@ Further arguments are passed to the process, for example `backup-worker --once`.
 | `cluster-agent [arguments]` | `node /opt/clickhouse-console/cluster_agent.mjs [arguments]` |
 | `access-policy-worker [arguments]` | `node /opt/clickhouse-console/access_policy_worker.mjs [arguments]` |
 | `sso-authenticator [arguments]` | `node /opt/clickhouse-console/sso_authenticator.mjs [arguments]` |
+| `recovery-rehearsal [arguments]` | `node /opt/clickhouse-console/recovery_rehearsal.mjs [arguments]` |
 | `version` | Prints `VERSION`: the version and the commit. |
 | `help` (default) | Prints the usage. |
-| Anything else | Prints `Unknown process '<name>'. Choose backup-worker, cluster-agent, access-policy-worker, or sso-authenticator.` and exits with code `2`. |
+| Anything else | Prints `Unknown process '<name>'. Choose backup-worker, cluster-agent, access-policy-worker, sso-authenticator, or recovery-rehearsal.` and exits with code `2`. |
 
 ```bash
 docker run --rm clickhouse-console-tools:<version> version
@@ -453,4 +475,5 @@ docker run -d --name backup-worker -e CLICKHOUSE_URL=http://clickhouse:8123 -e C
     -e CLICKHOUSE_PASSWORD=... clickhouse-console-tools:<version> backup-worker
 ```
 
-The recovery rehearsal is not in the image: it starts a `clickhouse` server, so it runs on a host with the binary.
+The recovery rehearsal starts a `clickhouse` server: pass the binary of the server image with `--binary`, as
+`compose.rehearsal.yaml` and the CronJob `recovery-rehearsal` do.

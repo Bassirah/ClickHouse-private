@@ -1,11 +1,11 @@
 # Server image with a locally built `clickhouse` binary, for example one that includes the web console.
 # It reuses the official image of the same release for everything except the binary.
 #
-#   docker build -f utils/web-console/Dockerfile --build-arg BASE_IMAGE=clickhouse/clickhouse-server:26.9.8.3 \
-#       -t clickhouse-server-console:26.9.8.3 <directory with the clickhouse binary>
+#   docker build -f utils/web-console/Dockerfile --build-arg BASE_IMAGE=clickhouse/clickhouse-server:26.10.2.103 \
+#       -t clickhouse-server-console:26.10.2.103 <directory with the clickhouse binary>
 #
 # package_images.sh builds it with the version and revision, and packages it for distribution.
-ARG BASE_IMAGE=clickhouse/clickhouse-server:26.9.8.3
+ARG BASE_IMAGE=clickhouse/clickhouse-server:26.10.2.103
 FROM ${BASE_IMAGE}
 ARG VERSION=dev
 ARG REVISION=unknown

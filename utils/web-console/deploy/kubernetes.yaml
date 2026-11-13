@@ -1,5 +1,6 @@
 # Deployment example of the web console on Kubernetes: the ClickHouse server with the console (a StatefulSet with one
-# replica and a volume), the backup worker, the access policy worker, and the cluster agent with the kubernetes provider.
+# replica and a volume), the backup worker, the access policy worker, the cluster agent with the kubernetes provider,
+# and the recovery rehearsal (a CronJob, suspended until you enable it). Single sign-on is in kubernetes.sso.yaml.
 # See README.md in this directory. Before applying:
 #
 #   1. Make the images available to the nodes: push them to your registry and change `image:` below, or import the
@@ -13,6 +14,14 @@
 #
 # The version tags are set by package_images.sh. The cluster agent needs the ClickHouse operator in the cluster, and
 # offers the namespaces matching CLUSTER_AGENT_K8S_NAMESPACES; remove its part if you do not manage clusters.
+#
+# Optional features read optional ConfigMaps and Secrets: each is off until you create them (README.md):
+#   web-console-sso                         single sign-on (kubernetes.sso.yaml creates it)
+#   backup-worker-bundles, clickhouse-console-bundle-key
+#                                           server bundles of the backup worker
+#   access-policy-ldap, clickhouse-console-ldap
+#                                           user attributes of Data Access Policies from an LDAP directory
+#   clickhouse-console-backup-destinations  S3 credentials of the backup destinations
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -33,6 +42,25 @@ data:
             <cloud_url>https://clickhouse.cloud/</cloud_url>
             <admin_database>console_admin</admin_database>
             <backup_s3_endpoints></backup_s3_endpoints>
+        </web_console>
+    </clickhouse>
+  # Single sign-on: the token authenticator of kubernetes.sso.yaml, and what the sign-in page offers. The values come
+  # from the ConfigMap web-console-sso; without it, the issuer is empty and single sign-on is off.
+  sso.xml: |
+    <clickhouse>
+        <http_authentication_servers>
+            <sso>
+                <uri>http://sso-authenticator:29700/</uri>
+                <connection_timeout_ms>1000</connection_timeout_ms>
+                <receive_timeout_ms>2000</receive_timeout_ms>
+                <send_timeout_ms>1000</send_timeout_ms>
+                <max_tries>2</max_tries>
+            </sso>
+        </http_authentication_servers>
+        <web_console>
+            <sso_name from_env="SSO_NAME"/>
+            <sso_issuer from_env="SSO_ISSUER"/>
+            <sso_client_id from_env="SSO_CLIENT_ID"/>
         </web_console>
     </clickhouse>
 ---
@@ -59,6 +87,9 @@ spec:
               valueFrom: {secretKeyRef: {name: clickhouse-console-passwords, key: admin}}
             - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
               value: "1"
+          # SSO_NAME, SSO_ISSUER, and SSO_CLIENT_ID for sso.xml (kubernetes.sso.yaml).
+          envFrom:
+            - configMapRef: {name: web-console-sso, optional: true}
           ports:
             - {name: http, containerPort: 8123}
             - {name: native, containerPort: 9000}
@@ -71,6 +102,7 @@ spec:
           volumeMounts:
             - {name: data, mountPath: /var/lib/clickhouse}
             - {name: config, mountPath: /etc/clickhouse-server/config.d/web-console.xml, subPath: web-console.xml}
+            - {name: config, mountPath: /etc/clickhouse-server/config.d/sso.xml, subPath: sso.xml}
       volumes:
         - name: config
           configMap: {name: web-console-config}
@@ -116,12 +148,34 @@ spec:
             - {name: CLICKHOUSE_USER, value: backup_worker}
             - name: CLICKHOUSE_PASSWORD
               valueFrom: {secretKeyRef: {name: clickhouse-console-passwords, key: backup_worker}}
-          # S3 credentials of the destinations: <REF>_ACCESS_KEY_ID and <REF>_SECRET_ACCESS_KEY, for example from a Secret:
-          # envFrom:
-          #   - secretRef: {name: clickhouse-console-backup-destinations}
+            # Server bundles: where the key, the configuration, and the staged restores are. Whether bundles are made,
+            # and where to, is in the ConfigMap backup-worker-bundles (BUNDLE_KEY_PROVIDER, BUNDLE_DESTINATION,
+            # BUNDLE_EVERY_HOURS, VAULT_ADDR, VAULT_TRANSIT_KEY); without it, bundles are off.
+            - {name: BUNDLE_KEY_FILE, value: /keys/bundle.key}
+            - {name: VAULT_TOKEN_FILE, value: /keys/vault-token}
+            - {name: BUNDLE_PATHS, value: /deploy/config.d}
+            - {name: BUNDLE_STAGING_DIR, value: /staging}
+          envFrom:
+            - configMapRef: {name: backup-worker-bundles, optional: true}
+            # S3 credentials of the destinations: <REF>_ACCESS_KEY_ID and <REF>_SECRET_ACCESS_KEY.
+            - secretRef: {name: clickhouse-console-backup-destinations, optional: true}
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: config, mountPath: /deploy/config.d, readOnly: true}
+            - {name: bundle-key, mountPath: /keys, readOnly: true}
+            - {name: staging, mountPath: /staging}
+      volumes:
+        - name: config
+          configMap: {name: web-console-config}
+        # bundle.key (BUNDLE_KEY_PROVIDER=file) or vault-token (vault).
+        - name: bundle-key
+          secret: {secretName: clickhouse-console-bundle-key, optional: true, defaultMode: 0440}
+        - name: staging
+          emptyDir: {}
+      # The worker runs as the user 1000 of the image: the group of the Secret's files, so that it can read them.
+      securityContext: {fsGroup: 1000}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -147,9 +201,22 @@ spec:
             - name: CLICKHOUSE_PASSWORD
               valueFrom: {secretKeyRef: {name: clickhouse-console-passwords, key: access_policy_worker}}
             - {name: INTERVAL_SECONDS, value: "60"}
+            # User attributes from an LDAP directory: the CA and the password of its service account, from the Secret
+            # clickhouse-console-ldap; ATTRIBUTE_FEED_SOURCE=ldap and the LDAP_ATTRIBUTES_* settings, from the ConfigMap
+            # access-policy-ldap. Without them, the worker reads ATTRIBUTE_FEED, if set there.
+            - {name: LDAP_ATTRIBUTES_CA_FILE, value: /etc/clickhouse-console/ldap/ca.crt}
+            - {name: LDAP_ATTRIBUTES_PASSWORD_FILE, value: /etc/clickhouse-console/ldap/password}
+          envFrom:
+            - configMapRef: {name: access-policy-ldap, optional: true}
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: ldap, mountPath: /etc/clickhouse-console/ldap, readOnly: true}
+      volumes:
+        - name: ldap
+          secret: {secretName: clickhouse-console-ldap, optional: true, defaultMode: 0440}
+      securityContext: {fsGroup: 1000}
 ---
 # The cluster agent, with the kubernetes provider only (the docker-compose provider needs a Docker host). Its key pair
 # for administrator passwords is kept in its volume: losing it makes queued creations undecryptable.
@@ -279,3 +346,58 @@ spec:
           persistentVolumeClaim: {claimName: cluster-agent-state}
         - name: kubeconfig
           configMap: {name: cluster-agent-kubeconfig}
+---
+# The recovery rehearsal (README.md, "Recover a whole server"): restores the latest backup of each database on an
+# isolated server inside the pod, compares the row counts and fingerprints recorded with the backups, and records the
+# result in the console. The rehearsal server is the `clickhouse` binary of the server image, copied by the init
+# container. It reads S3 destinations; a disk destination is in the volume of the server and cannot be read here.
+# Suspended: set `suspend: false` to run it monthly, or run it once:
+#   kubectl -n clickhouse-console create job --from=cronjob/recovery-rehearsal recovery-rehearsal-now
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: recovery-rehearsal
+  namespace: clickhouse-console
+spec:
+  schedule: "0 3 1 * *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: {app.kubernetes.io/name: clickhouse-console-recovery-rehearsal}
+        spec:
+          restartPolicy: Never
+          initContainers:
+            - name: clickhouse-binary
+              image: clickhouse-server-console:VERSION
+              imagePullPolicy: IfNotPresent
+              command: ["cp", "/usr/bin/clickhouse", "/rehearsal-bin/clickhouse"]
+              volumeMounts:
+                - {name: binary, mountPath: /rehearsal-bin}
+          containers:
+            - name: recovery-rehearsal
+              image: clickhouse-console-tools:VERSION
+              imagePullPolicy: IfNotPresent
+              args: ["recovery-rehearsal", "--binary", "/rehearsal-bin/clickhouse", "--work-dir", "/work/rehearsal"]
+              env:
+                - {name: CLICKHOUSE_URL, value: "http://clickhouse:8123"}
+                - {name: CLICKHOUSE_USER, value: backup_worker}
+                - name: CLICKHOUSE_PASSWORD
+                  valueFrom: {secretKeyRef: {name: clickhouse-console-passwords, key: backup_worker}}
+              envFrom:
+                - secretRef: {name: clickhouse-console-backup-destinations, optional: true}
+              resources:
+                requests: {cpu: "1", memory: 2Gi}
+                limits: {memory: 4Gi}
+              volumeMounts:
+                - {name: binary, mountPath: /rehearsal-bin, readOnly: true}
+                - {name: work, mountPath: /work}
+          volumes:
+            - name: binary
+              emptyDir: {}
+            # The restored tables: size it for the largest database.
+            - name: work
+              emptyDir: {sizeLimit: 50Gi}

@@ -1,0 +1,91 @@
+# Single sign-on with an OpenID Connect provider (Keycloak), added to kubernetes.yaml (README.md, "Single sign-on"): the
+# settings of the server and the token authenticator, which checks the access tokens for the server and is reached only
+# inside the namespace. Set the values below, then:
+#
+#   kubectl apply -f kubernetes.sso.yaml
+#   kubectl -n clickhouse-console rollout restart statefulset/clickhouse      # the server reads the settings at start
+#
+# The user sync (optional) needs a confidential client of the provider and the ClickHouse account sso_sync
+# (service-accounts.sql). Put the client's secret and the account's password in a Secret:
+#
+#   kubectl -n clickhouse-console create secret generic clickhouse-console-sso \
+#     --from-literal=sync-secret=... --from-literal=sso_sync_password=...
+#
+# and set SSO_SYNC_CLIENT_ID below; leave it empty to turn the sync off. The version tags are set by package_images.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-console-sso
+  namespace: clickhouse-console
+data:
+  # What the sign-in page of the console offers (sso.xml of kubernetes.yaml), and what the authenticator checks.
+  SSO_NAME: Keycloak
+  SSO_ISSUER: https://keycloak.example.com/realms/clickhouse
+  SSO_CLIENT_ID: clickhouse-console
+  # The confidential client of the user sync; empty: no sync.
+  SSO_SYNC_CLIENT_ID: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sso-authenticator
+  namespace: clickhouse-console
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: clickhouse-console-sso-authenticator}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: clickhouse-console-sso-authenticator}
+    spec:
+      containers:
+        - name: sso-authenticator
+          image: clickhouse-console-tools:VERSION
+          imagePullPolicy: IfNotPresent
+          args: ["sso-authenticator"]
+          envFrom:
+            - configMapRef: {name: web-console-sso}
+          env:
+            - {name: SSO_USERNAME_CLAIM, value: preferred_username}
+            - {name: SSO_LISTEN, value: "0.0.0.0:29700"}
+            - name: SSO_SYNC_SECRET
+              valueFrom: {secretKeyRef: {name: clickhouse-console-sso, key: sync-secret, optional: true}}
+            - {name: SSO_ROLE_PREFIX, value: clickhouse-}
+            - {name: SSO_DEFAULT_ROLES, value: console_admin_reader}
+            - {name: SSO_SYNC_INTERVAL_SECONDS, value: "60"}
+            - {name: CLICKHOUSE_URL, value: "http://clickhouse:8123"}
+            - {name: CLICKHOUSE_USER, value: sso_sync}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: {secretKeyRef: {name: clickhouse-console-sso, key: sso_sync_password, optional: true}}
+          ports:
+            - {name: http, containerPort: 29700}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sso-authenticator
+  namespace: clickhouse-console
+spec:
+  selector: {app.kubernetes.io/name: clickhouse-console-sso-authenticator}
+  ports:
+    - {name: http, port: 29700, targetPort: http}
+---
+# Only the server may reach the authenticator.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sso-authenticator
+  namespace: clickhouse-console
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: clickhouse-console-sso-authenticator}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: clickhouse-console-server}
+      ports:
+        - {port: 29700}

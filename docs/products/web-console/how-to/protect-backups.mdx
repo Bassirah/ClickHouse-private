@@ -146,7 +146,7 @@ After a rotation, make a bundle and compare it, as in [Verify](#verify).
 
 ## Rehearse a recovery {#rehearse-a-recovery}
 
-A comparison proves the key; a rehearsal proves the whole recovery. Stage the latest bundle (**Stage…** on **Server state**, or `bundle-restore --mode stage`), then run the recovery rehearsal on the server host with the staging directory:
+A comparison proves the key; a rehearsal proves the whole recovery. Stage the latest bundle (**Stage…** on **Server state**, or `bundle-restore --mode stage`), then run the recovery rehearsal with the staging directory, on a host with a source checkout:
 
 ```bash
 node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user <admin> --password <password> \

@@ -150,6 +150,17 @@ For Active Directory, set `LDAP_ATTRIBUTES_USER=sAMAccountName` and map the Acti
 docker compose -f compose.yaml -f compose.ldap-attributes.yaml up -d access-policy-worker
 ```
 
+On Kubernetes, `kubernetes.yaml` mounts the optional Secret `clickhouse-console-ldap` (keys `password` and `ca.crt`) at `/etc/clickhouse-console/ldap` in the access policy worker, and reads `ATTRIBUTE_FEED_SOURCE=ldap` and the `LDAP_ATTRIBUTES_*` settings from the optional ConfigMap `access-policy-ldap`. Create both, then restart the worker:
+
+```bash
+kubectl -n clickhouse-console create secret generic clickhouse-console-ldap --from-file=password=ldap/password --from-file=ca.crt=ldap/ca.crt
+kubectl -n clickhouse-console create configmap access-policy-ldap --from-literal=ATTRIBUTE_FEED_SOURCE=ldap \
+  --from-literal=LDAP_ATTRIBUTES_URL=ldaps://ldap.example.com --from-literal=LDAP_ATTRIBUTES_BIND_DN=<bind DN> \
+  --from-literal=LDAP_ATTRIBUTES_BASE_DN=<base DN> --from-literal=LDAP_ATTRIBUTES_USER=uid \
+  --from-literal=LDAP_ATTRIBUTES_MAP=department=departmentNumber
+kubectl -n clickhouse-console rollout restart deployment/access-policy-worker
+```
+
 </Step>
 </Steps>
 

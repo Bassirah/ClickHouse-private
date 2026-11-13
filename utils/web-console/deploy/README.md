@@ -2,12 +2,22 @@
 
 This directory is shipped with the image archives made by `utils/web-console/package_images.sh`. It deploys the
 ClickHouse server with the web console, and its helper processes, in an environment: on one Docker host with
-`compose.yaml`, or on Kubernetes with `kubernetes.yaml`.
+`compose.yaml` and its optional `compose.*.yaml` files, or on Kubernetes with `kubernetes.yaml` and the optional
+`kubernetes.sso.yaml`.
+
+| Feature | Docker Compose | Kubernetes |
+|---|---|---|
+| Server, backup worker, access policy worker | `compose.yaml` | `kubernetes.yaml` |
+| Cluster agent | `compose.cluster-agent.yaml` (docker-compose and kubernetes providers) | `kubernetes.yaml` (kubernetes provider) |
+| Server bundles (section 5) | `compose.bundles.yaml` | `kubernetes.yaml`, with the ConfigMap `backup-worker-bundles` |
+| Recovery rehearsal (section 7) | `compose.rehearsal.yaml` | `kubernetes.yaml`, the CronJob `recovery-rehearsal` |
+| User attributes from LDAP (section 8) | `compose.ldap-attributes.yaml` | `kubernetes.yaml`, with the ConfigMap `access-policy-ldap` |
+| Single sign-on (section 9) | `compose.sso.yaml` and `config.d/sso.xml` | `kubernetes.sso.yaml` |
 
 | Image | Contents |
 |---|---|
 | `clickhouse-server-console:<version>` | The official `clickhouse/clickhouse-server` image of the same release, with the server binary of this build, which serves the console at `/console`. Every setting and environment variable of the official image applies. |
-| `clickhouse-console-tools:<version>` | Node.js with the backup worker, the cluster agent (with the `docker` CLI, Compose, and `kubectl`), the access policy worker, and the token authenticator of single sign-on. The first argument chooses the process: `backup-worker`, `cluster-agent`, `access-policy-worker`, or `sso-authenticator`. |
+| `clickhouse-console-tools:<version>` | Node.js with the backup worker, the cluster agent (with the `docker` CLI, Compose, and `kubectl`), the access policy worker, the token authenticator of single sign-on, and the recovery rehearsal. The first argument chooses the process: `backup-worker`, `cluster-agent`, `access-policy-worker`, `sso-authenticator`, or `recovery-rehearsal`. |
 
 The version is `<ClickHouse release>-console.<commit>`; `MANIFEST.txt` lists the commit, the base image digest, and the image IDs.
 
@@ -90,10 +100,11 @@ on the host to enable the kubernetes provider as well.
 
 ## 4. Start on Kubernetes
 
-`kubernetes.yaml` runs the server as a StatefulSet with a 20 GiB volume, the two workers, and the cluster agent with
+`kubernetes.yaml` runs the server as a StatefulSet with a 20 GiB volume, the two workers, the cluster agent with
 the kubernetes provider (it manages clusters with the ClickHouse operator in the same Kubernetes cluster, through a
-service account limited to what it uses). Follow the steps at the top of the file: make the images available to the
-nodes, create the Secret, and apply. Then open the console through the Service:
+service account limited to what it uses), and the recovery rehearsal as a suspended CronJob. Follow the steps at the top
+of the file: make the images available to the nodes, create the Secret, and apply. Then open the console through the
+Service:
 
 ```bash
 kubectl -n clickhouse-console port-forward svc/clickhouse 8123:8123     # http://localhost:8123/console
@@ -102,6 +113,11 @@ kubectl -n clickhouse-console port-forward svc/clickhouse 8123:8123     # http:/
 and continue with steps 1 and 2 of the previous section, with `kubectl -n clickhouse-console exec -i clickhouse-0 --`
 in place of `docker compose exec -T clickhouse`. For access from outside the cluster, put an Ingress with TLS in front
 of the Service: the console sends passwords in HTTP headers.
+
+The optional features are off until their ConfigMap or Secret exists, so `kubernetes.yaml` applies as it is
+everywhere, and each environment adds only what it uses. The sections below say what to create; after creating or
+changing one, restart the workload that reads it (`kubectl -n clickhouse-console rollout restart deployment/<name>`, or
+`statefulset/clickhouse` for the server).
 
 ## 5. Server bundles
 
@@ -138,6 +154,21 @@ Also grant the worker its bundle tables (the line in `service-accounts.sql`):
 | `BUNDLE_KEEPER`, `BUNDLE_KEEPER_SNAPSHOTS` | `host:port` of Keeper and its snapshot directory: the worker asks Keeper for a new snapshot (`csnp`, allowed by default in `four_letter_word_white_list`) and includes it. |
 | `BUNDLE_DESTINATION`, `BUNDLE_EVERY_HOURS` | Automatic bundles to that destination (not with a passphrase). |
 | `BUNDLE_STAGING_DIR` | Where restores put files (default `/var/lib/clickhouse-console/restore-staging`). |
+
+**On Kubernetes**, the worker reads the deployment's configuration from the ConfigMap `web-console-config`, and the
+key from the Secret `clickhouse-console-bundle-key`. Create the key with the tools image on a trusted host, keep its copy
+out of band, and store it in the Secret; then set the choices in the ConfigMap `backup-worker-bundles`:
+
+```bash
+docker run --rm -v "$PWD":/out clickhouse-console-tools:<version> backup-worker bundle-key-init --key-file /out/bundle.key
+kubectl -n clickhouse-console create secret generic clickhouse-console-bundle-key --from-file=bundle.key
+kubectl -n clickhouse-console create configmap backup-worker-bundles \
+  --from-literal=BUNDLE_KEY_PROVIDER=file --from-literal=BUNDLE_DESTINATION=<destination> --from-literal=BUNDLE_EVERY_HOURS=24
+kubectl -n clickhouse-console rollout restart deployment/backup-worker
+```
+
+For Vault, put `vault-token` in the Secret instead, and `VAULT_ADDR` and `VAULT_TRANSIT_KEY` in the ConfigMap. Staged
+restores go to a volume of the pod (`emptyDir`): copy them out with `kubectl cp` before the pod restarts.
 
 **Restoring.** A restore never writes into the server. On the Server state tab, **Compare** decrypts a bundle and
 reports, by checksum, which files on the worker host are the same, changed, missing, or not in the bundle; only names
@@ -189,16 +220,29 @@ To recover:
    functions, workloads, and resources.
 5. Check: compare the server bundle with the host (**Compare**), and run a restore test of the latest backups.
 
-**Rehearse it.** `utils/web-console/recovery_rehearsal.mjs` proves the procedure without touching production: it
-starts an isolated server (127.0.0.1, its own ports, data, and Keeper), optionally from a staged configuration with its
-storage, Keeper, clusters, and paths replaced, restores the latest backup of each database from its real destination,
-compares the row counts and fingerprints recorded when the backups were made, and records the result with each backup
-(**Recovery rehearsed** in the inventory) and in the audit log. Run it on the server host, for example monthly:
+**Rehearse it.** The recovery rehearsal (`recovery-rehearsal` in the tools image) proves the procedure without
+touching production: it starts an isolated server (127.0.0.1, its own ports, data, and Keeper), optionally from a
+staged configuration with its storage, Keeper, clusters, and paths replaced, restores the latest backup of each
+database from its real destination, compares the row counts and fingerprints recorded when the backups were made, and
+records the result with each backup (**Recovery rehearsed** in the inventory) and in the audit log. The isolated server
+runs the `clickhouse` binary of the server image. Run it regularly, for example monthly:
 
 ```bash
-node utils/web-console/recovery_rehearsal.mjs --url http://127.0.0.1:8123 --user <admin> --password <password> \
-    --binary /usr/bin/clickhouse [--staged <staging directory of a server bundle>]
+# Docker Compose: reads disk destinations in the server's data volume, and S3 ones with backup-destinations.env.
+docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal
+# One backup:
+docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal \
+    recovery-rehearsal --binary /rehearsal-bin/clickhouse --backup <operation ID>
+
+# Kubernetes: the CronJob recovery-rehearsal (suspended; `suspend: false` runs it monthly). S3 destinations only.
+kubectl -n clickhouse-console create job --from=cronjob/recovery-rehearsal recovery-rehearsal-now
+kubectl -n clickhouse-console logs -f job/recovery-rehearsal-now
 ```
+
+It runs as the backup worker's account, whose role (the Backup Administrator template) may read the backups and record
+the results. Starting from a staged server bundle (`--staged`) needs a bundle that includes `/etc/clickhouse-server`;
+the bundles of `compose.bundles.yaml` include only `/deploy/config.d`, so here the rehearsal restores the backups on the
+configuration of the server image.
 
 ## 8. Directory sign-in (LDAP)
 
@@ -244,6 +288,18 @@ the trusted source of, for example, the department or branch of each user:
    `LDAP_ATTRIBUTES_MAP` (for example `department=departmentNumber,branch=l`) in `.env`, and start the worker with
    `docker compose -f compose.yaml -f compose.ldap-attributes.yaml up -d access-policy-worker`.
 
+   On Kubernetes, put the password and the certificate authority in the Secret `clickhouse-console-ldap`, and the
+   settings in the ConfigMap `access-policy-ldap`:
+
+   ```bash
+   kubectl -n clickhouse-console create secret generic clickhouse-console-ldap --from-file=password=ldap/password --from-file=ca.crt=ldap/ca.crt
+   kubectl -n clickhouse-console create configmap access-policy-ldap --from-literal=ATTRIBUTE_FEED_SOURCE=ldap \
+     --from-literal=LDAP_ATTRIBUTES_URL=ldaps://ldap.example.com --from-literal=LDAP_ATTRIBUTES_BIND_DN=<bind DN> \
+     --from-literal=LDAP_ATTRIBUTES_BASE_DN=<base DN> --from-literal=LDAP_ATTRIBUTES_USER=uid \
+     --from-literal=LDAP_ATTRIBUTES_MAP=department=departmentNumber
+   kubectl -n clickhouse-console rollout restart deployment/access-policy-worker
+   ```
+
 Each cycle, the worker reads the users of the directory over LDAPS or StartTLS (plain LDAP is refused, and the
 certificate of the directory is always checked), with paged results for directories that cap a search. A changed
 attribute changes the value; a user who leaves the directory, or loses an attribute, loses the value, and rules on it
@@ -279,19 +335,29 @@ roles, and drops the users who left or were disabled. Passwords and LDAP keep wo
    docker compose -f compose.yaml -f compose.sso.yaml run --rm sso-authenticator sso-authenticator --check-config   # issuer, keys, sync
    ```
 
+   On Kubernetes, set the values in `kubernetes.sso.yaml` (the ConfigMap `web-console-sso`), create the Secret its
+   header describes for the user sync, and apply it. `kubernetes.yaml` already gives the server `sso.xml`, which reads
+   the ConfigMap; restart the server once:
+
+   ```bash
+   kubectl apply -f kubernetes.sso.yaml
+   kubectl -n clickhouse-console rollout restart statefulset/clickhouse
+   kubectl -n clickhouse-console exec deploy/sso-authenticator -- clickhouse-console-tools sso-authenticator --check-config
+   ```
+
    The sign-in page shows **Sign in with Keycloak**. **Identity Providers → SSO (Keycloak)** tests the provider and a
    sign-in, and lists the users of single sign-on.
 
 | Setting | Why |
 |---|---|
 | Revocation | A token is accepted until it expires. A user disabled in Keycloak cannot refresh, so the console signs out at the next refresh, and the sync drops the user within its interval: access ends within the token lifespan (5 minutes). |
-| Network | Only the server should reach the authenticator (port 29700 on the Compose network, not published). It refuses whatever it cannot check, including when the provider's keys are unavailable. |
+| Network | Only the server should reach the authenticator (port 29700 on the Compose network, not published; on Kubernetes, a NetworkPolicy of `kubernetes.sso.yaml` allows only the server's pods). It refuses whatever it cannot check, including when the provider's keys are unavailable. |
 | Panels | The native panels receive each refreshed token. The SQL Console, the Web Terminal, and ClickStack keep the token they started with: reload them after it expires. |
 | Transport | Serve the console and Keycloak over HTTPS: the authenticator accepts plain HTTP only for a provider on localhost. |
 | Names | A user created with a password, or another method, is never changed by the sync: give SSO users their own names. |
 
 ## Upgrade and rollback
 
-Load the new archives, change `CONSOLE_VERSION` in `.env` (or the image tags), and run `docker compose up -d` (or
-`kubectl apply`). The data stays in the volumes. To roll back, set the previous version again. Rolling back to a server older than the ClickHouse release of the
+Load the new archives, change `CONSOLE_VERSION` in `.env` (or the image tags), and run `docker compose up -d` with the
+same `-f` files as before (or `kubectl apply -f kubernetes.yaml`, and `-f kubernetes.sso.yaml` when you use it). The data stays in the volumes. To roll back, set the previous version again. Rolling back to a server older than the ClickHouse release of the
 data is not supported by ClickHouse: keep the release of the base image when you roll back the console.

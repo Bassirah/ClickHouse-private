@@ -1,5 +1,5 @@
 ---
-description: 'Set up single sign-on with Keycloak for a Docker Compose deployment of the web console: the clients in Keycloak, the token authenticator, the user sync, verification, and troubleshooting.'
+description: 'Set up single sign-on with Keycloak for a Docker Compose or Kubernetes deployment of the web console: the clients in Keycloak, the token authenticator, the user sync, verification, and troubleshooting.'
 sidebarTitle: 'Configure Keycloak SSO'
 slug: /web-console/how-to/configure-keycloak-sso
 title: 'Configure single sign-on with Keycloak'
@@ -7,7 +7,9 @@ doc_type: 'guide'
 ---
 
 Use this guide to let users sign in to the console, and to ClickHouse, with Keycloak, in a deployment made with
-[Docker Compose](/products/web-console/how-to/deploy-with-docker-compose). The console signs users in as a public
+[Docker Compose](/products/web-console/how-to/deploy-with-docker-compose). On Kubernetes, the steps in Keycloak and in
+ClickHouse are the same, and `kubernetes.sso.yaml` replaces `compose.sso.yaml` and `.env`: see
+[Start on Kubernetes](#start-on-kubernetes). The console signs users in as a public
 client, with the Authorization Code flow and PKCE, and sends the access token to the server as the password. The token
 authenticator (`sso-authenticator` in the tools image) checks it for the server, and its user sync creates the users
 from the groups `clickhouse-<role>`. Passwords and LDAP keep working next to it.
@@ -17,7 +19,7 @@ test machine first, follow the [single sign-on tutorial](/products/web-console/t
 
 ## Before you begin {#before-you-begin}
 
-- A deployment from `compose.yaml`, running, with Component Access set up (it creates `console_admin` and the role
+- A deployment from `compose.yaml` (or `kubernetes.yaml`), running, with Component Access set up (it creates `console_admin` and the role
   `console_admin_reader`).
 - The console served over HTTPS at its final address, `https://<console>` below, for example through a reverse proxy
   that terminates TLS. The access token is a password: it must not travel over plain HTTP.
@@ -179,6 +181,29 @@ Use both files in every later `docker compose` command, or the next `up -d` remo
 
 The authenticator listens on port 29700 of the Compose network only, and the port is not published: only the server
 should reach it.
+
+### Start on Kubernetes {#start-on-kubernetes}
+
+`kubernetes.yaml` already gives the server `sso.xml` (in the ConfigMap `web-console-config`), which reads the optional
+ConfigMap `web-console-sso`. `kubernetes.sso.yaml` creates that ConfigMap, the Deployment and Service
+`sso-authenticator` (port 29700), and a NetworkPolicy that lets only the pods of the server reach it.
+
+1. Set `SSO_NAME`, `SSO_ISSUER`, `SSO_CLIENT_ID`, and `SSO_SYNC_CLIENT_ID` (empty: no user sync) in the ConfigMap
+   `web-console-sso` of `kubernetes.sso.yaml`.
+2. For the user sync, create the Secret with the secret of the sync client and the password of `sso_sync`:
+
+   ```bash
+   kubectl -n clickhouse-console create secret generic clickhouse-console-sso \
+     --from-literal=sync-secret=... --from-literal=sso_sync_password=...
+   ```
+3. Apply the file, restart the server once (it reads the settings at start), and check the configuration:
+
+   ```bash
+   kubectl apply -f kubernetes.sso.yaml
+   kubectl -n clickhouse-console rollout restart statefulset/clickhouse
+   kubectl -n clickhouse-console exec deploy/sso-authenticator -- clickhouse-console-tools sso-authenticator --check-config
+   kubectl -n clickhouse-console logs deploy/sso-authenticator
+   ```
 
 ## Verify {#verify}
 

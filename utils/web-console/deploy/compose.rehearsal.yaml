@@ -1,0 +1,49 @@
+# Recovery rehearsal (README.md, "Recover a whole server"), on the Docker host of compose.yaml: restores the latest backup
+# of each database on an isolated server inside the container, compares the row counts and fingerprints recorded with
+# the backups, and records the result in the console. Production is only read. Run it, for example monthly:
+#
+#   docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal
+#
+# Arguments after the service name replace the default ones, for example to rehearse one backup:
+#
+#   docker compose -f compose.yaml -f compose.rehearsal.yaml run --rm recovery-rehearsal \
+#       recovery-rehearsal --binary /rehearsal-bin/clickhouse --backup <operation ID>
+#
+# Not --staged: it needs a server bundle that includes /etc/clickhouse-server, and the bundles of compose.bundles.yaml
+# include only /deploy/config.d.
+#
+# The rehearsal server is the `clickhouse` binary of the server image, copied into a volume by rehearsal-binary. The
+# account is the backup worker's: its role (the Backup Administrator template) may read the backups and record results.
+services:
+  rehearsal-binary:
+    image: clickhouse-server-console:${CONSOLE_VERSION:?set CONSOLE_VERSION in .env}
+    profiles: [rehearsal]
+    entrypoint: ["cp", "/usr/bin/clickhouse", "/rehearsal-bin/clickhouse"]
+    volumes:
+      - rehearsal-bin:/rehearsal-bin
+
+  recovery-rehearsal:
+    image: clickhouse-console-tools:${CONSOLE_VERSION:?set CONSOLE_VERSION in .env}
+    profiles: [rehearsal]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      rehearsal-binary:
+        condition: service_completed_successfully
+    command: ["recovery-rehearsal", "--binary", "/rehearsal-bin/clickhouse", "--work-dir", "/tmp/recovery-rehearsal"]
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: backup_worker
+      CLICKHOUSE_PASSWORD: ${BACKUP_WORKER_PASSWORD:?set BACKUP_WORKER_PASSWORD in .env}
+    # S3 credentials of the destinations, as for the backup worker.
+    env_file:
+      - path: backup-destinations.env
+        required: false
+    # Disk destinations are read at their paths in the server's data volume, which belongs to the server's user (101).
+    user: "101:101"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse:ro
+      - rehearsal-bin:/rehearsal-bin:ro
+
+volumes:
+  rehearsal-bin:

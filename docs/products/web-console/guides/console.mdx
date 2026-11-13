@@ -76,10 +76,18 @@ A category without any destination for the user is not shown. The button at the 
 
 The administration and identity provider pages are listed only for users who can read what they show, and when the console access policy allows them. Their own guides describe them: [Users and roles](/products/web-console/guides/users-and-roles), [Component Access](/products/web-console/guides/component-access), [Profiles and quotas](/products/web-console/guides/profiles-and-quotas), [Audit activity](/products/web-console/guides/audit-activity), [Data Access Policies](/products/web-console/guides/data-access-policies), [Backup & Restore](/products/web-console/guides/backup-and-restore), [Clusters](/products/web-console/guides/clusters), and [Identity Providers](/products/web-console/guides/identity-providers).
 
-**Console Guide** shows this documentation inside the console, for every signed-in user: the tutorials, user guides,
-how-to guides, and reference, with a search box and the pages in the same order as on the documentation site. It is
-embedded in the server, so it works without Internet access and describes the console of this build. The header of
-each administration and identity provider page has a **Guide** button that opens the guide of that page.
+**Console Guide** shows this documentation inside the console, for every signed-in user. It is embedded in the
+server, so it works without Internet access and describes the console of this build.
+
+- Its home page has a search box, the **Get started** actions (the quick start and the overview), and a card for each
+  page, by section: **Tutorials**, **User guides**, **How-to guides**, and **API reference**. A card shows the type of
+  the page and what it covers; select it anywhere to open the page. **More resources** links to the ClickHouse
+  documentation and to the **Reference** panel.
+- Each page fills the width of the window: the navigation of the guide on the left, with **Guide home** at the top
+  and a search box, the article, and **On this page** on the right (at the top of the article in a narrower window).
+  The previous and next pages are at the end of the article.
+- The header of each administration and identity provider page has a **Guide** button that opens the guide of that
+  page.
 
 The links of **Resources** come from the `web_console` section of the server configuration. A path on the server opens inside the console; an absolute HTTP or HTTPS URL opens in a new tab and is marked **External**. External links open with `noopener` and `noreferrer` and carry no credentials, queries, or database names. See the [configuration reference](/products/web-console/reference/configuration#web-console).
 
