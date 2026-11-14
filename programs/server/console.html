@@ -780,6 +780,7 @@ const ICONS = {
     schema: '<rect x="3" y="3" width="7" height="5" rx="1"/><rect x="14" y="16" width="7" height="5" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><path d="M6.5 8v10.5H14M10 5.5h4"/>',
     jemalloc: '<rect x="6" y="6" width="12" height="12" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
     activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+    play: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/>',
     profile: '<path d="M4 6h10M4 12h16M4 18h7"/><circle cx="17" cy="6" r="2"/><circle cx="14" cy="18" r="2"/>',
     source: '<path d="M8 6l-6 6 6 6M16 6l6 6-6 6"/>',
     docs: '<path d="M4 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4zM20 4h-6a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6z"/>',
@@ -875,6 +876,9 @@ const COMPONENTS = [
     {id: 'sql', category: 'workspace', kind: 'panel', title: 'SQL Console', icon: 'sql', src: '/ui/',
      integration: 'sql-console', keep_alive: true, health_check: checkSqlConsoleCluster,
      description: 'Write and run queries with tabs, history, and saved queries.'},
+    {id: 'play', category: 'workspace', kind: 'panel', title: 'Play UI', icon: 'play', src: '/play',
+     integration: 'native', keep_alive: true,
+     description: 'The query page of the server: a result per statement, export in every format, EXPLAIN graphs, server logs and metrics, and notebooks.'},
     {id: 'dashboard', category: 'workspace', kind: 'panel', title: 'Dashboard', icon: 'dashboard', src: '/dashboard',
      integration: 'native', keep_alive: true,
      probes: ['SELECT 1 FROM system.dashboards LIMIT 0'],
@@ -1400,6 +1404,11 @@ const SQL_CONSOLE_WORK_KEY_PREFIXES = ['tabs:encrypted:', 'queryHistory:', 'stan
 /// `<service ID>:selectedDatabase`, where the service ID is a UUID.
 const SQL_CONSOLE_WORK_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:selectedDatabase$/;
 const SQL_CONSOLE_CLEAR_MODES = ['results', 'all'];
+/// The Play UI (`/play`, `programs/server/play.html`) keeps one workspace for every user of the browser in the IndexedDB
+/// database `clickhouse-play`: the store `tabs` has a record per tab with its queries and the last result of the tab
+/// (`result`) and of each notebook cell (`cells[].result`), and the store `meta` the order of the tabs. With `results`,
+/// the results are set to null, which the Play UI restores as a tab that was not run; with `all`, both stores are emptied.
+const PLAY_DATABASE = 'clickhouse-play';
 
 function removeStorageKeys(storage, matches) {
     const keys = [];
@@ -1410,15 +1419,15 @@ function removeStorageKeys(storage, matches) {
     for (const key of keys) storage.removeItem(key);
 }
 
-/// Empties the object stores of the results database. The database is cleared rather than deleted: a deletion waits
-/// for the SQL Console to close the database in every other tab of the browser, and holds up its next opening there
-/// until then. A database that does not exist is not created: an empty one would skip the SQL Console's own upgrade,
-/// which creates the stores.
-function clearSqlConsoleResults() {
-    /// Without IndexedDB, the SQL Console could not store results either.
+/// Changes the stores of an IndexedDB database of another page with `change(transaction, store_names)`, in one
+/// transaction. The database is changed rather than deleted: a deletion waits for the page to close the database in
+/// every other tab of the browser, and holds up its next opening there until then. A database that does not exist is
+/// not created: an empty one would skip the page's own upgrade, which creates the stores.
+function changeDatabase(name, change) {
+    /// Without IndexedDB, the page could not store anything either.
     if (typeof indexedDB === 'undefined') return Promise.resolve();
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open(SQL_CONSOLE_RESULTS_DATABASE);
+        const request = indexedDB.open(name);
         let created = false;
         request.onupgradeneeded = () => {
             created = true;
@@ -1437,7 +1446,7 @@ function clearSqlConsoleResults() {
                 return;
             }
             const transaction = db.transaction(stores, 'readwrite');
-            for (const store of stores) transaction.objectStore(store).clear();
+            change(transaction, stores);
             transaction.oncomplete = () => {
                 db.close();
                 resolve();
@@ -1446,6 +1455,30 @@ function clearSqlConsoleResults() {
                 db.close();
                 reject(transaction.error);
             };
+        };
+    });
+}
+
+/// Empties every store of a database.
+function clearDatabase(name) {
+    return changeDatabase(name, (transaction, stores) => {
+        for (const store of stores) transaction.objectStore(store).clear();
+    });
+}
+
+/// Removes the results from the tabs of the Play UI, and keeps their queries (see `PLAY_DATABASE`).
+function clearPlayResults() {
+    return changeDatabase(PLAY_DATABASE, (transaction, stores) => {
+        if (!stores.includes('tabs')) return;
+        const store = transaction.objectStore('tabs');
+        const cursor_request = store.openCursor();
+        cursor_request.onsuccess = () => {
+            const cursor = cursor_request.result;
+            if (!cursor) return;
+            const record = {...cursor.value, result: null};
+            if (Array.isArray(record.cells)) record.cells = record.cells.map(cell => (cell && 'result' in cell ? {...cell, result: null} : cell));
+            cursor.update(record);
+            cursor.continue();
         };
     });
 }
@@ -1459,7 +1492,7 @@ async function clearSqlConsoleStorage() {
     const mode = config.sql_console_clear_on_sign_out || 'results';
     if (!SQL_CONSOLE_CLEAR_MODES.includes(mode)) {
         problems.push(`the configuration key web_console.sql_console_clear_on_sign_out is '${mode}', not one of ` +
-            `${SQL_CONSOLE_CLEAR_MODES.map(m => `'${m}'`).join(', ')}, so its saved queries, history, and tabs were kept`);
+            `${SQL_CONSOLE_CLEAR_MODES.map(m => `'${m}'`).join(', ')}, so the saved queries, history, and tabs were kept`);
     }
     try {
         removeStorageKeys(sessionStorage, key => SQL_CONSOLE_SESSION_KEY_PREFIXES.some(prefix => key.startsWith(prefix)));
@@ -1468,12 +1501,17 @@ async function clearSqlConsoleStorage() {
                 SQL_CONSOLE_WORK_KEY_PREFIXES.some(prefix => key.startsWith(prefix)) || SQL_CONSOLE_WORK_KEY_PATTERN.test(key));
         }
     } catch (e) {
-        if (e.name !== 'SecurityError') problems.push(`its browser storage could not be cleared (${e.message})`);
+        if (e.name !== 'SecurityError') problems.push(`the browser storage of the SQL Console could not be cleared (${e.message})`);
     }
     try {
-        await clearSqlConsoleResults();
+        await clearDatabase(SQL_CONSOLE_RESULTS_DATABASE);
     } catch (e) {
-        if (e && e.name !== 'SecurityError') problems.push(`its stored results could not be deleted (${e.message || e})`);
+        if (e && e.name !== 'SecurityError') problems.push(`the stored results of the SQL Console could not be deleted (${e.message || e})`);
+    }
+    try {
+        await (mode === 'all' ? clearDatabase(PLAY_DATABASE) : clearPlayResults());
+    } catch (e) {
+        if (e && e.name !== 'SecurityError') problems.push(`the stored results of the Play UI could not be deleted (${e.message || e})`);
     }
     return problems;
 }
@@ -1485,7 +1523,7 @@ let sql_console_cleanup = Promise.resolve([]);
 function reportSqlConsoleCleanup(problems) {
     if (!problems.length) return;
     const notice = $('login-notice');
-    const text = `SQL Console: ${problems.join('; ')}.`;
+    const text = `Browser data: ${problems.join('; ')}.`;
     showLoginNotice(notice.hidden || !notice.textContent ? text : `${notice.textContent} ${text}`, true);
 }
 
@@ -3026,6 +3064,8 @@ const CAPABILITIES = [
 /// as `[access, database, table]`; `note` explains capabilities that have no fixed set of privileges.
 const COMPONENT_NATIVE = {
     sql: {run_queries: {note: 'Every query is authorized by the grants on the tables it uses.'},
+        view_data: {note: 'Same as Run queries.'}},
+    play: {run_queries: {note: 'Every query is authorized by the grants on the tables it uses.'},
         view_data: {note: 'Same as Run queries.'}},
     dashboard: {view_data: {privileges: [['SELECT', 'system', 'dashboards'], ['SELECT', 'system', 'metric_log'], ['SELECT', 'system', 'asynchronous_metric_log']]},
         run_queries: {note: 'Charts can be edited to run any query the user is allowed to run.'}},

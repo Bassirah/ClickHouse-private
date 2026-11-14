@@ -195,7 +195,7 @@ await test('Home cards and sidebar list every component and resolve to the same 
     await waitForHome(page);
     const expected = {
         Home: ['Home'],
-        Workspace: ['SQL Console', 'Dashboard', 'ClickStack', 'Web Terminal'],
+        Workspace: ['SQL Console', 'Play UI', 'Dashboard', 'ClickStack', 'Web Terminal'],
         Diagnostics: ['Binary visualizer', 'Merges visualizer', 'Schema visualizer', 'Jemalloc', 'Processors profile', 'Running queries'],
         Resources: ['Console Guide', 'Source code', 'Documentation', 'Reference', 'Website', 'Cloud'],
     };
@@ -403,6 +403,137 @@ await test('Running queries: lists a running query and stops it with KILL QUERY'
     await context.close();
 });
 
+/// The text of every result of the Play UI (their shadow roots included).
+async function playResultText(play) {
+    return play.evaluate(() => [...document.querySelectorAll('query-result')].map(r => (r.shadowRoot || r).textContent).join('\n'));
+}
+
+/// Types a query into the editor of the Play UI and runs it.
+async function runInPlay(play, query) {
+    await play.fill('#query', query);
+    await play.focus('#query');
+    await play.press('#query', 'Control+Enter');
+}
+
+/// The stored tabs of the Play UI, read in the console page (same origin): the queries and whether they keep a result.
+async function playStoredTabs(page) {
+    return page.evaluate(async () => {
+        if (!(await indexedDB.databases()).some(d => d.name === 'clickhouse-play')) return null;
+        return new Promise((resolve, reject) => {
+            const open = indexedDB.open('clickhouse-play');
+            open.onerror = () => reject(open.error);
+            open.onsuccess = () => {
+                const db = open.result;
+                const all = db.transaction('tabs').objectStore('tabs').getAll();
+                all.onsuccess = () => {
+                    db.close();
+                    resolve(all.result.map(t => ({query: t.query, has_result: !!t.result || (t.cells || []).some(c => c && c.result)})));
+                };
+                all.onerror = () => { db.close(); reject(all.error); };
+            };
+        });
+    });
+}
+
+await test('Play UI: runs with the connection of the console, sends credentials in headers only, and stops queries on the server', async () => {
+    const {context, page, log} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="play"]');
+    await page.waitForURL(`${BASE}/console/play`);
+    await page.waitForSelector('.frame-host[data-component="play"] iframe');
+    await waitUntil(page, () => {
+        const doc = document.querySelector('.frame-host[data-component="play"] iframe').contentDocument;
+        return doc && doc.getElementById('query');
+    });
+    const play = frameOf(page, '/play');
+    check(await play.evaluate(() => getComputedStyle(document.getElementById('connection-menu')).display === 'none'), 'the connection menu is shown');
+    check(await play.inputValue('#user') === ADMIN_USER, 'not the user of the console');
+
+    await runInPlay(play, `SELECT 'play_marker_' || toString(1 + 1) AS m`);
+    await waitUntil(play, () => [...document.querySelectorAll('query-result')].some(r => (r.shadowRoot || r).textContent.includes('play_marker_2')));
+
+    /// A chart: uPlot comes from the server.
+    await runInPlay(play, 'SELECT number AS x, number * number AS y FROM numbers(10) FORMAT JSONCompactColumns');
+    await waitUntil(play, () => [...document.querySelectorAll('query-result')].some(r => r.shadowRoot && r.shadowRoot.querySelector('.uplot')));
+    check(log.requests.some(r => r.url === `${BASE}/js/uplot.js`), 'uPlot not loaded from the server');
+    await screenshot(page, '07-play-ui');
+
+    /// A download: through fetch, with the format chosen.
+    await runInPlay(play, `SELECT 'download_marker' AS m`);
+    await waitUntil(play, () => [...document.querySelectorAll('query-result')].some(r => (r.shadowRoot || r).textContent.includes('download_marker')));
+    await play.click('#download-div');
+    await play.selectOption('#download-format', 'CSV');
+    const [download] = await Promise.all([page.waitForEvent('download'), play.click('#download-button')]);
+    check(download.suggestedFilename() === 'result.csv', `file name ${download.suggestedFilename()}`);
+    const {readFileSync} = await import('node:fs');
+    const content = readFileSync(await download.path(), 'utf8');
+    check(content.includes('download_marker'), `downloaded: ${content.slice(0, 200)}`);
+
+    /// Stop: the query ends on the server.
+    await runInPlay(play, 'SELECT sleepEachRow(1) FROM numbers(60) SETTINGS max_block_size = 1 FORMAT Null');
+    const running = await waitUntil(play, () => document.getElementById('run').textContent.trim() === 'Stop');
+    check(running, 'Run did not turn into Stop');
+    /// Stop once the server runs it, so that the request is not merely aborted before it was sent.
+    const started_deadline = Date.now() + 15000;
+    for (;;) {
+        const count = await (await fetch(`${BASE}/`, {method: 'POST', headers: {'X-ClickHouse-User': ADMIN_USER, 'X-ClickHouse-Key': ADMIN_PASSWORD},
+            body: "SELECT count() FROM system.processes WHERE query LIKE '%sleepEachRow(1) FROM numbers(60)%' AND query NOT LIKE '%system.processes%'"})).text();
+        if (count.trim() !== '0') break;
+        if (Date.now() > started_deadline) throw new Error('the query did not start');
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    await play.click('#run');
+    const kill = await (async () => {
+        const deadline = Date.now() + 15000;
+        for (;;) {
+            const found = log.requests.find(r => (r.post_data || '').startsWith('KILL QUERY WHERE query_id = '));
+            if (found) return found;
+            if (Date.now() > deadline) throw new Error('Stop sent no KILL QUERY');
+            await new Promise(resolve => setTimeout(resolve, 200));
+        }
+    })();
+    const query_id = kill.post_data.match(/query_id = '([^']+)'/)[1];
+    const processes = async () => (await fetch(`${BASE}/?param_id=${query_id}`, {method: 'POST',
+        headers: {'X-ClickHouse-User': ADMIN_USER, 'X-ClickHouse-Key': ADMIN_PASSWORD},
+        body: 'SELECT count() FROM system.processes WHERE query_id = {id:String}'})).text();
+    const deadline = Date.now() + 15000;
+    while ((await processes()).trim() !== '0') {
+        if (Date.now() > deadline) throw new Error(`the query ${query_id} is still running`);
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+
+    /// No request of the Play UI carries the credentials in its URL; they are in the headers.
+    const from_play = log.requests.filter(r => r.url && r.url.startsWith(`${BASE}/?`) && r.headers && r.headers['x-clickhouse-user'] === ADMIN_USER);
+    check(from_play.length > 0, 'no request of the Play UI with the credentials in headers');
+    const leaked = log.requests.filter(r => r.url && /[?&](password|user)=/.test(r.url));
+    check(!leaked.length, `credentials in URLs: ${leaked.map(r => r.url).join(', ')}`);
+
+    /// Signing out removes the results of the Play UI and keeps its queries. The stopped query left no result: run one
+    /// that does, and wait until the Play UI stored it.
+    await runInPlay(play, `SELECT 'stored_marker' AS m`);
+    await waitUntil(play, () => [...document.querySelectorAll('query-result')].some(r => (r.shadowRoot || r).textContent.includes('stored_marker')));
+    await waitUntil(page, async () => {
+        const tabs = await new Promise(resolve => {
+            const open = indexedDB.open('clickhouse-play');
+            open.onsuccess = () => {
+                const db = open.result;
+                const all = db.transaction('tabs').objectStore('tabs').getAll();
+                all.onsuccess = () => { db.close(); resolve(all.result); };
+            };
+        });
+        return tabs.some(t => t.result || (t.cells || []).some(c => c && c.result));
+    });
+    await clickConsole(page, '#logout-button');
+    await page.waitForSelector('#login-view:not([hidden])');
+    check((await page.evaluate(() => sql_console_cleanup)).length === 0, 'cleanup problems');
+    const tabs = await playStoredTabs(page);
+    check(tabs && tabs.length && tabs.every(t => !t.has_result), `results left: ${JSON.stringify(tabs)}`);
+    check(tabs.some(t => (t.query || '').includes('stored_marker')), `queries lost: ${JSON.stringify(tabs)}`);
+    await context.close();
+});
+
 /// What the SQL Console stored in the browser, read in the console page (same origin): the number of result rows
 /// in IndexedDB (-1 without the database, which is not opened then, so as not to create it), and its storage keys.
 async function sqlConsoleStorage(page) {
@@ -497,7 +628,7 @@ await test('SQL Console: signing out deletes its stored results and keeps the sa
     await page.waitForSelector('#login-view:not([hidden])');
     await waitForSQLConsoleStorage(page, s => s.rows === 0, 'result rows left after Switch connection');
     const notice = await page.textContent('#login-notice');
-    check(!notice.includes('SQL Console:'), `notice: ${notice}`);
+    check(!notice.includes('Browser data:'), `notice: ${notice}`);
     await context.close();
 });
 
@@ -529,7 +660,7 @@ await test('SQL Console: an unknown sql_console_clear_on_sign_out is reported, a
 
     await clickConsole(page, '#logout-button');
     await page.waitForSelector('#login-view:not([hidden])');
-    await waitUntil(page, () => document.getElementById('login-notice').textContent.includes('SQL Console:'));
+    await waitUntil(page, () => document.getElementById('login-notice').textContent.includes('Browser data:'));
     const notice = await page.textContent('#login-notice');
     check(notice.includes(`sql_console_clear_on_sign_out is 'everything'`), `notice: ${notice}`);
     const stored = await sqlConsoleStorage(page);

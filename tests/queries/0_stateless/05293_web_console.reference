@@ -34,6 +34,7 @@ sso_scopes openid profile email
 sso_username_claim preferred_username
 website_url https://clickhouse.com/
 --- the embedded pages implement the integration contract of the console
+/play 1
 /dashboard 1
 /binary 1
 /merges 1

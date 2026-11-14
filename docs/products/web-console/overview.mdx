@@ -19,7 +19,7 @@ console hides or shows never changes what a user can do.
 
 | Component | What it does | Runs where |
 |---|---|---|
-| Console | Sign-in, home page, sidebar, and the panels: SQL Console, Dashboard, ClickStack, Web Terminal, Binary, Merges and Schema visualizers, Jemalloc, Processors profile, Reference. | The browser; served by the server at `/console`. |
+| Console | Sign-in, home page, sidebar, and the panels: SQL Console, Play UI, Dashboard, ClickStack, Web Terminal, Binary, Merges and Schema visualizers, Jemalloc, Processors profile, Running queries, Reference. | The browser; served by the server at `/console`. |
 | Administration | Users, Roles & Permissions, Data Access Policies, Component Access, Profiles & Quotas, Audit Activity, Clusters, Backup & Restore. | The browser. Changes are SQL statements run as the signed-in user; the console's own state is kept in tables of the `admin_database`. |
 | Identity Providers | The LDAP page (LDAP and Active Directory user directories) and the SSO (Keycloak) page (OpenID Connect). | The browser, and the server configuration. |
 | Backup worker | Runs backup schedules and retention, deletions, and server bundles (configuration, secrets, and Keeper data, encrypted). | A Node.js process or the tools image. |

@@ -41,6 +41,6 @@ for key in sorted(config):
 '
 
 echo "--- the embedded pages implement the integration contract of the console"
-for path in /dashboard /binary /merges /schema /jemalloc /processors-profile /docs; do
+for path in /play /dashboard /binary /merges /schema /jemalloc /processors-profile /docs; do
     echo "${path} $(${CLICKHOUSE_CURL} -sS "${BASE}${path}" | grep -c 'window.parent.clickhouseConsole')"
 done
