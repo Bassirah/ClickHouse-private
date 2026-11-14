@@ -471,6 +471,56 @@ await test('Import data: a CSV file into a new table, and a JSON file into an ex
     await context.close();
 });
 
+await test('Import data: a Parquet file, with the columns from its footer', async () => {
+    const suffix = Date.now();
+    await adminQuery(`CREATE DATABASE IF NOT EXISTS e2e_import`);
+    /// A Parquet file of 100,000 rows made by the server, with a NULL in every third row of a column.
+    const response = await fetch(`${BASE}/`, {method: 'POST', headers: {'X-ClickHouse-User': ADMIN_USER, 'X-ClickHouse-Key': ADMIN_PASSWORD},
+        body: `SELECT number AS id, toString(number) || ' ü' AS name, number * 1.5 AS score, if(number % 3 = 0, NULL, number) AS maybe
+               FROM numbers(100000) FORMAT Parquet`});
+    check(response.ok, `the Parquet file was not made: ${response.status}`);
+    const parquet = Buffer.from(await response.arrayBuffer());
+
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="import"]');
+    await page.waitForSelector('#admin-view input[type="file"]');
+    await waitUntil(page, () => [...document.querySelectorAll('#admin-view select option')].some(o => o.value === 'e2e_import'));
+
+    /// Not a Parquet file.
+    await page.setInputFiles('#admin-view input[type="file"]', {name: 'fake.parquet', mimeType: 'application/octet-stream', buffer: Buffer.from('id,name\n1,x\n')});
+    await waitUntil(page, () => [...document.querySelectorAll('#admin-view .message.error')].some(m => m.textContent.includes('not a Parquet file')));
+
+    await page.setInputFiles('#admin-view input[type="file"]', {name: 'numbers.parquet', mimeType: 'application/vnd.apache.parquet', buffer: parquet});
+    await waitUntil(page, () => document.querySelector('#admin-view input[aria-label="Type of maybe"]'));
+    check(await page.inputValue('#admin-view select >> nth=0') === 'Parquet', 'the format is not chosen from the extension');
+    const types = await page.evaluate(() => [...document.querySelectorAll('#admin-view input[aria-label^="Type of"]')].map(i => i.value));
+    check(JSON.stringify(types) === JSON.stringify(['UInt64', 'String', 'Float64', 'UInt64']), `inferred types: ${types}`);
+    check(await page.evaluate(() => document.querySelector('#admin-view input[aria-label="Column name"]').readOnly), 'Parquet column names are editable');
+    await waitUntil(page, () => document.getElementById('admin-view').textContent.includes('100,000 rows in 1 row group'));
+
+    /// With missing values allowed, the column with NULLs is Nullable.
+    await page.check('#admin-view label.check input');
+    await waitUntil(page, () => {
+        const input = document.querySelector('#admin-view input[aria-label="Type of maybe"]');
+        return input && input.value === 'Nullable(UInt64)';
+    });
+
+    await page.fill('#admin-view input[placeholder="table name"]', `parquet_${suffix}`);
+    await page.selectOption('#admin-view select >> nth=2', 'e2e_import');
+    await page.click('#admin-view button:text("Review import")');
+    await page.waitForSelector('#admin-dialog[open]');
+    check((await page.textContent('#admin-dialog')).includes('FORMAT Parquet'), 'review');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await page.waitForSelector('#admin-dialog .message.info', {timeout: 60000});
+    const imported = await adminQuery(`SELECT count(), sum(score), countIf(maybe IS NULL) FROM e2e_import.parquet_${suffix} FORMAT CSV`);
+    check(imported === '100000,7499925000,33334', `imported rows: ${imported}`);
+    check(await adminQuery(`SELECT name FROM e2e_import.parquet_${suffix} WHERE id = 7`) === '7 ü', 'imported text');
+    await context.close();
+});
+
 /// The text of every result of the Play UI (their shadow roots included).
 async function playResultText(play) {
     return play.evaluate(() => [...document.querySelectorAll('query-result')].map(r => (r.shadowRoot || r).textContent).join('\n'));
