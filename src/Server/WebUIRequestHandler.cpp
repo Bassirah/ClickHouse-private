@@ -413,6 +413,9 @@ constexpr ConsoleDestination console_destinations[] =
     {"sso_client_id", ""},
     {"sso_scopes", "openid profile email"},
     {"sso_username_claim", "preferred_username"},
+    /// What signing out of the console deletes of the data that the SQL Console (`/ui`) stored in the browser: `results`
+    /// (the stored result rows and the session data of the tab) or `all` (also the saved queries, the history, and the tabs).
+    {"sql_console_clear_on_sign_out", "results"},
 };
 
 String getConsoleConfigJSON(const Poco::Util::AbstractConfiguration & config)

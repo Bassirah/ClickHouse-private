@@ -33,6 +33,7 @@ public: the page reads them before anyone signs in, so no key may hold a secret.
 | `sso_client_id` | Empty | Public client of the console at the provider. Empty: no single sign-on. |
 | `sso_scopes` | `openid profile email` | Scopes the console requests. |
 | `sso_username_claim` | `preferred_username` | Claim of the ID token that is the ClickHouse user name. |
+| `sql_console_clear_on_sign_out` | `results` | What signing out of the console deletes of the data that the SQL Console stored in the browser: `results` or `all`. See [`sql_console_clear_on_sign_out`](#sql-console-clear-on-sign-out). |
 
 ### Destinations {#destinations}
 
@@ -120,6 +121,29 @@ The deployment examples set these keys from the environment of the server contai
         <sso_name from_env="SSO_NAME"/>
         <sso_issuer from_env="SSO_ISSUER"/>
         <sso_client_id from_env="SSO_CLIENT_ID"/>
+    </web_console>
+</clickhouse>
+```
+
+### `sql_console_clear_on_sign_out` {#sql-console-clear-on-sign-out}
+
+The SQL Console keeps data in the browser, and the console deletes part of it when you select **Sign out** or
+**Switch connection**, and when a single sign-on session ends. See
+[Data in the browser's storage](/products/web-console/guides/console#data-in-the-browsers-storage).
+
+| Value | Deleted at the end of a session |
+|---|---|
+| `results` (default; also when empty) | The result rows stored in IndexedDB (`rowData`), and the SQL Console's data in the session storage of the browser tab: the text and statistics of recent queries, and a copy of the tabs. |
+| `all` | The same, and in local storage the tabs, the query history, the saved queries, and the selections of the schema browser, for every user of the server in this browser. Use it where several people share a browser profile. |
+
+With `all`, saved queries that were not exported are lost at sign-out: tell the users to export them first (**Export
+queries** in the SQL Console). Another value is reported on the sign-in page after a sign-out, and only the `results`
+data is deleted.
+
+```xml
+<clickhouse>
+    <web_console>
+        <sql_console_clear_on_sign_out>all</sql_console_clear_on_sign_out>
     </web_console>
 </clickhouse>
 ```

@@ -833,6 +833,9 @@ let config = {
     /// S3-compatible endpoints allowed as backup destinations (comma-separated origins, such as
     /// `https://s3.eu-west-1.amazonaws.com`). Empty: no S3 destination can be configured in the console.
     backup_s3_endpoints: '',
+    /// What signing out deletes of the data the SQL Console stored in the browser: `results` (the stored result rows
+    /// and the session data) or `all` (also the saved queries, the history, and the tabs). See `clearSqlConsoleStorage`.
+    sql_console_clear_on_sign_out: 'results',
 };
 let config_error = null;
 
@@ -1375,10 +1378,116 @@ function startSession(connection, info) {
     loadAdminContext(session);
 }
 
+/// The browser storage of the SQL Console (`/ui`, the prebuilt application of `contrib/sql-console`). It shares the
+/// origin of the console, so the console deletes it at the end of a session; the SQL Console itself does not.
+/// - `rowData`: an IndexedDB database with the rows of query results, in clear text. Always cleared.
+/// - Session storage of this browser tab: `liveQueries` (the text and statistics of recent queries) and a copy of the
+///   encrypted tabs. Always removed.
+/// - Local storage: the tabs, the query history, and the saved queries, encrypted with a key derived from the server
+///   URL and the user name only (no secret), and the selections of the schema browser. Removed only when the
+///   `web_console.sql_console_clear_on_sign_out` configuration key is `all`, because it deletes saved work.
+/// The names are those of the release in `contrib/sql-console`: check them when the submodule is updated.
+const SQL_CONSOLE_RESULTS_DATABASE = 'rowData';
+const SQL_CONSOLE_SESSION_KEY_PREFIXES = ['liveQueries', 'tabs:encrypted:'];
+const SQL_CONSOLE_WORK_KEY_PREFIXES = ['tabs:encrypted:', 'queryHistory:', 'standalone-saved-queries:', 'selectedTabId:',
+    'selected-databases', 'schemaExplorer:'];
+/// `<service ID>:selectedDatabase`, where the service ID is a UUID.
+const SQL_CONSOLE_WORK_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:selectedDatabase$/;
+const SQL_CONSOLE_CLEAR_MODES = ['results', 'all'];
+
+function removeStorageKeys(storage, matches) {
+    const keys = [];
+    for (let i = 0; i < storage.length; ++i) {
+        const key = storage.key(i);
+        if (matches(key)) keys.push(key);
+    }
+    for (const key of keys) storage.removeItem(key);
+}
+
+/// Empties the object stores of the results database. The database is cleared rather than deleted: a deletion waits
+/// for the SQL Console to close the database in every other tab of the browser, and holds up its next opening there
+/// until then. A database that does not exist is not created: an empty one would skip the SQL Console's own upgrade,
+/// which creates the stores.
+function clearSqlConsoleResults() {
+    /// Without IndexedDB, the SQL Console could not store results either.
+    if (typeof indexedDB === 'undefined') return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(SQL_CONSOLE_RESULTS_DATABASE);
+        let created = false;
+        request.onupgradeneeded = () => {
+            created = true;
+            request.transaction.abort();
+        };
+        request.onerror = () => {
+            if (created) resolve();
+            else reject(request.error);
+        };
+        request.onsuccess = () => {
+            const db = request.result;
+            const stores = [...db.objectStoreNames];
+            if (!stores.length) {
+                db.close();
+                resolve();
+                return;
+            }
+            const transaction = db.transaction(stores, 'readwrite');
+            for (const store of stores) transaction.objectStore(store).clear();
+            transaction.oncomplete = () => {
+                db.close();
+                resolve();
+            };
+            transaction.onerror = transaction.onabort = () => {
+                db.close();
+                reject(transaction.error);
+            };
+        };
+    });
+}
+
+/// Deletes what the SQL Console stored in this browser (see `SQL_CONSOLE_RESULTS_DATABASE`). Resolves to the problems
+/// met, as messages; an empty list when everything was deleted. With storage disabled, the SQL Console could not store
+/// anything either, and there is nothing to delete.
+async function clearSqlConsoleStorage() {
+    const problems = [];
+    /// Empty: the default.
+    const mode = config.sql_console_clear_on_sign_out || 'results';
+    if (!SQL_CONSOLE_CLEAR_MODES.includes(mode)) {
+        problems.push(`the configuration key web_console.sql_console_clear_on_sign_out is '${mode}', not one of ` +
+            `${SQL_CONSOLE_CLEAR_MODES.map(m => `'${m}'`).join(', ')}, so its saved queries, history, and tabs were kept`);
+    }
+    try {
+        removeStorageKeys(sessionStorage, key => SQL_CONSOLE_SESSION_KEY_PREFIXES.some(prefix => key.startsWith(prefix)));
+        if (mode === 'all') {
+            removeStorageKeys(localStorage, key =>
+                SQL_CONSOLE_WORK_KEY_PREFIXES.some(prefix => key.startsWith(prefix)) || SQL_CONSOLE_WORK_KEY_PATTERN.test(key));
+        }
+    } catch (e) {
+        if (e.name !== 'SecurityError') problems.push(`its browser storage could not be cleared (${e.message})`);
+    }
+    try {
+        await clearSqlConsoleResults();
+    } catch (e) {
+        if (e && e.name !== 'SecurityError') problems.push(`its stored results could not be deleted (${e.message || e})`);
+    }
+    return problems;
+}
+
+/// The last deletion started by `endSession`; the browser checks (`utils/web-console/console_e2e.mjs`) wait for it.
+let sql_console_cleanup = Promise.resolve([]);
+
+/// Adds the outcome of `clearSqlConsoleStorage` to the notice of the sign-in page.
+function reportSqlConsoleCleanup(problems) {
+    if (!problems.length) return;
+    const notice = $('login-notice');
+    const text = `SQL Console: ${problems.join('; ')}.`;
+    showLoginNotice(notice.hidden || !notice.textContent ? text : `${notice.textContent} ${text}`, true);
+}
+
 /// Ends the session: cancels the requests of the console, unloads every panel (which ends their
-/// requests, timers, and WebSocket sessions), and forgets the credentials.
+/// requests, timers, and WebSocket sessions), and forgets the credentials. Resolves, once the data
+/// that the SQL Console stored in the browser is deleted, to the problems met (`clearSqlConsoleStorage`).
 function endSession() {
-    if (!session) return;
+    if (!session) return Promise.resolve([]);
     if (session.sso) clearTimeout(session.sso.timer);
     session.controller.abort();
     clearInterval(session.status_timer);
@@ -1398,29 +1507,38 @@ function endSession() {
     $('admin-view').replaceChildren();
     $('login-password').value = '';
     closeMobileSidebar(false);
+    /// After `destroyFrame`: the SQL Console of this tab is unloaded and writes nothing more.
+    sql_console_cleanup = clearSqlConsoleStorage();
+    return sql_console_cleanup;
 }
 
-function signOut() {
+async function signOut() {
     const logout = session ? ssoLogoutUrl(session) : null;
-    endSession();
+    const cleanup = endSession();
     showLoginNotice('');
     if (logout) {
+        /// Leaving the page could interrupt the deletion. A problem cannot be shown on the provider's page, and does
+        /// not stop the sign-out with the provider.
+        const problems = await cleanup;
+        if (problems.length) console.error(`SQL Console: ${problems.join('; ')}.`);
         location.assign(logout);
         return;
     }
     navigate(loginPath(null), true);
+    reportSqlConsoleCleanup(await cleanup);
 }
 
-function switchConnection() {
+async function switchConnection() {
     /// Another user of single sign-on needs a new session with the provider, or the provider signs the same user in again.
     if (session && session.sso) {
         signOut();
         return;
     }
     const previous = session ? `${session.user} at ${session.url}` : '';
-    endSession();
+    const cleanup = endSession();
     showLoginNotice(`Signed out of ${previous}. Sign in as another user. All panels were closed.`, true);
     navigate(loginPath(null), true);
+    reportSqlConsoleCleanup(await cleanup);
 }
 
 async function checkConnection() {
@@ -5207,9 +5325,10 @@ async function refreshSsoToken(current) {
     if (session !== current) return;
     if (!response.ok || !tokens.access_token) {
         const reason = tokens.error_description || tokens.error || `HTTP ${response.status}`;
-        endSession();
+        const cleanup = endSession();
         showLoginNotice(`Your ${current.sso.settings.name} session has ended (${reason}): sign in again. All panels were closed.`, true);
         navigate(loginPath(null), true);
+        reportSqlConsoleCleanup(await cleanup);
         return;
     }
     current.password = tokens.access_token;

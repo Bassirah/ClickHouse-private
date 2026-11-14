@@ -344,6 +344,141 @@ await test('SQL Console: a failed automatic sign-in is reported and leaves its f
     await context.close();
 });
 
+/// What the SQL Console stored in the browser, read in the console page (same origin): the number of result rows
+/// in IndexedDB (-1 without the database, which is not opened then, so as not to create it), and its storage keys.
+async function sqlConsoleStorage(page) {
+    return page.evaluate(async () => {
+        let rows = -1;
+        if ((await indexedDB.databases()).some(d => d.name === 'rowData')) {
+            rows = await new Promise((resolve, reject) => {
+                const open = indexedDB.open('rowData');
+                open.onerror = () => reject(open.error);
+                open.onsuccess = () => {
+                    const db = open.result;
+                    const count = db.transaction('rows').objectStore('rows').count();
+                    count.onsuccess = () => { db.close(); resolve(count.result); };
+                    count.onerror = () => { db.close(); reject(count.error); };
+                };
+            });
+        }
+        return {rows, local: Object.keys(localStorage), session: Object.keys(sessionStorage)};
+    });
+}
+
+/// The keys of the saved work of the SQL Console in local storage (`SQL_CONSOLE_WORK_KEY_PREFIXES` of the console).
+const SQL_CONSOLE_WORK_KEY = /^(tabs:encrypted:|queryHistory:|standalone-saved-queries:|selectedTabId:|selected-databases|schemaExplorer:)|^[0-9a-f-]{36}:selectedDatabase$/;
+
+/// Waits until `predicate` holds for `sqlConsoleStorage`, and returns that state.
+async function waitForSQLConsoleStorage(page, predicate, what) {
+    const deadline = Date.now() + 30000;
+    for (;;) {
+        const stored = await sqlConsoleStorage(page);
+        if (predicate(stored)) return stored;
+        if (Date.now() > deadline) throw new Error(`${what}: ${JSON.stringify(stored)}`);
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+}
+
+/// Signs in, runs a query in the SQL Console, and waits until it stored the result rows and the tabs.
+async function runQueryInSQLConsole(page) {
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
+    await waitForSQLConsole(page);
+    const sql = frameOf(page, '/ui');
+    const new_query = await sql.$('[data-testid="standalone-home-new-query"]');
+    if (new_query) await new_query.click();
+    await sql.waitForSelector('.monaco-editor textarea', {timeout: 30000});
+    await sql.click('.monaco-editor .view-lines');
+    await page.keyboard.type(`SELECT 'stored_marker' AS m`);
+    await page.keyboard.press('Control+Enter');
+    return waitForSQLConsoleStorage(page,
+        s => s.rows > 0 && s.local.some(k => k.startsWith('tabs:encrypted:')) && s.session.some(k => k.startsWith('tabs:encrypted:')),
+        'the SQL Console did not store its result');
+}
+
+/// Serves `/console/config.json` with `sql_console_clear_on_sign_out` set to `value`.
+async function setClearOnSignOut(context, value) {
+    await context.route(`${BASE}/console/config.json`, async route => {
+        const response = await route.fetch();
+        route.fulfill({response, json: {...await response.json(), sql_console_clear_on_sign_out: value}});
+    });
+}
+
+await test('SQL Console: signing out deletes its stored results and keeps the saved work', async () => {
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+
+    /// Before the SQL Console ever ran, signing out creates no database: an empty one would skip the SQL Console's own
+    /// upgrade, which creates its stores.
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#logout-button');
+    await page.waitForSelector('#login-view:not([hidden])');
+    const problems = await page.evaluate(() => sql_console_cleanup);
+    check(problems.length === 0, `cleanup problems: ${problems}`);
+    check((await sqlConsoleStorage(page)).rows === -1, 'signing out created the results database of the SQL Console');
+
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await runQueryInSQLConsole(page);
+
+    await clickConsole(page, '#logout-button');
+    await page.waitForSelector('#login-view:not([hidden])');
+    let stored = await waitForSQLConsoleStorage(page, s => s.rows === 0, 'result rows left');
+    check(!stored.session.some(k => k === 'liveQueries' || k.startsWith('tabs:encrypted:')), `session storage left: ${stored.session}`);
+    check(stored.local.some(k => k.startsWith('tabs:encrypted:')), `tabs deleted: ${stored.local}`);
+
+    /// The emptied database still works for the SQL Console.
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    stored = await runQueryInSQLConsole(page);
+    check(stored.rows > 0, 'the SQL Console stores no result after the cleanup');
+
+    /// Switching connection deletes them too.
+    await clickConsole(page, '#switch-button');
+    await page.waitForSelector('#login-view:not([hidden])');
+    await waitForSQLConsoleStorage(page, s => s.rows === 0, 'result rows left after Switch connection');
+    const notice = await page.textContent('#login-notice');
+    check(!notice.includes('SQL Console:'), `notice: ${notice}`);
+    await context.close();
+});
+
+await test('SQL Console: with sql_console_clear_on_sign_out = all, signing out also deletes the saved work', async () => {
+    const {context, page} = await newContext();
+    await setClearOnSignOut(context, 'all');
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await runQueryInSQLConsole(page);
+    await page.evaluate(() => localStorage.setItem('unrelated-key', 'kept'));
+
+    await clickConsole(page, '#logout-button');
+    await page.waitForSelector('#login-view:not([hidden])');
+    const stored = await waitForSQLConsoleStorage(page, s => s.rows === 0 && !s.local.some(k => SQL_CONSOLE_WORK_KEY.test(k)),
+        'saved work or result rows left');
+    check(stored.local.includes('unrelated-key'), `an unrelated key was deleted: ${stored.local}`);
+    check(stored.local.includes('cui-theme'), `the theme of the SQL Console was deleted: ${stored.local}`);
+    await context.close();
+});
+
+await test('SQL Console: an unknown sql_console_clear_on_sign_out is reported, and the saved work is kept', async () => {
+    const {context, page} = await newContext();
+    await setClearOnSignOut(context, 'everything');
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await runQueryInSQLConsole(page);
+
+    await clickConsole(page, '#logout-button');
+    await page.waitForSelector('#login-view:not([hidden])');
+    await waitUntil(page, () => document.getElementById('login-notice').textContent.includes('SQL Console:'));
+    const notice = await page.textContent('#login-notice');
+    check(notice.includes(`sql_console_clear_on_sign_out is 'everything'`), `notice: ${notice}`);
+    const stored = await sqlConsoleStorage(page);
+    check(stored.rows === 0, `result rows left: ${stored.rows}`);
+    check(stored.local.some(k => k.startsWith('tabs:encrypted:')), `tabs deleted: ${stored.local}`);
+    await context.close();
+});
+
 await test('Theme: the toggle applies to the console and to panels opened after it', async () => {
     const {context, page} = await newContext();
     await page.goto(`${BASE}/console`);

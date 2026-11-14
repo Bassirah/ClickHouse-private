@@ -19,6 +19,7 @@ DEFAULTS = {
     "sso_client_id": "",
     "sso_scopes": "openid profile email",
     "sso_username_claim": "preferred_username",
+    "sql_console_clear_on_sign_out": "results",
 }
 
 
