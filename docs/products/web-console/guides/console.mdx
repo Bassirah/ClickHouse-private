@@ -66,7 +66,7 @@ The sidebar and the home page list the same destinations, in these categories:
 | Category | Destinations |
 |---|---|
 | **Home** | Home. |
-| **Workspace** | SQL Console, Play UI, Dashboard, ClickStack, Web Terminal. |
+| **Workspace** | SQL Console, Import data, Play UI, Dashboard, ClickStack, Web Terminal. |
 | **Diagnostics** | Binary visualizer, Merges visualizer, Schema visualizer, Jemalloc, Processors profile, Running queries. |
 | **Administration** | Users, Roles & Permissions, Data Access Policies, Component Access, Profiles & Quotas, Audit Activity, Clusters, Backup & Restore. |
 | **Identity Providers** | LDAP, SSO (Keycloak). |
@@ -74,7 +74,7 @@ The sidebar and the home page list the same destinations, in these categories:
 
 A category without any destination for the user is not shown. The button at the bottom of the sidebar collapses it to icons (**Collapse sidebar**, **Expand sidebar**); the browser remembers the choice. On a narrow screen, the menu button in the header shows and hides the sidebar.
 
-The administration and identity provider pages are listed only for users who can read what they show, and when the console access policy allows them. The **Running queries** page of **Diagnostics** works the same way: it is listed for users who can read `system.processes` (see [Running queries](/products/web-console/guides/running-queries)). Their own guides describe them: [Users and roles](/products/web-console/guides/users-and-roles), [Component Access](/products/web-console/guides/component-access), [Profiles and quotas](/products/web-console/guides/profiles-and-quotas), [Audit activity](/products/web-console/guides/audit-activity), [Data Access Policies](/products/web-console/guides/data-access-policies), [Backup & Restore](/products/web-console/guides/backup-and-restore), [Clusters](/products/web-console/guides/clusters), and [Identity Providers](/products/web-console/guides/identity-providers).
+The administration and identity provider pages are listed only for users who can read what they show, and when the console access policy allows them. The **Import data** page of **Workspace** and the **Running queries** page of **Diagnostics** work the same way: they are listed for users who can read `system.tables` and `system.processes` (see [Import data](/products/web-console/guides/import-data) and [Running queries](/products/web-console/guides/running-queries)). Their own guides describe them: [Users and roles](/products/web-console/guides/users-and-roles), [Component Access](/products/web-console/guides/component-access), [Profiles and quotas](/products/web-console/guides/profiles-and-quotas), [Audit activity](/products/web-console/guides/audit-activity), [Data Access Policies](/products/web-console/guides/data-access-policies), [Backup & Restore](/products/web-console/guides/backup-and-restore), [Clusters](/products/web-console/guides/clusters), and [Identity Providers](/products/web-console/guides/identity-providers).
 
 **Console Guide** shows this documentation inside the console, for every signed-in user. It is embedded in the
 server, so it works without Internet access and describes the console of this build.

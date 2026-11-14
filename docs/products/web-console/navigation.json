@@ -19,6 +19,7 @@
       "expanded": false,
       "pages": [
         "products/web-console/guides/console",
+        "products/web-console/guides/import-data",
         "products/web-console/guides/users-and-roles",
         "products/web-console/guides/component-access",
         "products/web-console/guides/data-access-policies",
