@@ -67,14 +67,14 @@ The sidebar and the home page list the same destinations, in these categories:
 |---|---|
 | **Home** | Home. |
 | **Workspace** | SQL Console, Dashboard, ClickStack, Web Terminal. |
-| **Diagnostics** | Binary visualizer, Merges visualizer, Schema visualizer, Jemalloc, Processors profile. |
+| **Diagnostics** | Binary visualizer, Merges visualizer, Schema visualizer, Jemalloc, Processors profile, Running queries. |
 | **Administration** | Users, Roles & Permissions, Data Access Policies, Component Access, Profiles & Quotas, Audit Activity, Clusters, Backup & Restore. |
 | **Identity Providers** | LDAP, SSO (Keycloak). |
 | **Resources** | Console Guide, Source code, Documentation, Reference, Website, Cloud. |
 
 A category without any destination for the user is not shown. The button at the bottom of the sidebar collapses it to icons (**Collapse sidebar**, **Expand sidebar**); the browser remembers the choice. On a narrow screen, the menu button in the header shows and hides the sidebar.
 
-The administration and identity provider pages are listed only for users who can read what they show, and when the console access policy allows them. Their own guides describe them: [Users and roles](/products/web-console/guides/users-and-roles), [Component Access](/products/web-console/guides/component-access), [Profiles and quotas](/products/web-console/guides/profiles-and-quotas), [Audit activity](/products/web-console/guides/audit-activity), [Data Access Policies](/products/web-console/guides/data-access-policies), [Backup & Restore](/products/web-console/guides/backup-and-restore), [Clusters](/products/web-console/guides/clusters), and [Identity Providers](/products/web-console/guides/identity-providers).
+The administration and identity provider pages are listed only for users who can read what they show, and when the console access policy allows them. The **Running queries** page of **Diagnostics** works the same way: it is listed for users who can read `system.processes` (see [Running queries](/products/web-console/guides/running-queries)). Their own guides describe them: [Users and roles](/products/web-console/guides/users-and-roles), [Component Access](/products/web-console/guides/component-access), [Profiles and quotas](/products/web-console/guides/profiles-and-quotas), [Audit activity](/products/web-console/guides/audit-activity), [Data Access Policies](/products/web-console/guides/data-access-policies), [Backup & Restore](/products/web-console/guides/backup-and-restore), [Clusters](/products/web-console/guides/clusters), and [Identity Providers](/products/web-console/guides/identity-providers).
 
 **Console Guide** shows this documentation inside the console, for every signed-in user. It is embedded in the
 server, so it works without Internet access and describes the console of this build.
@@ -128,6 +128,12 @@ After the sign-in, the console runs a `LIMIT 0` query for each panel that needs 
 | **Not verified** | The check failed for another reason, for example a timeout. The panel can still be opened. | The panel. |
 | **Not allowed by policy** | The console access policy does not allow the user to open the component. It is not listed. | **is not allowed**, and a note that the server still decides what the user can query. |
 
+**Limited** marks a panel that works with a limitation found after the sign-in. The SQL Console shows the progress of
+queries and the running queries through the first cluster of `system.clusters` (`default` first); when that cluster does
+not answer, its card says so, and a notice above the panel names the cluster and the error. Queries still run. An
+administrator can fix or remove the cluster in `remote_servers`. The console checks this only when the user can read
+`system.clusters` and `system.processes`.
+
 Two more badges describe a destination, not its state: **External** for a destination that opens in a new tab, and **Needs Internet** for a page that loads a library from a public CDN. The Binary visualizer loads Leaflet, and Jemalloc loads uPlot. Every other panel and the console itself work without Internet access.
 
 If the page inside a panel navigates away from its own address, for example when you use the SQL Console's own sign-out, the console unloads the panel and offers **Reload panel**.
@@ -144,6 +150,7 @@ The console handles credentials as follows:
 - Links to external destinations open in a new tab with `noopener` and `noreferrer`, and carry no credentials, queries, or database names.
 - The console page is served with `Cache-Control: no-store`, `X-Frame-Options: DENY`, and a `Content-Security-Policy` that allows only inline code, same-origin frames, and requests to ClickHouse servers. To override any of these headers, set it in a `console` handler of `http_handlers` (see the [configuration reference](/products/web-console/reference/configuration#http-handlers)).
 - The embedded pages are loaded in same-origin frames. Do not set `X-Frame-Options: DENY` or `frame-ancestors 'none'` on them, or they cannot be embedded.
+- The SQL Console is served with `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer`, and a `Content-Security-Policy` that allows only its own files, and requests to ClickHouse servers. See the [`sql_console` handler](/products/web-console/reference/configuration#sql-console-handler).
 
 The administration pages follow the same model: each change is a SQL statement that the server authorizes with your privileges (see [Users and roles](/products/web-console/guides/users-and-roles#identity-and-authorization-model)). The console access policy only lists or hides components; see [Component Access](/products/web-console/guides/component-access).
 

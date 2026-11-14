@@ -24,6 +24,7 @@
         "products/web-console/guides/data-access-policies",
         "products/web-console/guides/profiles-and-quotas",
         "products/web-console/guides/audit-activity",
+        "products/web-console/guides/running-queries",
         "products/web-console/guides/backup-and-restore",
         "products/web-console/guides/clusters",
         "products/web-console/guides/identity-providers"

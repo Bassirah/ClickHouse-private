@@ -331,6 +331,14 @@ static inline auto createHandlersFactoryFromConfig(
                 handler->addFiltersFromConfig(config, prefix + "." + key);
                 main_handler_factory->addHandler(std::move(handler));
             }
+            else if (handler_type == "sql_console")
+            {
+                /// The rule must match every path under `/ui`: the handler serves the files of the application and
+                /// answers the other paths with its page. `content_type` does not apply: each file has its own type.
+                auto handler = createWebUIHandlerFactory<SQLConsoleUIRequestHandler>(server, config, prefix + "." + key, common_headers_override);
+                handler->addFiltersFromConfig(config, prefix + "." + key);
+                main_handler_factory->addHandler(std::move(handler));
+            }
             else if (handler_type == "docs")
             {
                 auto handler = createWebUIHandlerFactory<DocsWebUIRequestHandler>(server, config, prefix + "." + key, common_headers_override);

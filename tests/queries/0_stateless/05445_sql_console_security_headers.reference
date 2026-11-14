@@ -1,0 +1,36 @@
+--- /ui
+text/html
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+default-src 'none'
+script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'
+worker-src 'self' blob:
+frame-ancestors 'self'
+--- /ui/env.js
+application/javascript
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+default-src 'none'
+script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'
+worker-src 'self' blob:
+frame-ancestors 'self'
+--- /ui/monacoeditorwork/editor.worker.bundle.js
+application/javascript
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+default-src 'none'
+script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'
+worker-src 'self' blob:
+frame-ancestors 'self'
+--- /ui/console/newQuery
+text/html
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+default-src 'none'
+script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'
+worker-src 'self' blob:
+frame-ancestors 'self'

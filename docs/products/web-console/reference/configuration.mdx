@@ -216,6 +216,58 @@ These headers apply to the console only. The embedded pages (`/dashboard`, `/mer
 their own handlers; do not set `X-Frame-Options: DENY` or `frame-ancestors 'none'` on them, or the console cannot embed
 them.
 
+## The `sql_console` handler of `http_handlers` {#sql-console-handler}
+
+The server serves the SQL Console for `GET` and `HEAD` requests to `/ui`, and to any URI that starts with `/ui/`, `/ui?`,
+or `/ui#`. Its files (the page, `env.js`, `assets/`, and `monacoeditorwork/`) are sent with these headers, unless a rule
+with the handler type `sql_console` sets a header of the same name:
+
+| Header | Value |
+|---|---|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `SAMEORIGIN`: the console embeds the SQL Console, and no other site can. |
+| `Referrer-Policy` | `no-referrer` |
+| `Content-Security-Policy` | See below. |
+
+```text
+default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' http: https:; manifest-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; object-src 'none'
+```
+
+| Directive | Effect |
+|---|---|
+| `script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'` | The scripts of the application, the inline script of its page, and the compilation of WebAssembly. `eval` is not allowed; the application probes it once at start, which the browser reports as a blocked `eval` without consequence. |
+| `style-src 'self' 'unsafe-inline'`, `font-src 'self' data:`, `img-src 'self' data: blob:` | The styles, fonts, and images of the application. |
+| `worker-src 'self' blob:` | The worker of the Monaco editor. |
+| `connect-src 'self' http: https:` | Requests to this server, and to another server entered as the ClickHouse HTTP URL of the sign-in form. |
+| `frame-ancestors 'self'` | Only pages of the same origin, the console, may frame the SQL Console. |
+| `base-uri 'none'`, `form-action 'none'`, `object-src 'none'` | No `<base>` element, form submission, or plugin. |
+
+No `Cache-Control` header is set: the browser may cache the files, whose names under `assets/` change with each release of the SQL Console.
+
+To change them, add a rule that matches every path under `/ui`, and keep `<defaults/>`:
+
+```xml
+<clickhouse>
+    <http_handlers>
+        <rule>
+            <url>regex:^/ui(/.*)?$</url>
+            <methods>GET,HEAD</methods>
+            <handler>
+                <type>sql_console</type>
+                <http_response_headers>
+                    <X-Frame-Options>DENY</X-Frame-Options>
+                    <Content-Security-Policy>default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'</Content-Security-Policy>
+                </http_response_headers>
+            </handler>
+        </rule>
+        <defaults/>
+    </http_handlers>
+</clickhouse>
+```
+
+This example allows requests to this server only, and no framing: the SQL Console then works on its own at `/ui`, but
+not inside the console. `content_type` does not apply to this handler: each file is sent with its own type.
+
 ## Related server configuration {#related-server-configuration}
 
 ### `http_authentication_servers` {#http-authentication-servers}

@@ -11,6 +11,18 @@
                 </http_response_headers>
             </handler>
         </rule>
+        <rule>
+            <url>regex:^/ui(/.*)?$</url>
+            <methods>GET,HEAD</methods>
+            <handler>
+                <type>sql_console</type>
+                <!-- Does not apply: each file of the SQL Console keeps its own type. -->
+                <content_type>text/plain</content_type>
+                <http_response_headers>
+                    <X-Frame-Options>DENY</X-Frame-Options>
+                </http_response_headers>
+            </handler>
+        </rule>
         <defaults/>
     </http_handlers>
 </clickhouse>

@@ -779,6 +779,7 @@ const ICONS = {
     merges: '<path d="M6 4v5a4 4 0 0 0 4 4h4a4 4 0 0 1 4 4v3M18 4v5a4 4 0 0 1-4 4"/><circle cx="6" cy="4" r="1"/><circle cx="18" cy="4" r="1"/>',
     schema: '<rect x="3" y="3" width="7" height="5" rx="1"/><rect x="14" y="16" width="7" height="5" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><path d="M6.5 8v10.5H14M10 5.5h4"/>',
     jemalloc: '<rect x="6" y="6" width="12" height="12" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+    activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
     profile: '<path d="M4 6h10M4 12h16M4 18h7"/><circle cx="17" cy="6" r="2"/><circle cx="14" cy="18" r="2"/>',
     source: '<path d="M8 6l-6 6 6 6M16 6l6 6-6 6"/>',
     docs: '<path d="M4 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4zM20 4h-6a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6z"/>',
@@ -872,7 +873,7 @@ const COMPONENTS = [
      description: 'Connection overview and panel launcher.'},
 
     {id: 'sql', category: 'workspace', kind: 'panel', title: 'SQL Console', icon: 'sql', src: '/ui/',
-     integration: 'sql-console', keep_alive: true,
+     integration: 'sql-console', keep_alive: true, health_check: checkSqlConsoleCluster,
      description: 'Write and run queries with tabs, history, and saved queries.'},
     {id: 'dashboard', category: 'workspace', kind: 'panel', title: 'Dashboard', icon: 'dashboard', src: '/dashboard',
      integration: 'native', keep_alive: true,
@@ -905,6 +906,9 @@ const COMPONENTS = [
      integration: 'native',
      probes: ['SELECT 1 FROM system.processors_profile_log LIMIT 0', 'SELECT 1 FROM system.query_log LIMIT 0'],
      description: 'Time spent in each processor of a query pipeline.'},
+    {id: 'running-queries', category: 'diagnostics', kind: 'admin', title: 'Running queries', icon: 'activity', page: 'processes',
+     admin_needs: ['read_processes'],
+     description: 'The queries running on this server, with their progress and memory; stop a query.'},
 
     {id: 'guide', category: 'resources', kind: 'guide', title: 'Console Guide', icon: 'guide',
      description: 'How to use, deploy, and administer this console: tutorials, user guides, how-to guides, and reference.'},
@@ -1367,6 +1371,8 @@ function startSession(connection, info) {
         controller: new AbortController(),
         status: {state: 'ok', verified_at: new Date(), message: null},
         probes: new Map(),
+        /// Problems that limit a panel without blocking it, by component: `{message}` (see `health_check`).
+        warnings: new Map(),
         status_timer: null,
         checking: false,
         admin: {state: 'checking', can: {}, policy: {state: 'checking'}},
@@ -1565,11 +1571,37 @@ async function checkConnection() {
 }
 
 /// Run the probes of all panels concurrently; they are tiny `LIMIT 0` queries.
+/// The SQL Console (`contrib/sql-console`) reads the progress of a query and the number of running queries from
+/// `clusterAllReplicas(<cluster>, system.processes)`, with the first cluster of `system.clusters` (`default` first).
+/// When a server of that cluster cannot be reached, those requests fail, while queries still run. Returns a warning
+/// for the panel, or null. Not a probe: it never hides or blocks the SQL Console, and says nothing when the user
+/// cannot read the tables, because the SQL Console then does not show these values either.
+async function checkSqlConsoleCluster(current) {
+    const clusters = await runQuery(current,
+        "SELECT cluster FROM system.clusters ORDER BY cluster = 'default' DESC LIMIT 1 FORMAT JSON", current.controller.signal);
+    if (!clusters.ok || !clusters.data.length) return null;
+    const cluster = clusters.data[0].cluster;
+    const result = await runQuery(current, `SELECT 1 FROM clusterAllReplicas(${quoteIdentifier(cluster)}, system.processes) LIMIT 0`,
+        current.controller.signal);
+    if (result.ok || ['aborted', 'forbidden', 'missing', 'credentials'].includes(result.kind)) return null;
+    return {message: `The SQL Console shows the progress of queries and the running queries through the cluster ${cluster}, `
+        + `which does not answer: ${result.detail || result.message} Queries still run. An administrator can fix or remove `
+        + 'the cluster in remote_servers.'};
+}
+
 async function runProbes(current) {
     const probing = COMPONENTS.filter(c => c.probes);
     for (const c of probing) current.probes.set(c.id, {state: 'checking'});
     const route_checks = [probeRoute('/webterminal'), probeRoute(clickstackRoute())];
-    await Promise.all([...route_checks, ...probing.map(async c => {
+    const health_checks = COMPONENTS.filter(c => c.health_check).map(async c => {
+        const warning = await c.health_check(current);
+        if (session !== current) return;
+        if (warning) current.warnings.set(c.id, warning);
+        else current.warnings.delete(c.id);
+        refreshComponentStates();
+        renderPanelNotice();
+    });
+    await Promise.all([...route_checks, ...health_checks, ...probing.map(async c => {
         /// One query for all the probes of a panel: it fails when any of them does.
         const result = await runQuery(current, c.probes.join(' UNION ALL '), current.controller.signal);
         if (session !== current || result.kind === 'aborted') return;
@@ -1670,10 +1702,11 @@ function ownComponentState(c) {
     if (probe && probe.state === 'missing') {
         return {...base, status: 'unavailable', action: 'Details', reason: 'A system table or function this panel needs is not available on this server.', detail: probe.detail};
     }
+    const warning = session ? session.warnings.get(c.id) : null;
     if (probe && probe.state !== 'ok') {
-        return {...base, status: 'unverified', reason: probe.message, detail: probe.detail};
+        return {...base, status: 'unverified', reason: probe.message, detail: probe.detail, warning: warning && warning.message};
     }
-    return {...base, status: 'available'};
+    return {...base, status: 'available', warning: warning && warning.message};
 }
 
 const STATUS_BADGES = {
@@ -2088,13 +2121,20 @@ function renderCard(c) {
         internet.title = `Loads ${c.needs_internet}.`;
         badges.append(internet);
     }
+    if (state.warning) {
+        const limited = document.createElement('span');
+        limited.className = 'badge warn';
+        limited.textContent = 'Limited';
+        limited.title = state.warning;
+        badges.append(limited);
+    }
     const action = destinationLink(c, state, state.action, state.status === 'available' || state.status === 'unverified');
     action.dataset.focusKey = `card-${c.id}`;
     action.setAttribute('aria-describedby', `card-${c.id}`);
     foot.append(badges, action);
 
     card.append(head, description);
-    const status_text = state.reason || state.note;
+    const status_text = [state.reason || state.note, state.warning].filter(Boolean).join(' ');
     if (status_text) card.append(Object.assign(document.createElement('p'), {className: 'status', textContent: status_text}));
     card.append(foot);
     item.append(card);
@@ -2202,6 +2242,8 @@ function renderPanelNotice() {
         message = `${status.state === 'auth' ? 'Authentication failed' : 'Connection to the server lost'} at ${formatTime(status.failed_at)}: `
             + `${status.message} The panel may not work until the connection is restored.`;
         kind = 'error';
+    } else if (session.warnings.has(route.id)) {
+        message = session.warnings.get(route.id).message;
     }
     notice.className = `message ${kind}`;
     notice.textContent = message || '';
@@ -3433,6 +3475,7 @@ const GUIDE_TOPICS = {
     'admin-access': 'guides/component-access',
     'admin-limits': 'guides/profiles-and-quotas',
     'admin-audit': 'guides/audit-activity',
+    'running-queries': 'guides/running-queries',
     'admin-clusters': 'guides/clusters',
     'admin-backups': 'guides/backup-and-restore',
     'idp-ldap': 'guides/identity-providers#ldap',
@@ -7291,6 +7334,107 @@ ADMIN_PAGES.audit = (root, route, page) => {
             ? 'Not available: the console audit log is not set up (Component Access page), or your user cannot read it.'
             : 'Not available: your user cannot read system.query_log.')));
     if (available) load();
+};
+
+/// --- Diagnostics: Running queries ---
+
+/// How often the Running queries page reads `system.processes` again while it is shown and the browser tab is visible.
+const RUNNING_QUERIES_REFRESH_MS = 5000;
+
+/// The queries of `system.processes` on this server, except the query that reads them.
+async function loadRunningQueries() {
+    return adminRows(`SELECT query_id, user, initial_user, is_initial_query, elapsed, read_rows, read_bytes, total_rows_approx,
+        memory_usage, current_database, query
+        FROM system.processes WHERE query_id != queryID() ORDER BY elapsed DESC LIMIT 500`, {});
+}
+
+/// The plan that stops one query, reviewed and run like every change of the console, and recorded in its audit log.
+/// `KILL QUERY` needs the privilege only for the queries of other users.
+function stopQueryPlan(row) {
+    return {action: 'kill_query', target_type: 'query', target_name: row.query_id, local_only: true, danger: true, confirm_text: 'Stop query',
+        summary: `Stop a query of ${row.user}`,
+        steps: [{description: `Stop the query ${row.query_id} of ${row.user}, running for ${formatSeconds(Number(row.elapsed))}`,
+            sql: `KILL QUERY WHERE query_id = ${quoteString(row.query_id)} ASYNC`}],
+        audit_details: {user: row.user, elapsed_seconds: Number(row.elapsed), query: row.query.slice(0, 1000)},
+        recovery: 'The server stops the query at its next check; a query that already finished is not affected.'};
+}
+
+function runningQueriesTable(rows, open_ids) {
+    const can_kill_others = session.admin.can.kill_query;
+    const progress = row => {
+        const read = Number(row.read_rows);
+        const total = Number(row.total_rows_approx);
+        const text = `${read.toLocaleString('en-US')} rows, ${formatBytes(row.read_bytes)}`;
+        return total > 0
+            ? [h('div', {}, `${Math.min(100, Math.round(read / total * 100))} %`), h('div', {className: 'note'}, text)]
+            : text;
+    };
+    return dataTable([
+        {title: 'Running for', render: row => formatSeconds(Number(row.elapsed))},
+        {title: 'User', render: row => [row.user, Number(row.is_initial_query) ? null : h('div', {className: 'note'}, `for ${row.initial_user}`)]},
+        {title: 'Query', render: row => h('details', {open: open_ids.has(row.query_id), dataset: {queryId: row.query_id}},
+            h('summary', {}, row.query.length > 120 ? `${row.query.slice(0, 120)}…` : row.query),
+            h('pre', {className: 'code'}, row.query),
+            h('div', {className: 'note'}, `Query ID ${row.query_id}${row.current_database ? ` · database ${row.current_database}` : ''}`))},
+        {title: 'Read', render: progress},
+        {title: 'Memory', render: row => formatBytes(row.memory_usage)},
+        {title: '', render: row => {
+            const own = row.user === session.server_user;
+            return button('Stop', () => reviewPlan(stopQueryPlan(row)), {className: 'danger small', disabled: !own && !can_kill_others,
+                title: !own && !can_kill_others ? 'Stopping the queries of other users needs the KILL QUERY privilege.' : `Stop this query (KILL QUERY)`});
+        }},
+    ], rows, 'No other query is running on this server.', 'Running queries');
+}
+
+ADMIN_PAGES.processes = (root, route, page) => {
+    const c = page.component;
+    const results = h('div', {}, loadingBox('Loading…'));
+    const updated = h('span', {className: 'note', role: 'status'});
+    const q = h('input', {type: 'search', autocomplete: 'off', spellcheck: false, placeholder: 'User, query text, or query ID'});
+    const mine = checkbox('Only my queries', false);
+    const auto = checkbox(`Refresh every ${RUNNING_QUERIES_REFRESH_MS / 1000} seconds`, true);
+    let rows = null;
+    let timer = null;
+    const render = () => {
+        if (!rows) return;
+        const text = q.value.trim().toLowerCase();
+        const shown = rows.filter(row => (!mine.input.checked || row.user === session.server_user)
+            && (!text || [row.user, row.initial_user, row.query, row.query_id].some(value => value.toLowerCase().includes(text))));
+        /// Keep the queries whose text is expanded open across refreshes.
+        const open_ids = new Set([...results.querySelectorAll('details[open]')].map(d => d.dataset.queryId));
+        const memory = rows.reduce((sum, row) => sum + Number(row.memory_usage), 0);
+        results.replaceChildren(
+            h('p', {className: 'note'}, `${rows.length} ${rows.length === 1 ? 'query' : 'queries'} running, using ${formatBytes(memory)} of memory`
+                + `${shown.length !== rows.length ? `; ${shown.length} shown` : ''}.`),
+            runningQueriesTable(shown, open_ids));
+    };
+    /// The table stays on screen while it is read again, so that a refresh does not flicker or close what is expanded.
+    const refresh = async () => {
+        clearTimeout(timer);
+        if (!document.hidden) {
+            try {
+                rows = await loadRunningQueries();
+                if (!isCurrent(page)) return;
+                render();
+                updated.textContent = `Updated at ${formatTime(new Date())}`;
+            } catch (e) {
+                if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+                rows = null;
+                results.replaceChildren(errorBox(e));
+            }
+        }
+        if (isCurrent(page) && auto.input.checked) timer = setTimeout(refresh, RUNNING_QUERIES_REFRESH_MS);
+    };
+    q.addEventListener('input', render);
+    mine.input.addEventListener('change', render);
+    auto.input.addEventListener('change', () => (auto.input.checked ? refresh() : clearTimeout(timer)));
+    put(root, pageHeader(c, 'Running queries', null, [button('Refresh', refresh)]),
+        h('p', {className: 'note'}, `The queries running on ${session.hostname}, from system.processes, the longest first. Each server of a cluster `
+            + 'has its own list. Stop asks the server to cancel a query (KILL QUERY): you can always stop your own queries; stopping the queries '
+            + 'of other users needs the KILL QUERY privilege.'),
+        h('div', {className: 'toolbar'}, adminField('Search', q), mine.element, auto.element, updated),
+        h('div', {className: 'box'}, results));
+    refresh();
 };
 
 /// --- Administration: Data Access Policies, access model ---

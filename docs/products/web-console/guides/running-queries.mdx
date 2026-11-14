@@ -1,0 +1,64 @@
+---
+description: 'What the Running queries page of the web console shows: the queries running on the server, from system.processes, with their progress and memory, and how to stop one with KILL QUERY.'
+sidebarTitle: 'Running queries'
+slug: /web-console/guides/running-queries
+title: 'Running queries'
+doc_type: 'guide'
+---
+
+The **Running queries** page, in the **Diagnostics** category, lists the queries running on the server the console is
+connected to, and stops a query. It reads `system.processes`, so it shows the queries of every user and client: the SQL
+Console, the Web Terminal, `clickhouse-client`, drivers, and the console itself. The SQL Console shows the same list
+in its **Queries** panel, but cannot stop a query of another tab or user; this page can.
+
+## Who can use it {#who-can-use-it}
+
+The page is listed for users who can read `system.processes` (`SELECT ON system.processes`), and when the
+[console access policy](/products/web-console/guides/component-access) allows it. The **Operator** role template
+includes the privilege as an option.
+
+| Action | Privilege |
+|---|---|
+| See the queries | `SELECT ON system.processes` |
+| Stop your own queries | None |
+| Stop the queries of other users | `KILL QUERY ON *.*` |
+
+## The list {#the-list}
+
+The list shows the queries, the longest-running first, without the query that reads the list. It is read again every 5
+seconds while the page is shown and the browser tab is visible; clear **Refresh every 5 seconds** to keep it still, or
+select **Refresh**. Above the table, the page shows the number of queries and the memory they use.
+
+| Column | Content |
+|---|---|
+| **Running for** | Time since the query started (`elapsed`). |
+| **User** | The user that runs the query. For a query that a server runs for another one (a part of a distributed query), also `for` the user of the initial query. |
+| **Query** | The beginning of the text; select it for the whole text, the query ID, and the current database. |
+| **Read** | The rows and bytes read so far, and the percentage of `total_rows_approx` when the server knows it. |
+| **Memory** | The memory the query uses now (`memory_usage`). |
+
+**Search** filters by user, query text, or query ID, and **Only my queries** shows the queries of the signed-in user.
+At most 500 queries are shown.
+
+## Stopping a query {#stopping-a-query}
+
+**Stop** opens a review of the statement, as for every change in the console:
+
+```sql
+KILL QUERY WHERE query_id = '<query ID>' ASYNC
+```
+
+Select **Stop query** to run it. The server cancels the query at its next check, usually within a second; a query that
+already finished is not affected. The console records the action as `kill_query` in the
+[audit log](/products/web-console/guides/audit-activity), with the user, the running time, and the beginning of the
+query text.
+
+The statement runs on the server the console is connected to. Each server of a cluster has its own list: to stop a
+distributed query, stop its initial query, and the server cancels its parts on the other servers.
+
+## Limitations {#limitations}
+
+- The page shows one server. For the queries of a whole cluster, query
+  `clusterAllReplicas('<cluster>', system.processes)` in the SQL Console.
+- `KILL QUERY` cannot stop every query at once: some operations check for cancellation only between steps.
+  [`system.processes`](/reference/system-tables/processes) shows `is_cancelled` for a query that is being stopped.
