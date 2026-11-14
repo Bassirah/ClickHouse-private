@@ -879,7 +879,7 @@ const COMPONENTS = [
      description: 'Write and run queries with tabs, history, and saved queries.'},
     {id: 'import', category: 'workspace', kind: 'admin', title: 'Import data', icon: 'upload', page: 'import',
      admin_needs: ['read_tables'],
-     description: 'Load a CSV, TSV, or JSON file into a new or an existing table, with the columns the server infers.'},
+     description: 'Load a CSV, TSV, JSON, or Parquet file into a new or an existing table, with the columns the server infers.'},
     {id: 'play', category: 'workspace', kind: 'panel', title: 'Play UI', icon: 'play', src: '/play',
      integration: 'native', keep_alive: true,
      description: 'The query page of the server: a result per statement, export in every format, EXPLAIN graphs, server logs and metrics, and notebooks.'},
@@ -7389,22 +7389,25 @@ ADMIN_PAGES.audit = (root, route, page) => {
 
 /// --- Workspace: Import data ---
 
-/// The text formats the page imports, by file extension. The server infers the columns from a sample of the file.
+/// The formats the page imports, and the format of each file extension. The server infers the columns from a sample of
+/// a text file, or from the footer of a Parquet file.
 const IMPORT_FORMATS = [
     ['CSVWithNames', 'CSV with a header row'],
     ['CSV', 'CSV without a header row'],
     ['TSVWithNames', 'TSV with a header row'],
     ['TSV', 'TSV without a header row'],
     ['JSONEachRow', 'JSON, one object per line'],
+    ['Parquet', 'Parquet'],
 ];
-const IMPORT_EXTENSIONS = {csv: 'CSVWithNames', tsv: 'TSVWithNames', tab: 'TSVWithNames', json: 'JSONEachRow', jsonl: 'JSONEachRow', ndjson: 'JSONEachRow'};
+const IMPORT_EXTENSIONS = {csv: 'CSVWithNames', tsv: 'TSVWithNames', tab: 'TSVWithNames', json: 'JSONEachRow', jsonl: 'JSONEachRow', ndjson: 'JSONEachRow',
+    parquet: 'Parquet'};
 
 /// The size of the sample of the file that the server infers the columns from. It goes into the query text as a string
 /// literal, which `max_query_size` (256 KiB by default) limits, with room for escaping.
 const IMPORT_SAMPLE_BYTES = 64 * 1024;
 
 /// The beginning of a file as text, cut after its last complete line, and whether that is the whole file.
-async function importSample(file) {
+async function importTextSample(file) {
     const whole = file.size <= IMPORT_SAMPLE_BYTES;
     let text = await file.slice(0, IMPORT_SAMPLE_BYTES).text();
     if (!whole) {
@@ -7415,11 +7418,48 @@ async function importSample(file) {
     return {text, whole};
 }
 
+/// The schema of a Parquet file without its data: the magic number `PAR1` followed by the footer of the file (its
+/// metadata, the length of the metadata, and `PAR1` again). A reader of the schema reads the footer only, so the server
+/// infers the columns from this, whatever the size of the file. Base64, to go into the query text.
+async function importParquetFooter(file) {
+    const invalid = 'The file is not a Parquet file: it does not end with the Parquet footer (PAR1).';
+    if (file.size < 12) throw new Error(invalid);
+    const tail = new DataView(await file.slice(file.size - 8).arrayBuffer());
+    if (tail.getUint32(4, false) !== 0x50415231) throw new Error(invalid);
+    const length = tail.getUint32(0, true);
+    if (length + 12 > file.size) throw new Error(invalid);
+    const footer = new Uint8Array(await new Blob([new TextEncoder().encode('PAR1'), file.slice(file.size - 8 - length)]).arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < footer.length; i += 0x8000) binary += String.fromCharCode(...footer.subarray(i, i + 0x8000));
+    return {base64: btoa(binary), bytes: footer.length};
+}
+
+/// What the server infers the columns from: a text sample, or the footer of a Parquet file. `expression` is the data of
+/// the `format` table function, as SQL.
+async function importSample(file, format) {
+    if (format === 'Parquet') {
+        const footer = await importParquetFooter(file);
+        return {kind: 'parquet', expression: `base64Decode('${footer.base64}')`, bytes: footer.bytes};
+    }
+    const sample = await importTextSample(file);
+    return {kind: 'text', expression: quoteString(sample.text), text: sample.text, whole: sample.whole};
+}
+
+/// Runs a query that contains a sample, and raises `max_query_size` (256 KiB by default) for a large one, such as the
+/// footer of a Parquet file with many row groups.
+async function importRows(sql) {
+    const settings = sql.length > 200000 ? {max_query_size: String(sql.length + 65536)} : {};
+    const result = await runQuery(session, `${sql}\nFORMAT JSON`, session.controller.signal, 30000, {settings});
+    if (result.kind === 'aborted') throw new AdminSessionChanged();
+    if (!result.ok) throw new AdminQueryError(result);
+    return result.data;
+}
+
 /// The columns the server infers from the sample (`DESCRIBE TABLE format(...)`). `nullable` keeps the inferred
 /// `Nullable` types; without it, a missing value becomes the default of the type.
 async function inferImportColumns(format, sample, nullable) {
-    const rows = await adminRows(`DESCRIBE TABLE format(${format}, ${quoteString(sample)})
-        SETTINGS schema_inference_make_columns_nullable = ${nullable ? 1 : 0}`, {});
+    const rows = await importRows(`DESCRIBE TABLE format(${format}, ${sample.expression})
+        SETTINGS schema_inference_make_columns_nullable = ${nullable ? 1 : 0}`);
     return rows.map(row => ({name: row.name, type: row.type}));
 }
 
@@ -7463,7 +7503,7 @@ function uploadInsert(current, sql, file, settings, report) {
 ADMIN_PAGES.import = (root, route, page) => {
     const c = page.component;
     const state = {file: null, sample: null, columns: [], databases: [], tables: []};
-    const file_input = h('input', {type: 'file', accept: '.csv,.tsv,.tab,.json,.jsonl,.ndjson,.txt,text/csv,text/tab-separated-values,application/json'});
+    const file_input = h('input', {type: 'file', accept: '.csv,.tsv,.tab,.json,.jsonl,.ndjson,.txt,.parquet,text/csv,text/tab-separated-values,application/json'});
     const format = select(IMPORT_FORMATS, 'CSVWithNames');
     const nullable = checkbox('Allow missing values (Nullable columns)', false);
     const sample_info = h('p', {className: 'note'});
@@ -7479,6 +7519,7 @@ ADMIN_PAGES.import = (root, route, page) => {
 
     const columnsTable = () => dataTable([
         {title: 'Column', render: column => h('input', {type: 'text', value: column.name, spellcheck: false, 'aria-label': 'Column name',
+            readOnly: state.sample.kind === 'parquet',
             oninput: e => { column.name = e.target.value; renderOrderBy(); }})},
         {title: 'Type', render: column => h('input', {type: 'text', value: column.type, spellcheck: false, 'aria-label': `Type of ${column.name}`,
             oninput: e => { column.type = e.target.value; }})},
@@ -7493,9 +7534,23 @@ ADMIN_PAGES.import = (root, route, page) => {
     const showPreview = async () => {
         if (!state.sample || !state.columns.length) return;
         preview_box.replaceChildren(loadingBox('Reading the first rows…'));
+        if (state.sample.kind === 'parquet') {
+            /// Only the footer was sent: the rows themselves are read during the import.
+            try {
+                const [meta] = await importRows(`SELECT num_rows, num_row_groups FROM format(ParquetMetadata, ${state.sample.expression})`);
+                if (!isCurrent(page)) return;
+                preview_box.replaceChildren(h('p', {className: 'note'}, `${Number(meta.num_rows).toLocaleString('en-US')} rows in `
+                    + `${meta.num_row_groups} row ${Number(meta.num_row_groups) === 1 ? 'group' : 'groups'}. The rows of a Parquet file are not `
+                    + 'previewed: only its footer is sent before the import.'));
+            } catch (e) {
+                if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+                preview_box.replaceChildren(errorBox(e, 'The metadata of the file cannot be read:'));
+            }
+            return;
+        }
         try {
-            const rows = await adminRows(`SELECT * FROM format(${format.value}, ${quoteString(importStructure(state.columns))}, `
-                + `${quoteString(state.sample.text)}) LIMIT 10`, {});
+            const rows = await importRows(`SELECT * FROM format(${format.value}, ${quoteString(importStructure(state.columns))}, `
+                + `${state.sample.expression}) LIMIT 10`);
             if (!isCurrent(page)) return;
             preview_box.replaceChildren(h('h3', {}, 'First rows'),
                 dataTable(state.columns.map(column => ({title: column.name, render: row => String(row[column.name] ?? 'NULL')})), rows,
@@ -7512,15 +7567,22 @@ ADMIN_PAGES.import = (root, route, page) => {
         columns_box.replaceChildren(loadingBox('Inferring the columns…'));
         preview_box.replaceChildren();
         try {
-            state.sample = state.sample || await importSample(state.file);
-            state.columns = await inferImportColumns(format.value, state.sample.text, nullable.input.checked);
+            /// A sample is read for the kind of the format: the footer of a Parquet file, or the beginning of a text file.
+            const kind = format.value === 'Parquet' ? 'parquet' : 'text';
+            if (!state.sample || state.sample.kind !== kind) state.sample = await importSample(state.file, format.value);
+            state.columns = await inferImportColumns(format.value, state.sample, nullable.input.checked);
             if (!isCurrent(page)) return;
             sample_info.textContent = `${state.file.name}, ${formatBytes(state.file.size)}. The columns are inferred from `
-                + (state.sample.whole ? 'the whole file.' : `its first ${formatBytes(new Blob([state.sample.text]).size)}; `
-                    + 'a value further down that does not fit its column fails the import.');
+                + (state.sample.kind === 'parquet' ? `the schema in the footer of the file (${formatBytes(state.sample.bytes)}).`
+                    : state.sample.whole ? 'the whole file.' : `its first ${formatBytes(new Blob([state.sample.text]).size)}; `
+                        + 'a value further down that does not fit its column fails the import.');
+            /// The columns of a Parquet file are matched by name, so a renamed column would get no data.
+            const parquet = state.sample.kind === 'parquet';
             columns_box.replaceChildren(h('h3', {}, 'Columns'),
-                h('p', {className: 'note'}, 'Rename a column or change its type before the import; Preview reads the sample again with them.'),
-                columnsTable(), h('div', {className: 'actions-row'}, button('Preview', showPreview)));
+                h('p', {className: 'note'}, parquet
+                    ? 'Change a type before the import if needed; the names are those of the file, which the import matches by name.'
+                    : 'Rename a column or change its type before the import; Preview reads the sample again with them.'),
+                columnsTable(), parquet ? null : h('div', {className: 'actions-row'}, button('Preview', showPreview)));
             renderOrderBy();
             showPreview();
         } catch (e) {
@@ -7546,7 +7608,7 @@ ADMIN_PAGES.import = (root, route, page) => {
     const renderTarget = () => {
         const fields = mode.value === 'new'
             ? [adminField('Table name', table_name), adminField('Sorting key', order_by, 'ORDER BY of the new MergeTree table.')]
-            : [adminField('Table', existing, format.value.endsWith('WithNames') || format.value === 'JSONEachRow'
+            : [adminField('Table', existing, format.value.endsWith('WithNames') || format.value === 'JSONEachRow' || format.value === 'Parquet'
                 ? 'Columns are matched by name; columns of the table missing from the file get their defaults.'
                 : 'Without a header row, the columns of the file must be in the order of the table.')];
         target_box.replaceChildren(h('div', {className: 'toolbar'}, adminField('Load into', mode), adminField('Database', database), ...fields));
@@ -7602,7 +7664,7 @@ ADMIN_PAGES.import = (root, route, page) => {
     put(root, pageHeader(c, 'Import data'),
         h('p', {className: 'note'}, `Load a file from this computer into a table of ${session.hostname}. The server infers the columns `
             + 'from the beginning of the file; review them, then the console creates the table if needed and sends the file as the data of '
-            + 'an INSERT statement, with your privileges. Text formats only: CSV, TSV, and JSON with one object per line.'),
+            + 'an INSERT statement, with your privileges. Formats: CSV, TSV, JSON with one object per line, and Parquet.'),
         h('div', {className: 'box'}, h('div', {className: 'toolbar'}, adminField('File', file_input), adminField('Format', format), nullable.element),
             sample_info, columns_box, preview_box),
         h('div', {className: 'box'}, h('h2', {}, 'Destination'), target_box, message,
