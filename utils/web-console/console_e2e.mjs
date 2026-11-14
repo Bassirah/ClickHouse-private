@@ -471,6 +471,128 @@ await test('Import data: a CSV file into a new table, and a JSON file into an ex
     await context.close();
 });
 
+await test('Import data: a Parquet file, with the columns from its footer', async () => {
+    const suffix = Date.now();
+    await adminQuery(`CREATE DATABASE IF NOT EXISTS e2e_import`);
+    /// A Parquet file of 100,000 rows made by the server, with a NULL in every third row of a column.
+    const response = await fetch(`${BASE}/`, {method: 'POST', headers: {'X-ClickHouse-User': ADMIN_USER, 'X-ClickHouse-Key': ADMIN_PASSWORD},
+        body: `SELECT number AS id, toString(number) || ' ü' AS name, number * 1.5 AS score, if(number % 3 = 0, NULL, number) AS maybe
+               FROM numbers(100000) FORMAT Parquet`});
+    check(response.ok, `the Parquet file was not made: ${response.status}`);
+    const parquet = Buffer.from(await response.arrayBuffer());
+
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="import"]');
+    await page.waitForSelector('#admin-view input[type="file"]');
+    await waitUntil(page, () => [...document.querySelectorAll('#admin-view select option')].some(o => o.value === 'e2e_import'));
+
+    /// Not a Parquet file.
+    await page.setInputFiles('#admin-view input[type="file"]', {name: 'fake.parquet', mimeType: 'application/octet-stream', buffer: Buffer.from('id,name\n1,x\n')});
+    await waitUntil(page, () => [...document.querySelectorAll('#admin-view .message.error')].some(m => m.textContent.includes('not a Parquet file')));
+
+    await page.setInputFiles('#admin-view input[type="file"]', {name: 'numbers.parquet', mimeType: 'application/vnd.apache.parquet', buffer: parquet});
+    await waitUntil(page, () => document.querySelector('#admin-view input[aria-label="Type of maybe"]'));
+    check(await page.inputValue('#admin-view select >> nth=0') === 'Parquet', 'the format is not chosen from the extension');
+    const types = await page.evaluate(() => [...document.querySelectorAll('#admin-view input[aria-label^="Type of"]')].map(i => i.value));
+    check(JSON.stringify(types) === JSON.stringify(['UInt64', 'String', 'Float64', 'UInt64']), `inferred types: ${types}`);
+    check(await page.evaluate(() => document.querySelector('#admin-view input[aria-label="Column name"]').readOnly), 'Parquet column names are editable');
+    await waitUntil(page, () => document.getElementById('admin-view').textContent.includes('100,000 rows in 1 row group'));
+
+    /// With missing values allowed, the column with NULLs is Nullable.
+    await page.check('#admin-view label.check input');
+    await waitUntil(page, () => {
+        const input = document.querySelector('#admin-view input[aria-label="Type of maybe"]');
+        return input && input.value === 'Nullable(UInt64)';
+    });
+
+    await page.fill('#admin-view input[placeholder="table name"]', `parquet_${suffix}`);
+    await page.selectOption('#admin-view select >> nth=2', 'e2e_import');
+    await page.click('#admin-view button:text("Review import")');
+    await page.waitForSelector('#admin-dialog[open]');
+    check((await page.textContent('#admin-dialog')).includes('FORMAT Parquet'), 'review');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await page.waitForSelector('#admin-dialog .message.info', {timeout: 60000});
+    const imported = await adminQuery(`SELECT count(), sum(score), countIf(maybe IS NULL) FROM e2e_import.parquet_${suffix} FORMAT CSV`);
+    check(imported === '100000,7499925000,33334', `imported rows: ${imported}`);
+    check(await adminQuery(`SELECT name FROM e2e_import.parquet_${suffix} WHERE id = 7`) === '7 ü', 'imported text');
+    await context.close();
+});
+
+await test('Play UI: asks before statements that change or delete data, and read-only mode makes the server refuse them', async () => {
+    const table = `e2e_import.confirm_${Date.now()}`;
+    await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_import');
+    const {context, page, log} = await newContext();
+    /// Waits until the Play UI sent `sql`, with `readonly=2` in its URL or without; returns the request.
+    const sent = async (sql, readonly) => {
+        const deadline = Date.now() + 15000;
+        for (;;) {
+            const request = log.requests.find(r => r.post_data === sql && r.url && r.url.includes('readonly=2') === readonly);
+            if (request) return request;
+            if (Date.now() > deadline) throw new Error(`not sent${readonly ? ' read-only' : ''}: ${sql}`);
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    };
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="play"]');
+    await page.waitForSelector('.frame-host[data-component="play"] iframe');
+    await waitUntil(page, () => {
+        const doc = document.querySelector('.frame-host[data-component="play"] iframe').contentDocument;
+        return doc && doc.getElementById('readonly-mode');
+    });
+    const play = frameOf(page, '/play');
+    const exists = async () => (await adminQuery(`EXISTS TABLE ${table}`)) === '1';
+    const dialogOpen = () => play.evaluate(() => document.getElementById('confirm-run-dialog').open);
+    const results = () => play.evaluate(() => [...document.querySelectorAll('query-result')].map(r => (r.shadowRoot || r).textContent).join('\n'));
+
+    /// Creating a table and reading are not asked about.
+    await runInPlay(play, `CREATE TABLE ${table} (x UInt8, y UInt8) ENGINE = MergeTree ORDER BY x`);
+    await waitUntil(play, () => document.getElementById('run').textContent.trim() !== 'Stop');
+    await (async () => { for (let i = 0; i < 100 && !(await exists()); ++i) await new Promise(r => setTimeout(r, 100)); })();
+    check(await exists(), 'CREATE TABLE did not run');
+    check(!(await dialogOpen()), 'asked before CREATE TABLE');
+    await runInPlay(play, `ALTER TABLE ${table} ADD COLUMN z UInt8`);
+    await sent(`ALTER TABLE ${table} ADD COLUMN z UInt8`, false);
+    check(!(await dialogOpen()), 'asked before ALTER ... ADD COLUMN');
+
+    /// DROP is asked about: Cancel keeps the table, Run drops it.
+    await runInPlay(play, `DROP TABLE ${table}`);
+    await waitUntil(play, () => document.getElementById('confirm-run-dialog').open);
+    check((await play.textContent('#confirm-run-statements')).includes(`DROP TABLE ${table}`), 'the statement is not shown');
+    check(await play.evaluate(() => document.activeElement.id) === 'confirm-run-cancel', 'Cancel does not have the focus');
+    await screenshot(page, '09-play-confirm');
+    await play.click('#confirm-run-cancel');
+    check(await exists(), 'Cancel dropped the table');
+    await runInPlay(play, `ALTER TABLE ${table} DELETE WHERE x = 1`);
+    await waitUntil(play, () => document.getElementById('confirm-run-dialog').open);
+    await play.press('#confirm-run-dialog', 'Escape');
+    check(!(await dialogOpen()), 'Escape did not close the question');
+
+    /// Read-only mode: the server refuses the statement, and nothing is asked.
+    await play.check('#readonly-mode');
+    await runInPlay(play, `INSERT INTO ${table} (x, y) VALUES (1, 1)`);
+    await sent(`INSERT INTO ${table} (x, y) VALUES (1, 1)`, true);
+    await waitUntil(play, () => [...document.querySelectorAll('query-result')].some(r => /readonly/i.test((r.shadowRoot || r).textContent)));
+    check(await adminQuery(`SELECT count() FROM ${table}`) === '0', 'read-only mode inserted a row');
+    await runInPlay(play, `DROP TABLE ${table}`);
+    await sent(`DROP TABLE ${table}`, true);
+    check(!(await dialogOpen()), 'asked in read-only mode');
+    check(await exists(), 'read-only mode dropped the table');
+    await play.uncheck('#readonly-mode');
+
+    await runInPlay(play, `DROP TABLE ${table}`);
+    await waitUntil(play, () => document.getElementById('confirm-run-dialog').open);
+    await play.click('#confirm-run-ok');
+    await (async () => { for (let i = 0; i < 100 && (await exists()); ++i) await new Promise(r => setTimeout(r, 100)); })();
+    check(!(await exists()), 'Run did not drop the table');
+    check(!(await results()).includes('Exception'), 'the DROP failed');
+    await context.close();
+});
+
 /// The text of every result of the Play UI (their shadow roots included).
 async function playResultText(play) {
     return play.evaluate(() => [...document.querySelectorAll('query-result')].map(r => (r.shadowRoot || r).textContent).join('\n'));
