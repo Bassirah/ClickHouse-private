@@ -35,7 +35,7 @@ While you are signed in, the console refreshes the access token before it expire
 
 ### Signing out and switching connection {#signing-out-and-switching-connection}
 
-**Sign out** in the header, and **Switch connection** (in the header and on the home page) to sign in as another user, close every panel. This ends their queries, timers, and terminal sessions. They also discard the password, and the ClickHouse connection that ClickStack stored for the current browser tab. After signing out, the browser's Back button does not restore the signed-in state.
+**Sign out** in the header, and **Switch connection** (in the header and on the home page) to sign in as another user, close every panel. This ends their queries, timers, and terminal sessions. They also discard the password, the ClickHouse connection that ClickStack stored for the current browser tab, and the query results that the SQL Console stored in the browser (see [Data in the browser's storage](#data-in-the-browsers-storage)). After signing out, the browser's Back button does not restore the signed-in state.
 
 With single sign-on, **Sign out** also ends the session with the provider and returns to the sign-in page. **Switch connection** then works like **Sign out**, because another user needs a new session with the provider.
 
@@ -147,9 +147,25 @@ The console handles credentials as follows:
 
 The administration pages follow the same model: each change is a SQL statement that the server authorizes with your privileges (see [Users and roles](/products/web-console/guides/users-and-roles#identity-and-authorization-model)). The console access policy only lists or hides components; see [Component Access](/products/web-console/guides/component-access).
 
-### Data in the browser's local storage {#data-in-the-browsers-local-storage}
+### Data in the browser's storage {#data-in-the-browsers-storage}
 
-The SQL Console keeps its saved queries, query history, and open tabs in the browser's local storage, per server URL and user, also when it is used inside the console. Signing out of the console does not delete them. Use a browser profile of your own on a shared computer.
+The SQL Console keeps data in the browser, per server URL and user, also when it is used inside the console:
+
+| Data | Where | Protection |
+|---|---|---|
+| The rows of query results | IndexedDB, database `rowData` | None: stored in clear text. |
+| The text and statistics of recent queries, and a copy of the open tabs | Session storage of the browser tab | The queries in clear text; the tabs encrypted, as below. |
+| The open tabs, the query history, and the saved queries | Local storage | Encrypted with a key derived from the server URL and the user name only. Anyone who can use the browser profile can decrypt them. |
+| The selections of the schema browser, and the theme | Local storage | None. |
+
+The SQL Console never stores the password. Its encryption does not protect the data from another person who uses the
+same browser profile, so use a browser profile of your own on a shared computer.
+
+**Sign out**, **Switch connection**, and the end of a single sign-on session delete the result rows and the SQL
+Console's data in the session storage of the tab. They keep the tabs, the history, and the saved queries, unless the
+server sets [`sql_console_clear_on_sign_out`](/products/web-console/reference/configuration#sql-console-clear-on-sign-out)
+to `all`. If the deletion fails, the sign-in page says so. Closing or reloading the page signs you out without
+deleting anything: sign out first.
 
 The console itself stores only two preferences in local storage: the theme (light or dark, shared with the other web UIs of the server) and whether the sidebar is collapsed.
 
@@ -161,4 +177,6 @@ The console itself stores only two preferences in local storage: the theme (ligh
 - A theme change applies to panels opened after it. Panels that are already open keep their theme until they are reloaded.
 - The Merges visualizer does not display query errors, including permission errors.
 - With single sign-on, the SQL Console, the Web Terminal, and ClickStack keep the access token they started with: reload them after it expires.
+- The SQL Console runs `DROP`, `TRUNCATE`, and `DELETE` without asking for confirmation. Protect the data on the server instead: see [Prevent and undo accidental drops](/products/web-console/how-to/prevent-and-undo-accidental-drops).
+- The SQL Console has a dark theme only, whatever the theme of the console.
 - The SQL Console has no embedding interface: the console fills in its connection form and submits it. If that does not succeed, the console shows a notice above the panel, and you can sign in with the form of the SQL Console.

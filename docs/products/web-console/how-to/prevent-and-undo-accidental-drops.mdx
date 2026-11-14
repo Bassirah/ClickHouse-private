@@ -1,0 +1,104 @@
+---
+description: 'Protect data from statements run by mistake in the SQL Console, which runs DROP and TRUNCATE without asking: give people only the privileges they need, limit the size of what can be dropped, and undo a DROP TABLE with UNDROP.'
+sidebarTitle: 'Prevent and undo accidental drops'
+slug: /web-console/how-to/prevent-and-undo-accidental-drops
+title: 'Prevent and undo accidental drops'
+doc_type: 'guide'
+---
+
+The SQL Console runs every statement as soon as you select **Run**, including `DROP`, `TRUNCATE`, `DELETE`, and
+`ALTER TABLE ... DELETE`: it does not ask for confirmation. The protection is on the server. This guide limits who can
+drop data and how much, and shows how to undo a `DROP TABLE`.
+
+## Prerequisites {#prerequisites}
+
+- An account that can create roles and settings profiles, and grant them (see [Users and roles](/products/web-console/guides/users-and-roles)).
+- Backups of the databases that matter, for what `UNDROP` cannot undo (see [Backup & Restore](/products/web-console/guides/backup-and-restore)).
+
+## Give people only the privileges they need {#give-people-only-the-privileges-they-need}
+
+The best protection is an account that cannot drop anything. On **Administration** → **Roles & Permissions**, create the
+roles from the [role templates](/products/web-console/guides/users-and-roles#role-templates):
+
+| Template | Can drop or delete data |
+|---|---|
+| **Analyst** | No: `SHOW TABLES, SHOW COLUMNS, SELECT` only. |
+| **Developer** | Yes: `DROP TABLE`, `DROP VIEW`, `TRUNCATE`, and `ALTER TABLE` on the chosen databases. |
+| **Database Administrator** | Yes, on the chosen databases. |
+
+Give people who explore data the **Analyst** role, and the others the **Developer** or **Database Administrator** role
+on the databases they work on only.
+
+For an account that must not change anything at all, set `readonly = 2` in its settings profile: the server then
+refuses every statement that writes data or changes the schema, and still lets the SQL Console set the settings of its
+queries. The SQL Console does not work with `readonly = 1`, which also refuses those settings.
+
+```sql
+CREATE SETTINGS PROFILE read_only SETTINGS readonly = 2 CONST TO analyst;
+```
+
+## Limit the size of a table that can be dropped {#limit-the-size-of-a-table-that-can-be-dropped}
+
+The server refuses to drop or truncate a `MergeTree` table larger than `max_table_size_to_drop`, and to drop a partition
+larger than `max_partition_size_to_drop`. Both default to 50 GB (`50000000000` bytes), and `0` removes the limit.
+
+A user can raise the limit for one query (`DROP TABLE t SETTINGS max_table_size_to_drop = 0`), unless a settings profile
+fixes it. Fix it for the roles that can drop tables, with a limit that suits your data, for example 1 GB:
+
+```sql
+CREATE SETTINGS PROFILE drop_guard
+    SETTINGS max_table_size_to_drop = 1000000000 CONST, max_partition_size_to_drop = 1000000000 CONST
+    TO developer, dba;
+```
+
+A larger table can then be dropped only by an account without this profile, or with the server's flag file
+`<path>/flags/force_drop_table` (see [`max_table_size_to_drop`](/reference/settings/server-settings/settings/max-table#max_table_size_to_drop)).
+
+## Undo a `DROP TABLE` {#undo-a-drop-table}
+
+A table dropped from an `Atomic` database (the default engine of databases) is kept for
+`database_atomic_delay_before_drop_table_sec`, 8 minutes by default, and can be restored with `UNDROP TABLE` during that
+time. Act at once:
+
+1. Find the table:
+
+   ```sql
+   SELECT database, table, uuid, table_dropped_time FROM system.dropped_tables;
+   ```
+
+2. Restore it. If the same name was dropped more than once, add the `UUID` from the query above:
+
+   ```sql
+   UNDROP TABLE shop.orders;
+   ```
+
+   The account needs the `UNDROP TABLE` privilege on the table. If a materialized view without a `TO` clause stored its
+   data in the dropped table, also restore the view's inner table.
+
+`UNDROP` cannot undo:
+
+| Statement | Recovery |
+|---|---|
+| `DROP TABLE ... SYNC`, or a drop older than `database_atomic_delay_before_drop_table_sec` | Restore the table from a backup. |
+| `DROP DATABASE` | Restore the database from a backup. Its tables are listed in `system.dropped_tables`, but cannot be restored with `UNDROP`. |
+| `TRUNCATE`, `DELETE`, `ALTER TABLE ... DELETE`, `ALTER TABLE ... DROP PARTITION` | Restore the table or the partitions from a backup. |
+
+To restore from a backup, see [Restores](/products/web-console/guides/backup-and-restore#restores). To keep dropped
+tables longer, raise `database_atomic_delay_before_drop_table_sec` in the server configuration; their data stays on disk
+for that time.
+
+## Verify {#verify}
+
+Sign in to the console as a user with the **Analyst** role and run `DROP TABLE` on a table of a test database in the SQL
+Console: the server refuses it with `ACCESS_DENIED`. As a user with the `drop_guard` profile, run
+`DROP TABLE <a table larger than the limit> SETTINGS max_table_size_to_drop = 0`: the server refuses to change the
+setting.
+
+## Troubleshooting {#troubleshooting}
+
+| Message | Cause and fix |
+|---|---|
+| `Table ... is being dropped, has been dropped, or the database engine does not support UNDROP` | The table was dropped with `SYNC`, more than `database_atomic_delay_before_drop_table_sec` ago, or from a database that is not `Atomic`. Restore it from a backup. |
+| `TABLE_SIZE_EXCEEDS_MAX_DROP_SIZE_LIMIT` | The table is larger than `max_table_size_to_drop`. If dropping it is intended, ask an administrator without the `drop_guard` profile. |
+| `Setting max_table_size_to_drop should not be changed` | The `drop_guard` profile fixes the limit, as intended. |
+| `Cannot modify 'max_execution_time' setting in readonly mode` in the SQL Console | The account has `readonly = 1`. Use `readonly = 2`. |

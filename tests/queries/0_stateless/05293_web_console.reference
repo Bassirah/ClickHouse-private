@@ -26,6 +26,7 @@ clickstack_url /clickstack/
 cloud_url https://clickhouse.cloud/
 documentation_url https://clickhouse.com/docs/
 source_code_url https://github.com/ClickHouse/ClickHouse/
+sql_console_clear_on_sign_out results
 sso_client_id (empty)
 sso_issuer (empty)
 sso_name Keycloak
