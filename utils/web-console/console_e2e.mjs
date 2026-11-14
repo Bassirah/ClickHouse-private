@@ -196,7 +196,7 @@ await test('Home cards and sidebar list every component and resolve to the same 
     const expected = {
         Home: ['Home'],
         Workspace: ['SQL Console', 'Dashboard', 'ClickStack', 'Web Terminal'],
-        Diagnostics: ['Binary visualizer', 'Merges visualizer', 'Schema visualizer', 'Jemalloc', 'Processors profile'],
+        Diagnostics: ['Binary visualizer', 'Merges visualizer', 'Schema visualizer', 'Jemalloc', 'Processors profile', 'Running queries'],
         Resources: ['Console Guide', 'Source code', 'Documentation', 'Reference', 'Website', 'Cloud'],
     };
     const sidebar = await page.evaluate(() => [...document.querySelectorAll('#sidebar h2')].map(h => ({
@@ -341,6 +341,65 @@ await test('SQL Console: a failed automatic sign-in is reported and leaves its f
     const sql = frameOf(page, '/ui');
     check(await sql.inputValue('[data-testid="standalone-password-input"]') === '', 'password left in the SQL Console form');
     await screenshot(page, '05b-sql-console-failed');
+    await context.close();
+});
+
+await test('SQL Console: an unreachable cluster is reported as a limitation, and the panel still opens', async () => {
+    const {context, page} = await newContext();
+    /// Answer the console's check as a server whose cluster `default` has a shard that does not answer.
+    await context.route(url => url.origin === ORIGIN && url.pathname === '/', route => {
+        const request = route.request();
+        if (request.method() === 'POST' && request.frame() === page.mainFrame() && (request.postData() || '').includes('clusterAllReplicas')) {
+            return route.fulfill({status: 500, headers: {'X-ClickHouse-Exception-Code': '519'},
+                body: 'Code: 519. DB::NetException: All attempts to get table structure failed. (NO_REMOTE_SHARD_AVAILABLE)'});
+        }
+        return route.continue();
+    });
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await waitUntil(page, () => [...document.querySelectorAll('#home-view .badge')].some(b => b.textContent === 'Limited'));
+    const card = await page.evaluate(() => [...document.querySelectorAll('#home-view .badge')].find(b => b.textContent === 'Limited')
+        .closest('li, .card').textContent);
+    check(card.includes('SQL Console') && card.includes('through the cluster default'), `card: ${card}`);
+
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
+    await waitForSQLConsole(page);
+    await page.waitForSelector('#panel-notice:not([hidden])');
+    const notice = await page.textContent('#panel-notice');
+    check(notice.includes('through the cluster default') && notice.includes('NO_REMOTE_SHARD_AVAILABLE') && notice.includes('Queries still run'),
+        `notice: ${notice}`);
+    await screenshot(page, '05c-sql-console-cluster-warning');
+    await context.close();
+});
+
+await test('Running queries: lists a running query and stops it with KILL QUERY', async () => {
+    /// A query of about a minute, started outside of the browser.
+    const query_id = `e2e-running-${Date.now()}`;
+    const running = fetch(`${BASE}/?query_id=${query_id}&max_block_size=1`, {method: 'POST',
+        headers: {'X-ClickHouse-User': ADMIN_USER, 'X-ClickHouse-Key': ADMIN_PASSWORD},
+        body: 'SELECT sleepEachRow(1) FROM numbers(60) FORMAT Null'}).then(async response => ({status: response.status, text: await response.text()}));
+
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="running-queries"]');
+    await page.waitForURL(`${BASE}/console/running-queries`);
+    await waitUntil(page, id => [...document.querySelectorAll('#admin-view details')].some(d => d.dataset.queryId === id), query_id);
+    const row = page.locator('#admin-view tr', {has: page.locator(`details[data-query-id="${query_id}"]`)});
+    check((await row.textContent()).includes('sleepEachRow'), 'the query text is not shown');
+    await screenshot(page, '06-running-queries');
+
+    await row.getByRole('button', {name: 'Stop'}).click();
+    await page.waitForSelector('#admin-dialog[open]');
+    const review = await page.textContent('#admin-dialog');
+    check(review.includes(`KILL QUERY WHERE query_id = '${query_id}' ASYNC`), `review: ${review}`);
+    await page.click('#admin-dialog button.danger');
+    const result = await running;
+    check(result.text.includes('QUERY_WAS_CANCELLED'), `the query was not cancelled: ${result.status} ${result.text.slice(0, 300)}`);
+    await page.click('#admin-dialog .dialog-actions button');
+    await waitUntil(page, id => ![...document.querySelectorAll('#admin-view details')].some(d => d.dataset.queryId === id), query_id);
     await context.close();
 });
 

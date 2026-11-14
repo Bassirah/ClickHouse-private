@@ -74,5 +74,17 @@ def test_console_handler_type():
         assert response.headers["Cache-Control"] == "no-store"
 
     assert custom_handler.http_request("console/config.json").json() == DEFAULTS
+
+    # The `sql_console` handler: a configured header replaces its default, the other defaults stay, and every file
+    # keeps its own type.
+    page = custom_handler.http_request("ui/")
+    script = custom_handler.http_request("ui/env.js")
+    for response in [page, script]:
+        assert response.status_code == 200
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert "frame-ancestors 'self'" in response.headers["Content-Security-Policy"]
+    assert page.headers["Content-Type"].startswith("text/html")
+    assert "javascript" in script.headers["Content-Type"]
     # `<defaults/>` keeps the other web UIs.
     assert custom_handler.http_request("dashboard").status_code == 200

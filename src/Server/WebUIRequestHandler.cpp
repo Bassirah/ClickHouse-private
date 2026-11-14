@@ -521,9 +521,25 @@ void SQLConsoleUIRequestHandler::handleRequest(HTTPServerRequest & request, HTTP
 {
     std::string resource_path = getResourcePath(request.getURI());
 
+    /// Each file is sent with its own type, so a `Content-Type` of the handler configuration (or its default) does not
+    /// apply. The other headers are defaults that the configuration can override, as for the console. The SQL Console
+    /// is embedded in the console, so frames of the same origin are allowed. The policy allows what the application
+    /// needs: the inline script of its page, the compilation of WebAssembly (`'wasm-unsafe-eval'`, which does not allow
+    /// `eval`), the Monaco worker from `/ui/monacoeditorwork/` (or from a `blob:` URL), inline styles, and requests to
+    /// the ClickHouse HTTP URL entered on its sign-in form, which can be another server.
+    auto headers = http_response_headers_override;
+    headers.erase(Poco::Net::HTTPMessage::CONTENT_TYPE);
+    headers.try_emplace("X-Content-Type-Options", "nosniff");
+    headers.try_emplace("X-Frame-Options", "SAMEORIGIN");
+    headers.try_emplace("Referrer-Policy", "no-referrer");
+    headers.try_emplace("Content-Security-Policy",
+        "default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
+        "font-src 'self' data:; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' http: https:; "
+        "manifest-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; object-src 'none'");
+
     if (const auto * resource = findEmbeddedResource(SQLConsole::embedded_resources, resource_path))
     {
-        handleCompressedEmbeddedResource(request, response, *resource, http_response_headers_override);
+        handleCompressedEmbeddedResource(request, response, *resource, headers);
         return;
     }
 
@@ -531,7 +547,7 @@ void SQLConsoleUIRequestHandler::handleRequest(HTTPServerRequest & request, HTTP
     {
         if (const auto * resource = findEmbeddedResource(SQLConsole::embedded_resources, "index.html"))
         {
-            handleCompressedEmbeddedResource(request, response, *resource, http_response_headers_override);
+            handleCompressedEmbeddedResource(request, response, *resource, headers);
             return;
         }
     }

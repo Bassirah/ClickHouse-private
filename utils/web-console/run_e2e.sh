@@ -142,6 +142,12 @@ cat > "$SERVER/config.d/e2e.xml" <<EOF
         <path>/clickhouse/task_queue/ddl</path>
     </distributed_ddl>
     <remote_servers>
+        <!-- The stock config.xml points the cluster default at port 9000, where nothing listens here. The SQL Console
+             reads the progress of queries through it, and the console warns when it does not answer. -->
+        <default replace="1">
+            <secret>e2e-interserver-secret</secret>
+            <shard><replica><host>127.0.0.1</host><port>$TCP_PORT</port></replica></shard>
+        </default>
         <console_test>
             <shard><replica><host>127.0.0.1</host><port>$TCP_PORT</port></replica></shard>
             <shard><replica><host>127.0.0.1</host><port>$DEAD_PORT</port></replica></shard>
