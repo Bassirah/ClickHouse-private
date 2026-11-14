@@ -7,8 +7,9 @@ doc_type: 'guide'
 ---
 
 The SQL Console runs every statement as soon as you select **Run**, including `DROP`, `TRUNCATE`, `DELETE`, and
-`ALTER TABLE ... DELETE`: it does not ask for confirmation. The protection is on the server. This guide limits who can
-drop data and how much, and shows how to undo a `DROP TABLE`.
+`ALTER TABLE ... DELETE`: it does not ask for confirmation. The Play UI asks first, and has a read-only mode (see
+[The Play UI](#the-play-ui)), but a mistaken confirmation still runs the statement. The protection is on the server.
+This guide limits who can drop data and how much, and shows how to undo a `DROP TABLE`.
 
 ## Prerequisites {#prerequisites}
 
@@ -86,6 +87,17 @@ time. Act at once:
 To restore from a backup, see [Restores](/products/web-console/guides/backup-and-restore#restores). To keep dropped
 tables longer, raise `database_atomic_delay_before_drop_table_sec` in the server configuration; their data stays on disk
 for that time.
+
+## The Play UI {#the-play-ui}
+
+Before it runs statements that change or delete existing data or objects, the Play UI lists them and asks: `DROP`,
+`TRUNCATE`, `DELETE`, `UPDATE`, `DETACH`, `EXCHANGE`, `REPLACE`, `CREATE OR REPLACE`, `SYSTEM DROP REPLICA`, and `ALTER`
+with `DROP`, `DELETE`, `UPDATE`, `CLEAR`, `REPLACE`, `MOVE`, `DETACH`, or `MODIFY`. **Cancel** has the focus, and Escape
+cancels. A statement it cannot classify is asked about too.
+
+**Read-only**, next to **Run**, runs every query with `readonly = 2`: the server refuses statements that change data or
+the schema, and the Play UI does not ask. The browser remembers the choice. It protects you from your own mistakes, not
+the data from your account: use the roles above for that.
 
 ## Verify {#verify}
 

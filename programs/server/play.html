@@ -1701,6 +1701,37 @@
             color: var(--misc-text-color);
         }
 
+        #readonly-toggle
+        {
+            margin-left: 1rem;
+            white-space: nowrap;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        /* Read-only mode is on: make it visible next to Run. */
+        #readonly-toggle:has(input:checked)
+        {
+            color: var(--text-color);
+            font-weight: bold;
+        }
+
+        /* The confirmation is short: its height follows its content. */
+        .confirm-run-dialog
+        {
+            height: auto;
+            max-height: 85vh;
+        }
+
+        #confirm-run-statements
+        {
+            margin: 0;
+            padding: 0.5rem;
+            overflow: auto;
+            white-space: pre-wrap;
+            border: 1px solid var(--border-color);
+        }
+
         #copy-div
         {
             display: none;
@@ -2511,7 +2542,7 @@
                      whole row is moved out of the form and into the active cell (see `dockEditor`). -->
                 <button type="submit" form="controls" class="shadow" id="run">Run</button>
                 <button type="button" class="shadow" id="run-all">Run all</button>
-                <div id="hint">&nbsp;(<span id="hint-modifier">Ctrl/Cmd</span>+Enter<span id="hint-run-all" style="display: none">, +Shift to run all</span>)</div>
+                <div id="hint">&nbsp;(<span id="hint-modifier">Ctrl/Cmd</span>+Enter<span id="hint-run-all" style="display: none">, +Shift to run all</span>)<label id="readonly-toggle" title="Run every query with readonly = 2: the server refuses statements that change data or the schema."><input type="checkbox" id="readonly-mode" /> Read-only</label></div>
                 <query-progress id="query-progress"></query-progress>
                 <div id="copy-div" class="shadow" title="Copy raw result to clipboard">
                     <svg id="copy-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2582,6 +2613,19 @@
                 <button id="tabs-load-apply" type="button">Load</button>
             </div>
             <input id="tabs-load-file" type="file" accept=".md,.markdown,text/markdown,text/plain" hidden />
+        </dialog>
+        <!-- Asked before running statements that change or delete data (see `confirmDestructive`). Cancel has the focus,
+             and Escape cancels. -->
+        <dialog id="confirm-run-dialog" class="tabs-dialog confirm-run-dialog" aria-labelledby="confirm-run-title">
+            <div class="tabs-dialog-head">
+                <h2 id="confirm-run-title">Run statements that change or delete data?</h2>
+            </div>
+            <p class="tabs-dialog-hint">This page cannot undo them. Check the statements and the server before you run them.</p>
+            <pre id="confirm-run-statements" class="monospace"></pre>
+            <div class="tabs-dialog-buttons">
+                <button id="confirm-run-cancel" type="button" autofocus>Cancel</button>
+                <button id="confirm-run-ok" type="button">Run</button>
+            </div>
         </dialog>
     </div>
 </body>
@@ -8726,6 +8770,13 @@ const url_pagination = sanitizePagination({
 });
 
 let url_elem = document.getElementById('url');
+/// Read-only mode, remembered in this browser (`READONLY_MODE_KEY`).
+let readonly_elem = document.getElementById('readonly-mode');
+const READONLY_MODE_KEY = 'readonly_mode';
+try { readonly_elem.checked = window.localStorage.getItem(READONLY_MODE_KEY) === '1'; } catch (e) { /* storage disabled: off */ }
+readonly_elem.addEventListener('change', () => {
+    try { window.localStorage.setItem(READONLY_MODE_KEY, readonly_elem.checked ? '1' : '0'); } catch (e) { /* storage disabled: this page only */ }
+});
 let user_elem = document.getElementById('user');
 let password_elem = document.getElementById('password');
 let progressEl = document.getElementById('query-progress');
@@ -11720,6 +11771,9 @@ async function postImpl(cell, posted_request_num, query, targetResultEl, abortCo
     /// the request alone does not stop a query that sends nothing back while it runs, such as an `INSERT ... SELECT`.
     const query_id = newQueryId();
     url += '&query_id=' + query_id;
+    /// Read-only mode (`readonly_elem`): the server refuses statements that change data or the schema, and still
+    /// accepts the settings this page sends with each query, which `readonly = 1` would refuse.
+    if (connection.readonly) url += '&readonly=2';
     abortController.running_query = { id: query_id, connection, resultEl: targetResultEl };
     /// We will put the result in the query cache, so it can be used when download is initiated later.
     /// But we don't use cached results, so the results that we get here, are always fresh.
@@ -17738,7 +17792,7 @@ async function postOne()
     /// `postImpl` used to) would let a tab switch + connection edit during it send this run's
     /// snapshotted query to the newly entered server or identity.
     dropAutofilledStalePassword();
-    const connection = { url: url_elem.value, user: user_elem.value, password: password_elem.value };
+    const connection = { url: url_elem.value, user: user_elem.value, password: password_elem.value, readonly: readonly_elem.checked };
     /// Snapshot the selected database at launch too (see the connection above): the panel selection
     /// is shared, so re-reading it after the preflight await would let a mid-await database change
     /// retarget this run. It is threaded through to `postImpl` (the request URL) and the saved
@@ -17809,6 +17863,8 @@ async function postOne()
             /// A whitespace/comment-only selection intersects nothing runnable: the launch is a no-op.
             if (selected.length === 0) return;
 
+            if (!await confirmDestructive(selected.map(q => q.query), connection.readonly)) return;
+            if (my_run !== tab.reqNum) return;
             beginFlight(tab, launch_interaction);
             if (selected.length > 1) {
                 /// The run covered the whole editor only when the selection spanned EVERY
@@ -17823,6 +17879,8 @@ async function postOne()
     }
     if (!launched) {
         const under = await getQueryUnderCursor(editor_text, sel_start);
+        if (my_run !== tab.reqNum) return;
+        if (!await confirmDestructive([under.query], connection.readonly)) return;
         if (my_run !== tab.reqNum) return;
         beginFlight(tab, launch_interaction);
         /// Highlight and focus the chosen query only when this tab is still active: a background
@@ -17859,7 +17917,7 @@ async function postAll()
     /// See `postOne`: the connection context and selected database are snapshotted at launch so a tab
     /// switch + connection/database edit during the preflight await cannot reroute this run.
     dropAutofilledStalePassword();
-    const connection = { url: url_elem.value, user: user_elem.value, password: password_elem.value };
+    const connection = { url: url_elem.value, user: user_elem.value, password: password_elem.value, readonly: readonly_elem.checked };
     const query_database = selected_database;
     ++activation_num;
     const my_run = ++tab.reqNum;
@@ -17885,10 +17943,14 @@ async function postAll()
     if (my_run !== tab.reqNum) return;
 
     if (parsed.length > 1) {
+        if (!await confirmDestructive(parsed.map(q => q.query), connection.readonly)) return;
+        if (my_run !== tab.reqNum) return;
         beginFlight(tab, launch_interaction);
         await postMulti(tab.runCell, my_run, parsed, paramValuesSnapshot, editor_text, connection, /*ranFullEditor=*/ true, query_database);
     } else {
         const under = await getQueryUnderCursor(editor_text, sel_start);
+        if (my_run !== tab.reqNum) return;
+        if (!await confirmDestructive([under.query], connection.readonly)) return;
         if (my_run !== tab.reqNum) return;
         beginFlight(tab, launch_interaction);
         if (tab.id === activeTabId) {
@@ -19301,6 +19363,76 @@ function statementIsReadOnly(tokens)
 {
     const keyword = statementKeyword(tokens);
     return keyword !== null && PARALLELIZABLE_KEYWORDS.has(keyword);
+}
+
+/// Statement kinds that change or delete existing data or objects. `Run` asks before them (`confirmDestructive`).
+const DESTRUCTIVE_KEYWORDS = new Set(['DROP', 'TRUNCATE', 'DELETE', 'UPDATE', 'DETACH', 'EXCHANGE', 'REPLACE']);
+/// The actions of an `ALTER` that delete or rewrite data: `DROP COLUMN`, `DROP PARTITION`, `DELETE`, `UPDATE`,
+/// `CLEAR COLUMN`, `REPLACE PARTITION`, `MOVE PARTITION ... TO TABLE`, `DETACH PARTITION`, `MODIFY COLUMN` / `MODIFY TTL`.
+const DESTRUCTIVE_ALTER_ACTIONS = new Set(['DROP', 'DELETE', 'UPDATE', 'CLEAR', 'REPLACE', 'MOVE', 'DETACH', 'MODIFY']);
+
+/// Whether a statement, given as its significant lexer tokens, changes or deletes existing data or objects. A statement
+/// whose kind cannot be resolved (`PARALLEL WITH`) counts as one, so that it is asked about.
+function statementIsDestructive(tokens)
+{
+    if (!tokens.length) return false;
+    const keyword = statementKeyword(tokens);
+    if (keyword === null) return true;
+    if (DESTRUCTIVE_KEYWORDS.has(keyword)) return true;
+    const words = tokens.filter(t => t.type === TT.BareWord).map(t => t.token.toUpperCase());
+    if (keyword === 'ALTER') return words.some(w => DESTRUCTIVE_ALTER_ACTIONS.has(w));
+    /// `CREATE OR REPLACE TABLE` replaces an existing table.
+    if (keyword === 'CREATE') return words[1] === 'OR' && words[2] === 'REPLACE';
+    /// `SYSTEM DROP REPLICA` removes the metadata of a replica from Keeper.
+    if (keyword === 'SYSTEM') return words[1] === 'DROP' && words.includes('REPLICA');
+    return false;
+}
+
+/// The statements among `queries` that change or delete data. Without the lexer, every statement that does not
+/// begin with a read-only keyword is one: asking too often is better than not asking.
+async function destructiveStatements(queries)
+{
+    const found = [];
+    for (const query of queries) {
+        const tokens = await tokenizeOrNull(query);
+        const destructive = tokens === null
+            ? !leadingKeywordIsReadOnly(query)
+            : statementIsDestructive(tokens.filter(t => t.significant));
+        if (destructive) found.push(query);
+    }
+    return found;
+}
+
+/// Asks before running statements that change or delete data, unless the run is read-only (the server then refuses
+/// them). Resolves to whether to run. Cancel has the focus; Escape and Cancel do not run.
+async function confirmDestructive(queries, readonly)
+{
+    if (readonly) return true;
+    const found = await destructiveStatements(queries);
+    if (!found.length) return true;
+    const dialog = document.getElementById('confirm-run-dialog');
+    /// Another launch (Ctrl+Enter) while the question is open does not run.
+    if (dialog.open) return false;
+    document.getElementById('confirm-run-statements').textContent = found.join(';\n\n') + ';';
+    return new Promise(resolve => {
+        const ok = document.getElementById('confirm-run-ok');
+        const cancel = document.getElementById('confirm-run-cancel');
+        const finish = (run) => {
+            ok.removeEventListener('click', on_ok);
+            cancel.removeEventListener('click', on_cancel);
+            dialog.removeEventListener('close', on_close);
+            if (dialog.open) dialog.close();
+            resolve(run);
+        };
+        const on_ok = () => finish(true);
+        const on_cancel = () => finish(false);
+        const on_close = () => finish(false);
+        ok.addEventListener('click', on_ok);
+        cancel.addEventListener('click', on_cancel);
+        dialog.addEventListener('close', on_close);
+        dialog.showModal();
+        cancel.focus();
+    });
 }
 
 /// Statement kinds the query-construction settings can shape, i.e. the ones the server parses into an
@@ -22399,6 +22531,8 @@ document.getElementById('download-button').addEventListener('click', async funct
         '&framing_output_format=None' +
         '&default_format=' + encodeURIComponent(format);
     if (last_database_for_download) url += '&database=' + encodeURIComponent(last_database_for_download);
+    /// The download runs the query again: in read-only mode, read-only too.
+    if (readonly_elem.checked) url += '&readonly=2';
     url += last_shape_for_download;
 
     for (const [name, value] of Object.entries(last_params_for_download))
