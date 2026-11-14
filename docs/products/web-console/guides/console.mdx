@@ -66,7 +66,7 @@ The sidebar and the home page list the same destinations, in these categories:
 | Category | Destinations |
 |---|---|
 | **Home** | Home. |
-| **Workspace** | SQL Console, Dashboard, ClickStack, Web Terminal. |
+| **Workspace** | SQL Console, Play UI, Dashboard, ClickStack, Web Terminal. |
 | **Diagnostics** | Binary visualizer, Merges visualizer, Schema visualizer, Jemalloc, Processors profile, Running queries. |
 | **Administration** | Users, Roles & Permissions, Data Access Policies, Component Access, Profiles & Quotas, Audit Activity, Clusters, Backup & Restore. |
 | **Identity Providers** | LDAP, SSO (Keycloak). |
@@ -93,7 +93,7 @@ The links of **Resources** come from the `web_console` section of the server con
 
 ## Panels {#panels}
 
-A panel is a web UI of the server shown inside the console: the SQL Console (`/ui`), Dashboard (`/dashboard`), ClickStack (`/clickstack` or `clickstack_url`), Web Terminal (`/webterminal`), the diagnostic pages (`/binary`, `/merges`, `/schema`, `/jemalloc`, `/processors-profile`), and Reference (`/docs`). The console passes the connection to each of them, so they do not ask for credentials (see the [embedding contract](/products/web-console/reference/http-endpoints#embedding-contract)). ClickStack is the exception: it keeps its own connection settings, which you enter in ClickStack on first use.
+A panel is a web UI of the server shown inside the console: the SQL Console (`/ui`), the Play UI (`/play`), Dashboard (`/dashboard`), ClickStack (`/clickstack` or `clickstack_url`), Web Terminal (`/webterminal`), the diagnostic pages (`/binary`, `/merges`, `/schema`, `/jemalloc`, `/processors-profile`), and Reference (`/docs`). The console passes the connection to each of them, so they do not ask for credentials (see the [embedding contract](/products/web-console/reference/http-endpoints#embedding-contract)). ClickStack is the exception: it keeps its own connection settings, which you enter in ClickStack on first use.
 
 Each panel has a refreshable address under `/console`, for example `/console/merges`, and the browser's Back and Forward buttons move between panels. The pages also keep working on their own at their original paths.
 
@@ -113,7 +113,7 @@ Home, the administration pages, and the messages shown instead of a panel (for e
 
 ### Panels that stay loaded {#panels-that-stay-loaded}
 
-The SQL Console, Dashboard, ClickStack, Web Terminal, and Reference stay loaded when you switch to another destination: their queries, tabs, results, and terminal sessions survive. The other panels are unloaded, which stops their timers and requests, and are loaded again each time they are opened.
+The SQL Console, the Play UI, Dashboard, ClickStack, Web Terminal, and Reference stay loaded when you switch to another destination: their queries, tabs, results, and terminal sessions survive. The other panels are unloaded, which stops their timers and requests, and are loaded again each time they are opened.
 
 ### Panel states {#panel-states}
 
@@ -174,13 +174,19 @@ server sets [`sql_console_clear_on_sign_out`](/products/web-console/reference/co
 to `all`. If the deletion fails, the sign-in page says so. Closing or reloading the page signs you out without
 deleting anything: sign out first.
 
+The Play UI keeps its tabs, with their queries and the last result of each tab and notebook cell, in the IndexedDB
+database `clickhouse-play`, in clear text and shared by every user of the browser. The end of a session deletes the
+results and keeps the queries, or, with `sql_console_clear_on_sign_out` set to `all`, deletes the tabs too. Inside the
+console, the Play UI uses the console's connection, hides its own connection fields, and never offers the password to
+the browser's password manager.
+
 The console itself stores only two preferences in local storage: the theme (light or dark, shared with the other web UIs of the server) and whether the sidebar is collapsed.
 
 ## Limitations {#limitations}
 
 - The console and the panels share the origin of the ClickHouse HTTP port. Any page on that origin, including ClickStack and the SQL Console, can read the memory of the console. Do not serve untrusted content from the ClickHouse HTTP port.
 - Navigation inside an embedded page, for example opening a query in the SQL Console, also adds entries to the browser history.
-- Panels other than the SQL Console, Dashboard, ClickStack, Web Terminal, and Reference are reloaded each time they are opened, which stops their background refresh while they are hidden.
+- Panels other than the SQL Console, the Play UI, Dashboard, ClickStack, Web Terminal, and Reference are reloaded each time they are opened, which stops their background refresh while they are hidden.
 - A theme change applies to panels opened after it. Panels that are already open keep their theme until they are reloaded.
 - The Merges visualizer does not display query errors, including permission errors.
 - With single sign-on, the SQL Console, the Web Terminal, and ClickStack keep the access token they started with: reload them after it expires.

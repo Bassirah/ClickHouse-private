@@ -127,14 +127,14 @@ The deployment examples set these keys from the environment of the server contai
 
 ### `sql_console_clear_on_sign_out` {#sql-console-clear-on-sign-out}
 
-The SQL Console keeps data in the browser, and the console deletes part of it when you select **Sign out** or
+The SQL Console and the Play UI keep data in the browser, and the console deletes part of it when you select **Sign out** or
 **Switch connection**, and when a single sign-on session ends. See
 [Data in the browser's storage](/products/web-console/guides/console#data-in-the-browsers-storage).
 
 | Value | Deleted at the end of a session |
 |---|---|
-| `results` (default; also when empty) | The result rows stored in IndexedDB (`rowData`), and the SQL Console's data in the session storage of the browser tab: the text and statistics of recent queries, and a copy of the tabs. |
-| `all` | The same, and in local storage the tabs, the query history, the saved queries, and the selections of the schema browser, for every user of the server in this browser. Use it where several people share a browser profile. |
+| `results` (default; also when empty) | The result rows of the SQL Console stored in IndexedDB (`rowData`), and its data in the session storage of the browser tab: the text and statistics of recent queries, and a copy of the tabs. The results of the Play UI (in the IndexedDB database `clickhouse-play`); its tabs and queries stay. |
+| `all` | The same, and in local storage the tabs, the query history, the saved queries, and the selections of the schema browser of the SQL Console, for every user of the server in this browser, and every tab of the Play UI. Use it where several people share a browser profile. |
 
 With `all`, saved queries that were not exported are lost at sign-out: tell the users to export them first (**Export
 queries** in the SQL Console). Another value is reported on the sign-in page after a sign-out, and only the `results`
