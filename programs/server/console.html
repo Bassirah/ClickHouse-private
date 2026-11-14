@@ -781,6 +781,7 @@ const ICONS = {
     jemalloc: '<rect x="6" y="6" width="12" height="12" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
     activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
     play: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/>',
+    upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>',
     profile: '<path d="M4 6h10M4 12h16M4 18h7"/><circle cx="17" cy="6" r="2"/><circle cx="14" cy="18" r="2"/>',
     source: '<path d="M8 6l-6 6 6 6M16 6l6 6-6 6"/>',
     docs: '<path d="M4 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4zM20 4h-6a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6z"/>',
@@ -876,6 +877,9 @@ const COMPONENTS = [
     {id: 'sql', category: 'workspace', kind: 'panel', title: 'SQL Console', icon: 'sql', src: '/ui/',
      integration: 'sql-console', keep_alive: true, health_check: checkSqlConsoleCluster,
      description: 'Write and run queries with tabs, history, and saved queries.'},
+    {id: 'import', category: 'workspace', kind: 'admin', title: 'Import data', icon: 'upload', page: 'import',
+     admin_needs: ['read_tables'],
+     description: 'Load a CSV, TSV, or JSON file into a new or an existing table, with the columns the server infers.'},
     {id: 'play', category: 'workspace', kind: 'panel', title: 'Play UI', icon: 'play', src: '/play',
      integration: 'native', keep_alive: true,
      description: 'The query page of the server: a result per statement, export in every format, EXPLAIN graphs, server logs and metrics, and notebooks.'},
@@ -3404,12 +3408,18 @@ async function executePlan(plan) {
     const outcome = {correlation_id, steps: [], result: 'success', scope: scope ? `cluster:${scope}` : 'local'};
     for (const [index, step] of plan.steps.entries()) {
         const settings = {log_comment: `console-admin:${correlation_id}`};
-        const on_cluster = scope && step.cluster !== false;
+        const on_cluster = scope && step.cluster !== false && !step.run;
         if (on_cluster) {
             /// One row per server with its status, instead of an exception for the first failed server.
             Object.assign(settings, {distributed_ddl_output_mode: 'never_throw', distributed_ddl_task_timeout: '30', default_format: 'JSON'});
         }
-        const result = await runQuery(current, step.sql, current.controller.signal, 120000, {settings, raw: !on_cluster});
+        /// A step with `run` does its own request (an upload, for example) and returns the result of `runQuery`; it can
+        /// report its progress next to its description.
+        const progress = h('span', {className: 'note'});
+        if (step.run) put(items[index], ' ', progress);
+        const result = step.run
+            ? await step.run(current, settings, text => { progress.textContent = text; })
+            : await runQuery(current, step.sql, current.controller.signal, 120000, {settings, raw: !on_cluster});
         if (session !== current) return;
         const record = {description: step.description};
         if (!result.ok) {
@@ -3516,6 +3526,7 @@ const GUIDE_TOPICS = {
     'admin-limits': 'guides/profiles-and-quotas',
     'admin-audit': 'guides/audit-activity',
     'running-queries': 'guides/running-queries',
+    'import': 'guides/import-data',
     'admin-clusters': 'guides/clusters',
     'admin-backups': 'guides/backup-and-restore',
     'idp-ldap': 'guides/identity-providers#ldap',
@@ -7374,6 +7385,238 @@ ADMIN_PAGES.audit = (root, route, page) => {
             ? 'Not available: the console audit log is not set up (Component Access page), or your user cannot read it.'
             : 'Not available: your user cannot read system.query_log.')));
     if (available) load();
+};
+
+/// --- Workspace: Import data ---
+
+/// The text formats the page imports, by file extension. The server infers the columns from a sample of the file.
+const IMPORT_FORMATS = [
+    ['CSVWithNames', 'CSV with a header row'],
+    ['CSV', 'CSV without a header row'],
+    ['TSVWithNames', 'TSV with a header row'],
+    ['TSV', 'TSV without a header row'],
+    ['JSONEachRow', 'JSON, one object per line'],
+];
+const IMPORT_EXTENSIONS = {csv: 'CSVWithNames', tsv: 'TSVWithNames', tab: 'TSVWithNames', json: 'JSONEachRow', jsonl: 'JSONEachRow', ndjson: 'JSONEachRow'};
+
+/// The size of the sample of the file that the server infers the columns from. It goes into the query text as a string
+/// literal, which `max_query_size` (256 KiB by default) limits, with room for escaping.
+const IMPORT_SAMPLE_BYTES = 64 * 1024;
+
+/// The beginning of a file as text, cut after its last complete line, and whether that is the whole file.
+async function importSample(file) {
+    const whole = file.size <= IMPORT_SAMPLE_BYTES;
+    let text = await file.slice(0, IMPORT_SAMPLE_BYTES).text();
+    if (!whole) {
+        const end = text.lastIndexOf('\n');
+        if (end < 0) throw new Error(`The first ${IMPORT_SAMPLE_BYTES / 1024} KiB of the file have no line break: it is not a text file of one of these formats.`);
+        text = text.slice(0, end + 1);
+    }
+    return {text, whole};
+}
+
+/// The columns the server infers from the sample (`DESCRIBE TABLE format(...)`). `nullable` keeps the inferred
+/// `Nullable` types; without it, a missing value becomes the default of the type.
+async function inferImportColumns(format, sample, nullable) {
+    const rows = await adminRows(`DESCRIBE TABLE format(${format}, ${quoteString(sample)})
+        SETTINGS schema_inference_make_columns_nullable = ${nullable ? 1 : 0}`, {});
+    return rows.map(row => ({name: row.name, type: row.type}));
+}
+
+function importStructure(columns) {
+    return columns.map(column => `${quoteIdentifier(column.name)} ${column.type}`).join(', ');
+}
+
+/// Sends a file as the data of an `INSERT ... FORMAT` statement, with the credentials in headers, and reports the
+/// progress of the upload. Returns a result shaped like the one of `runQuery`.
+function uploadInsert(current, sql, file, settings, report) {
+    return new Promise(resolve => {
+        const url = new URL(queryEndpoint(current, {settings}));
+        url.searchParams.set('query', sql);
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url.href);
+        xhr.setRequestHeader('X-ClickHouse-User', current.user);
+        xhr.setRequestHeader('X-ClickHouse-Key', current.password);
+        /// Not the type of the file: the server reads a form type (`multipart/form-data`,
+        /// `application/x-www-form-urlencoded`) as form fields instead of the data.
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.upload.onprogress = e => report(`${formatBytes(e.loaded)} of ${formatBytes(file.size)} sent`);
+        xhr.upload.onload = () => report('Sent; the server is inserting the rows…');
+        const abort = () => xhr.abort();
+        current.controller.signal.addEventListener('abort', abort);
+        xhr.onloadend = () => {
+            current.controller.signal.removeEventListener('abort', abort);
+            report('');
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve({ok: true, data: xhr.responseText});
+            } else if (xhr.status === 0) {
+                resolve({ok: false, kind: current.controller.signal.aborted ? 'aborted' : 'unreachable',
+                    message: 'The upload did not reach the server, or the connection was closed.'});
+            } else {
+                resolve(classifyServerError({status: xhr.status, headers: {get: name => xhr.getResponseHeader(name)}}, xhr.responseText));
+            }
+        };
+        xhr.send(file);
+    });
+}
+
+ADMIN_PAGES.import = (root, route, page) => {
+    const c = page.component;
+    const state = {file: null, sample: null, columns: [], databases: [], tables: []};
+    const file_input = h('input', {type: 'file', accept: '.csv,.tsv,.tab,.json,.jsonl,.ndjson,.txt,text/csv,text/tab-separated-values,application/json'});
+    const format = select(IMPORT_FORMATS, 'CSVWithNames');
+    const nullable = checkbox('Allow missing values (Nullable columns)', false);
+    const sample_info = h('p', {className: 'note'});
+    const columns_box = h('div', {});
+    const preview_box = h('div', {});
+    const target_box = h('div', {});
+    const message = h('div', {});
+    const mode = select([['new', 'A new table'], ['existing', 'An existing table']], 'new');
+    const database = select([], '');
+    const table_name = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'table name'});
+    const existing = select([], '');
+    const order_by = select([], '');
+
+    const columnsTable = () => dataTable([
+        {title: 'Column', render: column => h('input', {type: 'text', value: column.name, spellcheck: false, 'aria-label': 'Column name',
+            oninput: e => { column.name = e.target.value; renderOrderBy(); }})},
+        {title: 'Type', render: column => h('input', {type: 'text', value: column.type, spellcheck: false, 'aria-label': `Type of ${column.name}`,
+            oninput: e => { column.type = e.target.value; }})},
+    ], state.columns, 'No columns.', 'Columns');
+
+    const renderOrderBy = () => {
+        const value = order_by.value;
+        order_by.replaceChildren(...[['', 'No sorting key: tuple()'], ...state.columns.map(column => [column.name, column.name])]
+            .map(([v, label]) => h('option', {value: v, selected: v === value}, label)));
+    };
+
+    const showPreview = async () => {
+        if (!state.sample || !state.columns.length) return;
+        preview_box.replaceChildren(loadingBox('Reading the first rows…'));
+        try {
+            const rows = await adminRows(`SELECT * FROM format(${format.value}, ${quoteString(importStructure(state.columns))}, `
+                + `${quoteString(state.sample.text)}) LIMIT 10`, {});
+            if (!isCurrent(page)) return;
+            preview_box.replaceChildren(h('h3', {}, 'First rows'),
+                dataTable(state.columns.map(column => ({title: column.name, render: row => String(row[column.name] ?? 'NULL')})), rows,
+                    'The sample has no rows.', 'First rows of the file'));
+        } catch (e) {
+            if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+            preview_box.replaceChildren(errorBox(e, 'The rows cannot be read with these columns:'));
+        }
+    };
+
+    const infer = async () => {
+        if (!state.file) return;
+        message.replaceChildren();
+        columns_box.replaceChildren(loadingBox('Inferring the columns…'));
+        preview_box.replaceChildren();
+        try {
+            state.sample = state.sample || await importSample(state.file);
+            state.columns = await inferImportColumns(format.value, state.sample.text, nullable.input.checked);
+            if (!isCurrent(page)) return;
+            sample_info.textContent = `${state.file.name}, ${formatBytes(state.file.size)}. The columns are inferred from `
+                + (state.sample.whole ? 'the whole file.' : `its first ${formatBytes(new Blob([state.sample.text]).size)}; `
+                    + 'a value further down that does not fit its column fails the import.');
+            columns_box.replaceChildren(h('h3', {}, 'Columns'),
+                h('p', {className: 'note'}, 'Rename a column or change its type before the import; Preview reads the sample again with them.'),
+                columnsTable(), h('div', {className: 'actions-row'}, button('Preview', showPreview)));
+            renderOrderBy();
+            showPreview();
+        } catch (e) {
+            if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+            state.columns = [];
+            columns_box.replaceChildren(errorBox(e, `The server could not read the file as ${format.value}:`));
+        }
+    };
+
+    const loadTables = async () => {
+        if (!database.value) return;
+        try {
+            state.tables = await adminRows(`SELECT name FROM system.tables WHERE database = {db:String} AND NOT is_temporary
+                AND engine NOT IN ('View', 'MaterializedView', 'Dictionary', 'LiveView', 'WindowView') ORDER BY name`, {db: database.value});
+        } catch (e) {
+            if (e instanceof AdminSessionChanged) return;
+            state.tables = [];
+        }
+        if (!isCurrent(page)) return;
+        existing.replaceChildren(...state.tables.map(row => h('option', {value: row.name}, row.name)));
+    };
+
+    const renderTarget = () => {
+        const fields = mode.value === 'new'
+            ? [adminField('Table name', table_name), adminField('Sorting key', order_by, 'ORDER BY of the new MergeTree table.')]
+            : [adminField('Table', existing, format.value.endsWith('WithNames') || format.value === 'JSONEachRow'
+                ? 'Columns are matched by name; columns of the table missing from the file get their defaults.'
+                : 'Without a header row, the columns of the file must be in the order of the table.')];
+        target_box.replaceChildren(h('div', {className: 'toolbar'}, adminField('Load into', mode), adminField('Database', database), ...fields));
+    };
+
+    const review = () => {
+        message.replaceChildren();
+        const fail = text => message.replaceChildren(h('div', {className: 'message error', role: 'alert'}, text));
+        if (!state.file || !state.columns.length) return fail('Choose a file, and wait for its columns.');
+        if (!database.value) return fail('Choose a database.');
+        const steps = [];
+        let target;
+        if (mode.value === 'new') {
+            const name = table_name.value.trim();
+            if (!name) return fail('Enter the name of the new table.');
+            if (state.columns.some(column => !column.name.trim() || !column.type.trim())) return fail('Every column needs a name and a type.');
+            target = `${quoteIdentifier(database.value)}.${quoteIdentifier(name)}`;
+            steps.push({description: `Create the table ${database.value}.${name} with ${state.columns.length} columns`,
+                sql: `CREATE TABLE ${target} (${importStructure(state.columns)}) ENGINE = MergeTree ORDER BY `
+                    + (order_by.value ? quoteIdentifier(order_by.value) : 'tuple()')});
+        } else {
+            if (!existing.value) return fail('Choose a table.');
+            target = `${quoteIdentifier(database.value)}.${quoteIdentifier(existing.value)}`;
+        }
+        const file = state.file;
+        const insert = `INSERT INTO ${target} FORMAT ${format.value}`;
+        steps.push({description: `Load ${file.name} (${formatBytes(file.size)}) into ${target.replace(/`/g, '')}`,
+            sql: `${insert}\n-- with the content of ${file.name} as data`,
+            run: (current, settings, report) => uploadInsert(current, insert, file, settings, report)});
+        reviewPlan({action: 'import_data', target_type: 'table', target_name: target.replace(/`/g, ''), local_only: true,
+            summary: `Import ${file.name} into ${target.replace(/`/g, '')}`, steps, confirm_text: 'Import',
+            audit_details: {file: file.name, bytes: file.size, format: format.value, new_table: mode.value === 'new'},
+            recovery: 'The table was created, but the rows were not inserted: fix the file or the columns, and import into the existing table.',
+            result_extra: () => h('p', {className: 'note'}, `To look at the rows, run SELECT * FROM ${target} LIMIT 100 in the SQL Console or the Play UI.`),
+            onclose: () => {}});
+    };
+
+    file_input.addEventListener('change', () => {
+        state.file = file_input.files[0] || null;
+        state.sample = null;
+        if (!state.file) return;
+        const extension = state.file.name.split('.').pop().toLowerCase();
+        if (IMPORT_EXTENSIONS[extension]) format.value = IMPORT_EXTENSIONS[extension];
+        if (!table_name.value) table_name.value = state.file.name.replace(/\.[^.]*$/, '').replace(/[^A-Za-z0-9_]/g, '_');
+        renderTarget();
+        infer();
+    });
+    format.addEventListener('change', () => { renderTarget(); infer(); });
+    nullable.input.addEventListener('change', infer);
+    mode.addEventListener('change', () => { renderTarget(); if (mode.value === 'existing') loadTables(); });
+    database.addEventListener('change', () => { if (mode.value === 'existing') loadTables(); });
+
+    put(root, pageHeader(c, 'Import data'),
+        h('p', {className: 'note'}, `Load a file from this computer into a table of ${session.hostname}. The server infers the columns `
+            + 'from the beginning of the file; review them, then the console creates the table if needed and sends the file as the data of '
+            + 'an INSERT statement, with your privileges. Text formats only: CSV, TSV, and JSON with one object per line.'),
+        h('div', {className: 'box'}, h('div', {className: 'toolbar'}, adminField('File', file_input), adminField('Format', format), nullable.element),
+            sample_info, columns_box, preview_box),
+        h('div', {className: 'box'}, h('h2', {}, 'Destination'), target_box, message,
+            h('div', {className: 'actions-row'}, button('Review import', review, {className: 'primary'}))));
+    renderTarget();
+    adminRows(`SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') ORDER BY name`, {})
+        .then(rows => {
+            if (!isCurrent(page)) return;
+            database.replaceChildren(...rows.map(row => h('option', {value: row.name, selected: row.name === 'default'}, row.name)));
+        })
+        .catch(e => {
+            if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+            message.replaceChildren(errorBox(e, 'The databases cannot be listed:'));
+        });
 };
 
 /// --- Diagnostics: Running queries ---

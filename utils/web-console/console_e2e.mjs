@@ -195,7 +195,7 @@ await test('Home cards and sidebar list every component and resolve to the same 
     await waitForHome(page);
     const expected = {
         Home: ['Home'],
-        Workspace: ['SQL Console', 'Play UI', 'Dashboard', 'ClickStack', 'Web Terminal'],
+        Workspace: ['SQL Console', 'Import data', 'Play UI', 'Dashboard', 'ClickStack', 'Web Terminal'],
         Diagnostics: ['Binary visualizer', 'Merges visualizer', 'Schema visualizer', 'Jemalloc', 'Processors profile', 'Running queries'],
         Resources: ['Console Guide', 'Source code', 'Documentation', 'Reference', 'Website', 'Cloud'],
     };
@@ -400,6 +400,74 @@ await test('Running queries: lists a running query and stops it with KILL QUERY'
     check(result.text.includes('QUERY_WAS_CANCELLED'), `the query was not cancelled: ${result.status} ${result.text.slice(0, 300)}`);
     await page.click('#admin-dialog .dialog-actions button');
     await waitUntil(page, id => ![...document.querySelectorAll('#admin-view details')].some(d => d.dataset.queryId === id), query_id);
+    await context.close();
+});
+
+/// Runs a query on the server under test as the administrator, and returns its result as text.
+async function adminQuery(sql) {
+    const response = await fetch(`${BASE}/`, {method: 'POST', headers: {'X-ClickHouse-User': ADMIN_USER, 'X-ClickHouse-Key': ADMIN_PASSWORD}, body: sql});
+    const text = await response.text();
+    if (!response.ok) throw new Error(`${sql}: ${text}`);
+    return text.trim();
+}
+
+await test('Import data: a CSV file into a new table, and a JSON file into an existing one', async () => {
+    const suffix = Date.now();
+    await adminQuery(`CREATE DATABASE IF NOT EXISTS e2e_import`);
+    await adminQuery(`CREATE TABLE e2e_import.existing_${suffix} (id UInt32, city String, extra String DEFAULT 'none') ENGINE = MergeTree ORDER BY id`);
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="import"]');
+    await page.waitForURL(`${BASE}/console/import`);
+    await page.waitForSelector('#admin-view input[type="file"]');
+    await waitUntil(page, () => [...document.querySelectorAll('#admin-view select option')].some(o => o.value === 'e2e_import'));
+
+    /// A CSV with a header, a quoted value with a comma, and non-ASCII text, into a new table sorted by id.
+    const rows = ['id,name,score,day', ...Array.from({length: 2000}, (_, i) => `${i},"Name ${i}, Jr. — ü",${(i * 1.5).toFixed(1)},2026-11-${String(1 + i % 28).padStart(2, '0')}`)];
+    await page.setInputFiles('#admin-view input[type="file"]', {name: 'people list.csv', mimeType: 'text/csv', buffer: Buffer.from(rows.join('\n') + '\n')});
+    await waitUntil(page, () => document.querySelector('#admin-view input[aria-label="Type of score"]'));
+    const types = await page.evaluate(() => [...document.querySelectorAll('#admin-view input[aria-label^="Type of"]')].map(i => i.value));
+    check(JSON.stringify(types) === JSON.stringify(['Int64', 'String', 'Float64', 'Date']), `inferred types: ${types}`);
+    await waitUntil(page, () => document.querySelector('#admin-view table[aria-label="First rows of the file"]'));
+    check((await page.textContent('#admin-view table[aria-label="First rows of the file"]')).includes('Name 3, Jr. — ü'), 'preview');
+    check(await page.inputValue('#admin-view input[placeholder="table name"]') === 'people_list', 'suggested table name');
+    await page.fill('#admin-view input[placeholder="table name"]', `people_${suffix}`);
+    await page.selectOption('#admin-view select >> nth=2', 'e2e_import');
+    await page.selectOption('#admin-view select >> nth=3', 'id');
+    await page.click('#admin-view button:text("Review import")');
+    await page.waitForSelector('#admin-dialog[open]');
+    const review = await page.textContent('#admin-dialog');
+    check(review.includes(`CREATE TABLE \`e2e_import\`.\`people_${suffix}\``) && review.includes('ORDER BY `id`')
+        && review.includes('FORMAT CSVWithNames'), `review: ${review}`);
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await page.waitForSelector('#admin-dialog .message.info');
+    await screenshot(page, '08-import-data');
+    check(await adminQuery(`SELECT count(), sum(score), max(day) FROM e2e_import.people_${suffix} FORMAT CSV`) === '2000,2998500,"2026-11-28"', 'imported rows');
+    check(await adminQuery(`SELECT name FROM e2e_import.people_${suffix} WHERE id = 7`) === 'Name 7, Jr. — ü', 'imported text');
+    const audited = await adminQuery(`SELECT count() FROM console_admin.audit_log WHERE action = 'import_data' AND target_name = 'e2e_import.people_${suffix}' AND result = 'success'`).catch(() => 'no audit log');
+    check(audited === '1' || audited === 'no audit log', `audit: ${audited}`);
+    await page.click('#admin-dialog .dialog-actions button');
+
+    /// JSON lines into the existing table: columns by name, a missing column gets its default.
+    const json = [{id: 1, city: 'Riyadh'}, {id: 2, city: 'Jeddah'}].map(o => JSON.stringify(o)).join('\n') + '\n';
+    await page.setInputFiles('#admin-view input[type="file"]', {name: 'cities.jsonl', mimeType: 'application/json', buffer: Buffer.from(json)});
+    await waitUntil(page, () => document.querySelector('#admin-view input[aria-label="Type of city"]'));
+    await page.selectOption('#admin-view select >> nth=1', 'existing');
+    await page.selectOption('#admin-view select >> nth=2', 'e2e_import');
+    await waitUntil(page, name => [...document.querySelectorAll('#admin-view select option')].some(o => o.value === name), `existing_${suffix}`);
+    await page.selectOption('#admin-view select >> nth=3', `existing_${suffix}`);
+    await page.click('#admin-view button:text("Review import")');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await page.waitForSelector('#admin-dialog .message.info');
+    check(await adminQuery(`SELECT groupArray(city), any(extra) FROM (SELECT * FROM e2e_import.existing_${suffix} ORDER BY id) FORMAT CSV`)
+        === `"['Riyadh','Jeddah']","none"`, 'rows of the existing table');
+    await page.click('#admin-dialog .dialog-actions button');
+
+    /// A file the server cannot read as the chosen format says why.
+    await page.setInputFiles('#admin-view input[type="file"]', {name: 'broken.json', mimeType: 'application/json', buffer: Buffer.from('{"id": 1,\n')});
+    await waitUntil(page, () => [...document.querySelectorAll('#admin-view .message.error')].some(m => m.textContent.includes('could not read the file as JSONEachRow')));
     await context.close();
 });
 
@@ -870,7 +938,8 @@ await test('Keyboard navigation and visible focus', async () => {
     const order = [];
     await page.focus('#skip-link');
     check(await page.isVisible('#skip-link'), 'skip link not visible on focus');
-    for (let i = 0; i < 12; ++i) {
+    /// Enough to reach the Merges visualizer, the second entry of Diagnostics, past the entries of Home and Workspace.
+    for (let i = 0; i < 14; ++i) {
         await page.keyboard.press('Tab');
         order.push(await page.evaluate(() => {
             const e = document.activeElement;

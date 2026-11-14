@@ -1,0 +1,72 @@
+---
+description: 'How the Import data page of the web console loads a CSV, TSV, or JSON file from your computer into a new or an existing ClickHouse table, with the columns the server infers.'
+sidebarTitle: 'Import data'
+slug: /web-console/guides/import-data
+title: 'Import data'
+doc_type: 'guide'
+---
+
+The **Import data** page, in the **Workspace** category, loads a file from your computer into a table of the server the
+console is connected to. The server infers the columns from the beginning of the file; you review them, and the console
+creates the table if needed and sends the file as the data of an `INSERT` statement, with your privileges.
+
+## Formats {#formats}
+
+The page imports text formats. It chooses the format from the file extension, and you can change it:
+
+| Format | Extension | Columns |
+|---|---|---|
+| `CSVWithNames` | `.csv` | From the header row. |
+| `CSV` | | `c1`, `c2`, and so on, in the order of the file. |
+| `TSVWithNames` | `.tsv`, `.tab` | From the header row. |
+| `TSV` | | `c1`, `c2`, and so on. |
+| `JSONEachRow` | `.json`, `.jsonl`, `.ndjson` | From the keys of the objects, one object per line. |
+
+Binary formats such as Parquet are not supported yet: load them with `clickhouse-client` or the `INSERT ... FORMAT`
+statement of the HTTP interface.
+
+## Who can use it {#who-can-use-it}
+
+The page is listed for users who can read `system.tables`, and when the
+[console access policy](/products/web-console/guides/component-access) allows it. The server checks the privileges of
+each statement:
+
+| Action | Privilege |
+|---|---|
+| Infer the columns and preview the rows | None: the `format` table function reads the sample sent with the query. |
+| Create a new table | `CREATE TABLE` on the database. |
+| Load the rows | `INSERT` on the table. |
+
+## Importing a file {#importing-a-file}
+
+1. **Choose the file.** The page reads its first 64 KiB, cut after the last complete line (the whole file if it is
+   smaller), and asks the server for its columns with `DESCRIBE TABLE format(<format>, '<sample>')`. The sample is sent
+   as a string literal in the query, so it counts toward `max_query_size`.
+2. **Review the columns.** Rename a column or change its type in the table, then select **Preview** to read the first
+   rows of the sample again with them. By default, columns are not `Nullable`, and a missing value becomes the default
+   of its type; select **Allow missing values (Nullable columns)** to keep the `Nullable` types the server infers.
+3. **Choose the destination.**
+   - **A new table**: the database, the table name (suggested from the file name), and the sorting key. The table is
+     a `MergeTree` table with the reviewed columns and `ORDER BY` the chosen column, or `tuple()`.
+   - **An existing table**: the database and the table. With a header row or JSON, the columns are matched by name, and
+     the columns of the table that the file does not have get their defaults. Without a header row, the columns of the
+     file must be in the order of the table.
+4. **Review import** shows the statements: `CREATE TABLE` for a new table, and `INSERT INTO <table> FORMAT <format>`
+   with the file as its data. Select **Import**. The dialog shows the progress of the upload, then the result.
+
+The console records the import as `import_data` in the [audit log](/products/web-console/guides/audit-activity), with
+the file name, its size, and the format.
+
+## When an import fails {#when-an-import-fails}
+
+| Problem | What happens |
+|---|---|
+| The server cannot read the sample as the chosen format | The page shows the error of the server under the file. Choose another format, or fix the file. |
+| A value further in the file does not fit its column | The `INSERT` fails with the error of the server, and inserts no rows of the failed blocks. A new table stays, empty or with the rows of the blocks before the error: drop it, or fix the columns and import into it. |
+| The connection is lost during the upload | The step fails. Rows of complete blocks may already be in the table: check it before importing again. |
+
+## Limitations {#limitations}
+
+- Text formats only.
+- The browser sends the file in one request. For files of several gigabytes, prefer `clickhouse-client`.
+- The columns are inferred from the beginning of the file: a value further down that does not fit fails the import.
