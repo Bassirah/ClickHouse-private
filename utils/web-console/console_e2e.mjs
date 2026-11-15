@@ -193,9 +193,11 @@ await test('Home cards and sidebar list every component and resolve to the same 
     await page.goto(`${BASE}/console`);
     await login(page, ADMIN_USER, ADMIN_PASSWORD);
     await waitForHome(page);
+    /// The administration pages (Tables, Import data, ...) are listed once the privileges of the user are checked.
+    await waitUntil(page, () => session && session.admin.state !== 'checking');
     const expected = {
         Home: ['Home'],
-        Workspace: ['SQL Console', 'Import data', 'Play UI', 'Dashboard', 'ClickStack', 'Web Terminal'],
+        Workspace: ['SQL Console', 'Tables', 'Import data', 'Play UI', 'Dashboard', 'ClickStack', 'Web Terminal'],
         Diagnostics: ['Binary visualizer', 'Merges visualizer', 'Schema visualizer', 'Jemalloc', 'Processors profile', 'Running queries'],
         Resources: ['Console Guide', 'Source code', 'Documentation', 'Reference', 'Website', 'Cloud'],
     };
@@ -238,6 +240,8 @@ await test('Home cards and sidebar list every component and resolve to the same 
 });
 
 await test('Protected deep link requires login, then opens the panel with the console connection', async () => {
+    /// The Merges visualizer needs system.part_log, which a new server creates at its first flush of the logs.
+    await adminQuery('SYSTEM FLUSH LOGS');
     const {context, page, log} = await newContext();
     await page.goto(`${BASE}/console/merges`);
     await page.waitForSelector('#login-view:not([hidden])');
@@ -651,6 +655,152 @@ await test('Import data: Avro and Arrow files, with the columns from their schem
         const imported = await adminQuery(`SELECT count(), sum(score), anyIf(name, id = 7) FROM e2e_import.${table} FORMAT CSV`);
         check(imported === '200000,29999850000,"7 ü"', `${format}: imported ${imported}`);
     }
+    await context.close();
+});
+
+/// Submits the form dialog of the Table Editor, applies the reviewed plan, and closes the result.
+async function applyTableDialog(page) {
+    await page.click('#admin-dialog button[type="submit"]');
+    await waitUntil(page, () => {
+        const title = document.getElementById('admin-dialog-title');
+        const error = document.querySelector('#admin-dialog .message.error:not([hidden])');
+        return (title && title.textContent.startsWith('Review:')) || (error && error.textContent);
+    });
+    const error = await page.$('#admin-dialog .message.error:not([hidden])');
+    if (error) throw new Error(`the form was refused: ${await error.textContent()}`);
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await page.waitForSelector('#admin-dialog .message.info, #admin-dialog .message.error[role="alert"]', {timeout: 60000});
+    const failed = await page.$('#admin-dialog .message.error[role="alert"]');
+    if (failed) throw new Error(`the plan failed: ${await page.textContent('#admin-dialog')}`);
+    await page.click('#admin-dialog .dialog-actions button');
+    await waitUntil(page, () => !document.getElementById('admin-dialog').open);
+}
+
+/// Opens a tab of the Table Editor for a table, and waits until it is loaded.
+async function openTableTab(page, database, table, tab) {
+    await page.evaluate(path => navigate(path), `/console/tables/${encodeURIComponent(`${encodeURIComponent(database)}/${encodeURIComponent(table)}`)}?tab=${tab}`);
+    await waitUntil(page, () => !document.querySelector('#admin-view .spinner'));
+}
+
+await test('Table Editor: create a table, change its columns, rows, index, settings, and TTL, then drop it', async () => {
+    const table = `t_${Date.now()}`;
+    const ref = `e2e_te.${table}`;
+    await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_te');
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="tables"]');
+    await page.waitForSelector('#admin-view table[aria-label="Tables"]');
+
+    /// New table: two columns, sorted by id, with a TTL.
+    await page.click('#admin-view button:text("New table")');
+    await page.waitForSelector('#admin-dialog[open]');
+    await page.selectOption('#admin-dialog select >> nth=0', 'e2e_te');
+    await page.fill('#admin-dialog input[placeholder="table name"]', table);
+    await page.fill('#admin-dialog input[aria-label="Column name"] >> nth=0', 'id');
+    await page.fill('#admin-dialog input[aria-label="Column type"] >> nth=0', 'UInt64');
+    await page.click('#admin-dialog button:text("Add column")');
+    await page.fill('#admin-dialog input[aria-label="Column name"] >> nth=1', 'name');
+    await page.fill('#admin-dialog input[aria-label="Column type"] >> nth=1', 'String');
+    await page.click('#admin-dialog button:text("Add column")');
+    await page.fill('#admin-dialog input[aria-label="Column name"] >> nth=2', 'day');
+    await page.fill('#admin-dialog input[aria-label="Column type"] >> nth=2', 'Date');
+    await page.fill('#admin-dialog input[aria-label="Default expression"] >> nth=2', 'today()');
+    await page.fill('#admin-dialog input[placeholder^="id"]', 'id');
+    await page.fill('#admin-dialog input[placeholder^="event_date + INTERVAL"]', 'day + INTERVAL 10 YEAR');
+    check((await page.textContent('#admin-dialog pre.code')).includes('ORDER BY id'), 'the statement preview');
+    await applyTableDialog(page);
+    await waitUntil(page, () => document.querySelector('#admin-view .kv'));
+    check(page.url().endsWith(`/console/tables/e2e_te%2F${table}?tab=overview`), `not on the new table: ${page.url()}`);
+    check(await adminQuery(`SELECT engine, sorting_key FROM system.tables WHERE database = 'e2e_te' AND name = '${table}' FORMAT CSV`) === '"MergeTree","id"', 'the table');
+
+    /// Columns: add one, rename one.
+    await openTableTab(page, 'e2e_te', table, 'columns');
+    await page.click('#admin-view button:text("Add column")');
+    await page.fill('#admin-dialog input:not([disabled]) >> nth=0', 'score');
+    await page.fill('#admin-dialog input[list] >> nth=0', 'Float64');
+    await page.selectOption('#admin-dialog select >> nth=0', 'DEFAULT');
+    await page.fill('#admin-dialog input[placeholder="expression"]', '0');
+    await applyTableDialog(page);
+    const row = name => page.locator('#admin-view tr', {has: page.locator(`strong:text-is("${name}")`)});
+    await row('name').getByRole('button', {name: 'Rename'}).click();
+    await page.fill('#admin-dialog input >> nth=0', 'title');
+    await applyTableDialog(page);
+    check(await adminQuery(`SELECT groupArray(name) FROM system.columns WHERE database = 'e2e_te' AND table = '${table}' FORMAT CSV`)
+        === `"['id','title','day','score']"`, 'the columns');
+    check(!(await row('id').getByRole('button', {name: 'Drop'}).isEnabled()), 'a column of the sorting key can be dropped');
+
+    /// Data: insert two rows, edit one, delete the other.
+    await openTableTab(page, 'e2e_te', table, 'data');
+    for (const [id, title] of [['1', 'first'], ['2', 'second']]) {
+        await page.click('#admin-view button:text("Insert row")');
+        await page.fill('#admin-dialog input[aria-label="id"]', id);
+        await page.fill('#admin-dialog input[aria-label="title"]', title);
+        await applyTableDialog(page);
+    }
+    await waitUntil(page, () => document.querySelectorAll('#admin-view table[aria-label="Rows"] tbody tr').length === 2);
+    await page.locator('#admin-view table[aria-label="Rows"] tr', {hasText: 'first'}).getByRole('button', {name: 'Edit'}).click();
+    check(await page.isDisabled('#admin-dialog input[aria-label="id"]'), 'a key column can be edited');
+    await page.fill('#admin-dialog input[aria-label="title"]', 'changed');
+    await applyTableDialog(page);
+    /// The edit is a mutation, which rewrites the part: until it is done, the other row may still move.
+    for (let i = 0; (await adminQuery(`SELECT count() FROM system.mutations WHERE database = 'e2e_te' AND table = '${table}' AND NOT is_done`)) !== '0'; ++i) {
+        if (i > 100) throw new Error('the mutation of the edit did not finish');
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    await openTableTab(page, 'e2e_te', table, 'data');
+    await waitUntil(page, () => document.querySelectorAll('#admin-view table[aria-label="Rows"] tbody tr').length === 2);
+    await page.locator('#admin-view table[aria-label="Rows"] tr', {hasText: 'second'}).getByRole('button', {name: 'Delete'}).click();
+    await applyTableDialog(page);
+    const deadline = Date.now() + 30000;
+    for (;;) {
+        const rows = await adminQuery(`SELECT groupArray((id, title)) FROM (SELECT id, title FROM ${ref} ORDER BY id) FORMAT CSV`);
+        if (rows === `"[(1,'changed')]"`) break;
+        if (Date.now() > deadline) throw new Error(`rows after the edit and the delete: ${rows}`);
+        await new Promise(resolve => setTimeout(resolve, 300));
+    }
+
+    /// An index, a setting, and the TTL.
+    await openTableTab(page, 'e2e_te', table, 'indexes');
+    await page.click('#admin-view button:text("Add index")');
+    await page.fill('#admin-dialog input[placeholder="idx_city"]', 'idx_title');
+    await page.fill('#admin-dialog input[placeholder="city"]', 'title');
+    await page.selectOption('#admin-dialog select >> nth=0', 'bloom_filter(0.01)');
+    await applyTableDialog(page);
+    check(await adminQuery(`SELECT type_full FROM system.data_skipping_indices WHERE database = 'e2e_te' AND table = '${table}'`) === 'bloom_filter(0.01)', 'the index');
+    await openTableTab(page, 'e2e_te', table, 'settings');
+    await page.click('#admin-view button:text("Change a setting")');
+    await page.fill('#admin-dialog input[placeholder="merge_with_ttl_timeout"]', 'merge_with_ttl_timeout');
+    await page.fill('#admin-dialog input >> nth=1', '3600');
+    await applyTableDialog(page);
+    await page.click('#admin-view button:text("Change TTL")');
+    await page.fill('#admin-dialog textarea', 'day + INTERVAL 20 YEAR');
+    await applyTableDialog(page);
+    const ddl = await adminQuery(`SELECT create_table_query FROM system.tables WHERE database = 'e2e_te' AND name = '${table}'`);
+    check(ddl.includes('merge_with_ttl_timeout = 3600') && ddl.includes('toIntervalYear(20)'), `the settings and TTL: ${ddl}`);
+    await openTableTab(page, 'e2e_te', table, 'ddl');
+    check((await page.textContent('#admin-view pre.code')).includes('INDEX idx_title'), 'the DDL tab');
+
+    /// A typo in an expression is reported in the form, before the review.
+    await openTableTab(page, 'e2e_te', table, 'settings');
+    await page.click('#admin-view button:text("Change TTL")');
+    await page.fill('#admin-dialog textarea', 'day + INTERVAL 20 YEARS (');
+    await page.click('#admin-dialog button[type="submit"]');
+    await page.waitForSelector('#admin-dialog .message.error:not([hidden])');
+    await page.click('#admin-dialog button:text("Cancel")');
+
+    /// Drop: the name must be typed.
+    await openTableTab(page, 'e2e_te', table, 'overview');
+    await page.click('#admin-view button:text("Drop")');
+    await page.fill('#admin-dialog input', 'wrong');
+    await page.click('#admin-dialog button[type="submit"]');
+    await page.waitForSelector('#admin-dialog .message.error:not([hidden])');
+    await page.fill('#admin-dialog input', table);
+    await applyTableDialog(page);
+    await page.waitForURL(`${BASE}/console/tables`);
+    check(await adminQuery(`EXISTS TABLE ${ref}`) === '0', 'the table was not dropped');
+    await screenshot(page, '10-table-editor');
     await context.close();
 });
 
@@ -1149,7 +1299,7 @@ await test('Keyboard navigation and visible focus', async () => {
     await page.focus('#skip-link');
     check(await page.isVisible('#skip-link'), 'skip link not visible on focus');
     /// Enough to reach the Merges visualizer, the second entry of Diagnostics, past the entries of Home and Workspace.
-    for (let i = 0; i < 14; ++i) {
+    for (let i = 0; i < 15; ++i) {
         await page.keyboard.press('Tab');
         order.push(await page.evaluate(() => {
             const e = document.activeElement;

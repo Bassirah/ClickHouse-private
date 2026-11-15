@@ -389,6 +389,10 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .button.danger.primary:hover { background: var(--danger); border-color: var(--danger); filter: brightness(0.92); }
 .button.danger:hover:not(.primary) { background: var(--danger-bg); border-color: currentColor; }
 .actions-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+/* The heading of a section of a box, with its actions on the right (the Table Editor). */
+.section-head { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.5rem; }
+.section-head .spacer { flex: 1; }
+.column-rows { display: grid; gap: 0.35rem; margin-bottom: 0.35rem; }
 
 /* Console Guide */
 
@@ -782,6 +786,7 @@ const ICONS = {
     activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
     play: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/>',
     upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>',
+    table: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M9 9v11"/>',
     profile: '<path d="M4 6h10M4 12h16M4 18h7"/><circle cx="17" cy="6" r="2"/><circle cx="14" cy="18" r="2"/>',
     source: '<path d="M8 6l-6 6 6 6M16 6l6 6-6 6"/>',
     docs: '<path d="M4 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4zM20 4h-6a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6z"/>',
@@ -877,6 +882,9 @@ const COMPONENTS = [
     {id: 'sql', category: 'workspace', kind: 'panel', title: 'SQL Console', icon: 'sql', src: '/ui/',
      integration: 'sql-console', keep_alive: true, health_check: checkSqlConsoleCluster,
      description: 'Write and run queries with tabs, history, and saved queries.'},
+    {id: 'tables', category: 'workspace', kind: 'admin', title: 'Tables', icon: 'table', page: 'tables',
+     admin_needs: ['read_tables'],
+     description: 'The Table Editor: see and change the columns, data, indexes, partitions, mutations, settings, and DDL of a table.'},
     {id: 'import', category: 'workspace', kind: 'admin', title: 'Import data', icon: 'upload', page: 'import',
      admin_needs: ['read_tables'],
      description: 'Load a CSV, TSV, JSON, Parquet, Avro, or Arrow file into a new or an existing table, with the columns the server infers.'},
@@ -3552,6 +3560,7 @@ const GUIDE_TOPICS = {
     'admin-audit': 'guides/audit-activity',
     'running-queries': 'guides/running-queries',
     'import': 'guides/import-data',
+    'tables': 'guides/table-editor',
     'admin-clusters': 'guides/clusters',
     'admin-backups': 'guides/backup-and-restore',
     'idp-ldap': 'guides/identity-providers#ldap',
@@ -7411,6 +7420,1113 @@ ADMIN_PAGES.audit = (root, route, page) => {
             : 'Not available: your user cannot read system.query_log.')));
     if (available) load();
 };
+
+/// --- Workspace: Tables (the Table Editor) ---
+
+/// The Table Editor shows a table and changes it: its columns, its data, its indexes and projections, its partitions and
+/// parts, its mutations, its settings, TTL, and constraints, and its DDL. Every change is a plan, reviewed and run like
+/// the other changes of the console (`reviewPlan`), with the privileges of the user, and recorded in the audit log. The
+/// statements are parsed by the server (`EXPLAIN AST`) before the review, so that an error in an expression typed in a
+/// form is shown in the form.
+
+const TABLE_TABS = [
+    ['overview', 'Overview'], ['columns', 'Columns'], ['data', 'Data'], ['indexes', 'Indexes & projections'],
+    ['partitions', 'Partitions & parts'], ['mutations', 'Mutations'], ['settings', 'Settings & TTL'], ['ddl', 'DDL'],
+];
+
+/// The databases of the server itself, hidden from the list unless asked for.
+const SYSTEM_DATABASES = ['system', 'INFORMATION_SCHEMA', 'information_schema'];
+
+const VIEW_ENGINES = new Set(['View', 'MaterializedView', 'LiveView', 'WindowView']);
+
+function isMergeTreeEngine(engine) {
+    return /MergeTree$/.test(engine);
+}
+
+/// The address of a table: `<database>/<table>`, each part encoded, so that a name may contain `/`.
+function tableSub(database, table) {
+    return `${encodeURIComponent(database)}/${encodeURIComponent(table)}`;
+}
+
+function parseTableSub(sub) {
+    const slash = sub.indexOf('/');
+    if (slash <= 0) return null;
+    try {
+        return {database: decodeURIComponent(sub.slice(0, slash)), table: decodeURIComponent(sub.slice(slash + 1))};
+    } catch (e) {
+        return null;
+    }
+}
+
+function tableRef(database, table) {
+    return `${quoteIdentifier(database)}.${quoteIdentifier(table)}`;
+}
+
+/// A value typed in a form, as a literal of its column type: `CAST('<text>' AS <type>)`, which the server parses with
+/// the text format of the type (the format of `FORMAT JSONCompactStrings`, which the Data tab reads).
+function typedLiteral(text, type) {
+    return `CAST(${quoteString(text)} AS ${type})`;
+}
+
+/// The privileges that decide which actions the editor offers for a table. The server checks every statement anyway.
+const TABLE_GRANTS = {
+    select: 'SELECT', insert: 'INSERT', add_column: 'ALTER ADD COLUMN', modify_column: 'ALTER MODIFY COLUMN',
+    drop_column: 'ALTER DROP COLUMN', rename_column: 'ALTER RENAME COLUMN', comment_column: 'ALTER COMMENT COLUMN',
+    update: 'ALTER UPDATE', delete: 'ALTER DELETE', index: 'ALTER INDEX', projection: 'ALTER PROJECTION',
+    constraint: 'ALTER CONSTRAINT', settings: 'ALTER SETTINGS', ttl: 'ALTER TTL', comment: 'ALTER MODIFY COMMENT',
+    optimize: 'OPTIMIZE', truncate: 'TRUNCATE', drop: 'DROP TABLE', freeze: 'ALTER FREEZE PARTITION',
+};
+
+async function tableGrants(database, table) {
+    const entries = Object.entries(TABLE_GRANTS);
+    const results = await Promise.all(entries.map(([, privilege]) => checkGrant(`${privilege} ON ${tableRef(database, table)}`)));
+    return Object.fromEntries(entries.map(([key], i) => [key, results[i]]));
+}
+
+/// The statements of a plan, parsed by the server before the review: an error in an expression typed in a form is
+/// returned to the form (`formDialog` shows it) instead of failing when the plan runs.
+async function parseStatements(steps) {
+    for (const step of steps) await adminText(`EXPLAIN AST ${step.sql}`);
+}
+
+function tablePlan(ctx, action, summary, steps, extra = {}) {
+    return {action, target_type: 'table', target_name: `${ctx.database}.${ctx.table}`, local_only: true, summary, steps,
+        onclose: () => reloadAdmin(), ...extra};
+}
+
+/// A form dialog whose plan is parsed by the server before the review (`parseStatements`).
+function tableFormDialog(title, fields, submit_text, build) {
+    formDialog(title, fields, submit_text, async () => {
+        const plan = await build();
+        if (typeof plan === 'string' || !plan) return plan;
+        await parseStatements(plan.steps);
+        return plan;
+    });
+}
+
+/// An input asking to type the name of the table, for the actions that delete it or all of its data.
+function confirmNameField(ctx) {
+    const input = h('input', {type: 'text', autocomplete: 'off', spellcheck: false, placeholder: ctx.table});
+    return {input, element: adminField(`Type ${ctx.table} to confirm`, input), ok: () => input.value === ctx.table};
+}
+
+function textInput(value, props = {}) {
+    return h('input', {type: 'text', autocomplete: 'off', spellcheck: false, value: value ?? '', ...props});
+}
+
+function textArea(value, props = {}) {
+    return h('textarea', {spellcheck: false, rows: 3, className: 'code', ...props}, value ?? '');
+}
+
+/// Common ClickHouse types, offered while typing a type.
+const COMMON_TYPES = ['String', 'LowCardinality(String)', 'UInt8', 'UInt16', 'UInt32', 'UInt64', 'Int8', 'Int16', 'Int32', 'Int64',
+    'Float32', 'Float64', 'Decimal(18, 4)', 'Bool', 'Date', 'Date32', 'DateTime', "DateTime64(3)", 'UUID', 'IPv4', 'IPv6', 'JSON',
+    'Array(String)', 'Map(String, String)', 'Nullable(String)', 'Enum8(\'a\' = 1, \'b\' = 2)'];
+
+function typeInput(value) {
+    const id = `types-${Math.random().toString(36).slice(2)}`;
+    const input = textInput(value, {list: id, placeholder: 'String'});
+    const list = h('datalist', {id}, COMMON_TYPES.map(type => h('option', {value: type})));
+    return {input, element: h('span', {}, input, list)};
+}
+
+/// --- Tables: the list ---
+
+async function loadTableList(with_system) {
+    return adminRows(`SELECT database, name, engine, total_rows, total_bytes, total_bytes_uncompressed, metadata_modification_time, comment
+        FROM system.tables WHERE NOT is_temporary ${with_system ? '' : 'AND database NOT IN (\'system\', \'INFORMATION_SCHEMA\', \'information_schema\')'}
+        ORDER BY database, name LIMIT 10000`, {});
+}
+
+function compressionRatio(compressed, uncompressed) {
+    const c = Number(compressed);
+    const u = Number(uncompressed);
+    return c > 0 && u > 0 ? `${(u / c).toFixed(1)}×` : '—';
+}
+
+function renderTableList(root, page) {
+    const c = page.component;
+    const results = h('div', {}, loadingBox('Loading…'));
+    const q = h('input', {type: 'search', autocomplete: 'off', spellcheck: false, placeholder: 'Database, table, or engine'});
+    const database = select([['', 'All databases']], '');
+    const with_system = checkbox('Show system databases', false);
+    let rows = [];
+    const render = () => {
+        const text = q.value.trim().toLowerCase();
+        const shown = rows.filter(row => (!database.value || row.database === database.value)
+            && (!text || [row.database, row.name, row.engine].some(value => value.toLowerCase().includes(text))));
+        results.replaceChildren(h('p', {className: 'note'}, `${shown.length} of ${rows.length} tables.`), dataTable([
+            {title: 'Table', render: row => [adminLink(row.name, c.id, tableSub(row.database, row.name)), h('div', {className: 'note'}, row.database)]},
+            {title: 'Engine', render: row => row.engine},
+            {title: 'Rows', render: row => (row.total_rows === null ? '—' : Number(row.total_rows).toLocaleString('en-US'))},
+            {title: 'Size on disk', render: row => formatBytes(row.total_bytes)},
+            {title: 'Compression', render: row => compressionRatio(row.total_bytes, row.total_bytes_uncompressed)},
+            {title: 'Changed', render: row => row.metadata_modification_time},
+            {title: 'Comment', render: row => row.comment},
+        ], shown.slice(0, 1000), 'No table matches.', 'Tables'));
+    };
+    const load = async () => {
+        results.replaceChildren(loadingBox('Loading…'));
+        try {
+            rows = await loadTableList(with_system.input.checked);
+            if (!isCurrent(page)) return;
+            const chosen = database.value;
+            database.replaceChildren(...[['', 'All databases'], ...[...new Set(rows.map(row => row.database))].map(db => [db, db])]
+                .map(([value, label]) => h('option', {value, selected: value === chosen}, label)));
+            render();
+        } catch (e) {
+            if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+            results.replaceChildren(errorBox(e));
+        }
+    };
+    q.addEventListener('input', render);
+    database.addEventListener('change', render);
+    with_system.input.addEventListener('change', load);
+    put(root, pageHeader(c, 'Tables', null, [button('New table', () => createTableDialog()), button('Refresh', load)]),
+        h('p', {className: 'note'}, `The tables of ${session.hostname}. Select a table to see and change its columns, data, indexes, partitions, `
+            + 'mutations, settings, and DDL. Every change is reviewed before it runs, with your privileges.'),
+        h('div', {className: 'toolbar'}, adminField('Search', q), adminField('Database', database), with_system.element),
+        h('div', {className: 'box'}, results));
+    load();
+}
+
+/// --- Tables: creating a table ---
+
+const TABLE_ENGINES = [
+    ['MergeTree', 'MergeTree'], ['ReplacingMergeTree', 'ReplacingMergeTree: keeps the last row of each sorting key'],
+    ['SummingMergeTree', 'SummingMergeTree: sums the numeric columns of each sorting key'],
+    ['AggregatingMergeTree', 'AggregatingMergeTree: merges aggregate function states'],
+    ['Memory', 'Memory: in memory only, lost at restart'], ['Log', 'Log: small tables, written once'],
+];
+
+/// The column definitions of a new table, edited as rows.
+function columnsEditor(initial) {
+    const rows = [];
+    const body = h('div', {className: 'column-rows'});
+    const changed = new Set();
+    const add = (column = {name: '', type: 'String', default_expression: '', comment: ''}) => {
+        const name = textInput(column.name, {placeholder: 'name', 'aria-label': 'Column name'});
+        const type = typeInput(column.type);
+        type.input.setAttribute('aria-label', 'Column type');
+        const default_expression = textInput(column.default_expression, {placeholder: 'default (optional)', 'aria-label': 'Default expression'});
+        const comment = textInput(column.comment, {placeholder: 'comment (optional)', 'aria-label': 'Column comment'});
+        const row = {name, type: type.input, default_expression, comment};
+        const element = h('div', {className: 'toolbar'}, name, type.element, default_expression, comment,
+            button('Remove', () => { rows.splice(rows.indexOf(row), 1); element.remove(); changed.forEach(f => f()); }, {className: 'small'}));
+        for (const input of [name, type.input, default_expression, comment]) input.addEventListener('input', () => changed.forEach(f => f()));
+        rows.push(row);
+        body.append(element);
+        changed.forEach(f => f());
+    };
+    (initial && initial.length ? initial : [{name: 'id', type: 'UInt64', default_expression: '', comment: ''}]).forEach(add);
+    return {
+        element: h('div', {}, body, button('Add column', () => add(), {className: 'small'})),
+        columns: () => rows.map(row => ({name: row.name.value.trim(), type: row.type.value.trim(),
+            default_expression: row.default_expression.value.trim(), comment: row.comment.value})),
+        onChange: f => changed.add(f),
+    };
+}
+
+function columnDefinition(column) {
+    return `${quoteIdentifier(column.name)} ${column.type}`
+        + (column.default_expression ? ` DEFAULT ${column.default_expression}` : '')
+        + (column.comment ? ` COMMENT ${quoteString(column.comment)}` : '');
+}
+
+async function createTableDialog() {
+    let known;
+    try {
+        known = (await adminRows('SELECT name FROM system.databases ORDER BY name', {})).map(row => row.name).filter(db => !SYSTEM_DATABASES.includes(db));
+    } catch (e) {
+        if (!(e instanceof AdminSessionChanged)) openDialog('New table', [errorBox(e, 'The databases cannot be listed:')], [button('Close', closeDialog)]);
+        return;
+    }
+    const database = select(known.map(db => [db, db]), known.includes('default') ? 'default' : known[0]);
+    const name = textInput('', {placeholder: 'table name', autofocus: true});
+    const engine = select(TABLE_ENGINES, 'MergeTree');
+    const columns = columnsEditor();
+    const order_by = textInput('', {placeholder: 'id   (empty: tuple())'});
+    const partition_by = textInput('', {placeholder: 'toYYYYMM(event_date)   (optional)'});
+    const ttl = textInput('', {placeholder: 'event_date + INTERVAL 1 YEAR   (optional)'});
+    const comment = textInput('', {placeholder: 'optional'});
+    const preview = h('pre', {className: 'code'});
+    const merge_tree_fields = h('div', {}, adminField('Sorting key (ORDER BY)', order_by, 'Columns or expressions, separated by commas. It also is the primary index.'),
+        adminField('Partition key (PARTITION BY)', partition_by, 'Keep partitions coarse, such as months: thousands of partitions slow the server down.'),
+        adminField('TTL', ttl, 'When rows are deleted. Empty: kept forever.'));
+    const statement = () => {
+        const merge_tree = isMergeTreeEngine(engine.value);
+        const keys = order_by.value.trim();
+        return `CREATE TABLE ${tableRef(database.value, name.value.trim() || 'table_name')}\n(\n`
+            + columns.columns().filter(column => column.name).map(column => `    ${columnDefinition(column)}`).join(',\n')
+            + `\n)\nENGINE = ${engine.value}`
+            + (merge_tree ? `\nORDER BY ${keys ? (keys.includes(',') ? `(${keys})` : keys) : 'tuple()'}` : '')
+            + (merge_tree && partition_by.value.trim() ? `\nPARTITION BY ${partition_by.value.trim()}` : '')
+            + (merge_tree && ttl.value.trim() ? `\nTTL ${ttl.value.trim()}` : '')
+            + (comment.value ? `\nCOMMENT ${quoteString(comment.value)}` : '');
+    };
+    const update = () => {
+        merge_tree_fields.hidden = !isMergeTreeEngine(engine.value);
+        preview.textContent = statement();
+    };
+    for (const input of [database, name, engine, order_by, partition_by, ttl, comment]) input.addEventListener('input', update);
+    engine.addEventListener('change', update);
+    columns.onChange(update);
+    update();
+    tableFormDialog('New table', [
+        h('div', {className: 'toolbar'}, adminField('Database', database), adminField('Table name', name), adminField('Engine', engine)),
+        h('h3', {}, 'Columns'), columns.element, merge_tree_fields, adminField('Comment', comment),
+        h('h3', {}, 'Statement'), preview,
+    ], 'Review', () => {
+        const table = name.value.trim();
+        if (!table) return 'Enter the name of the table.';
+        const defined = columns.columns().filter(column => column.name || column.type);
+        if (!defined.length) return 'Add at least one column.';
+        if (defined.some(column => !column.name || !column.type)) return 'Every column needs a name and a type.';
+        return {action: 'create_table', target_type: 'table', target_name: `${database.value}.${table}`, local_only: true,
+            summary: `Create the table ${database.value}.${table}`,
+            steps: [{description: `Create the table ${database.value}.${table} with ${defined.length} columns (${engine.value})`, sql: statement()}],
+            onclose: () => navigate(adminPath('tables', tableSub(database.value, table), 'overview'))};
+    });
+}
+
+/// --- Tables: one table ---
+
+async function loadTableInfo(database, table) {
+    const rows = await adminRows(`SELECT database, name, engine, engine_full, uuid, total_rows, total_bytes, total_bytes_uncompressed, parts,
+        active_parts, partition_key, sorting_key, primary_key, sampling_key, storage_policy, metadata_modification_time, comment,
+        create_table_query, as_select, dependencies_database, dependencies_table, has_own_data
+        FROM system.tables WHERE database = {database:String} AND name = {table:String}`, {database, table});
+    return rows[0] || null;
+}
+
+function renderTablePage(root, route, page) {
+    const c = page.component;
+    const target = parseTableSub(route.sub);
+    const crumbs = adminLink('Tables', c.id);
+    if (!target) {
+        put(root, pageHeader(c, 'Table', crumbs), h('div', {className: 'box'}, paragraph('This address does not name a table.')));
+        return;
+    }
+    const tab = TABLE_TABS.some(([key]) => key === route.tab) ? route.tab : 'overview';
+    const body = h('div', {}, loadingBox('Loading the table…'));
+    put(root, pageHeader(c, `${target.database}.${target.table}`, crumbs, [button('Refresh', () => reloadAdmin())]),
+        tabList(c, route.sub, TABLE_TABS, tab), body);
+    (async () => {
+        try {
+            const [info, grants] = await Promise.all([loadTableInfo(target.database, target.table), tableGrants(target.database, target.table)]);
+            if (!isCurrent(page)) return;
+            if (!info) {
+                body.replaceChildren(h('div', {className: 'box'}, paragraph(`The table ${target.database}.${target.table} does not exist, `
+                    + 'or your user cannot see it.'), h('div', {className: 'actions-row'}, adminLink('Back to the tables', c.id))));
+                return;
+            }
+            const ctx = {database: target.database, table: target.table, info, grants, page, c, sub: route.sub,
+                merge_tree: isMergeTreeEngine(info.engine), view: VIEW_ENGINES.has(info.engine)};
+            body.replaceChildren();
+            await TABLE_TAB_RENDERERS[tab](body, ctx);
+        } catch (e) {
+            if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+            body.replaceChildren(errorBox(e));
+        }
+    })();
+}
+
+/// Renders a section that loads data, with its error in place.
+async function tableSection(container, title, actions, load, render) {
+    const content = h('div', {}, loadingBox('Loading…'));
+    container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, title), h('span', {className: 'spacer'}), actions),
+        content));
+    try {
+        const data = await load();
+        content.replaceChildren(...[render(data)].flat(Infinity).filter(Boolean));
+    } catch (e) {
+        if (e instanceof AdminSessionChanged) throw e;
+        content.replaceChildren(errorBox(e));
+    }
+}
+
+/// A button for an action the user may not have the privilege for: disabled, with the privilege it needs.
+function grantButton(ctx, key, text, onclick, options = {}) {
+    const allowed = ctx.grants[key];
+    return button(text, onclick, {...options, disabled: options.disabled || !allowed,
+        title: allowed ? options.title : `Needs ${TABLE_GRANTS[key]} on this table.`});
+}
+
+/// --- Tables: Overview ---
+
+async function renderTableOverview(container, ctx) {
+    const info = ctx.info;
+    const dependents = (info.dependencies_table || []).map((table, i) => adminLink(`${info.dependencies_database[i]}.${table}`, ctx.c.id,
+        tableSub(info.dependencies_database[i], table)));
+    container.append(h('div', {className: 'box'}, kvList([
+        ['Engine', h('code', {}, info.engine_full || info.engine)],
+        ['Rows', info.total_rows === null ? '—' : Number(info.total_rows).toLocaleString('en-US')],
+        ['Size on disk', formatBytes(info.total_bytes)],
+        ['Uncompressed', formatBytes(info.total_bytes_uncompressed)],
+        ['Compression', compressionRatio(info.total_bytes, info.total_bytes_uncompressed)],
+        ctx.merge_tree ? ['Parts', `${Number(info.active_parts).toLocaleString('en-US')} active`] : null,
+        info.partition_key ? ['Partition key', h('code', {}, info.partition_key)] : null,
+        info.sorting_key ? ['Sorting key', h('code', {}, info.sorting_key)] : null,
+        info.primary_key && info.primary_key !== info.sorting_key ? ['Primary key', h('code', {}, info.primary_key)] : null,
+        info.sampling_key ? ['Sampling key', h('code', {}, info.sampling_key)] : null,
+        info.storage_policy ? ['Storage policy', info.storage_policy] : null,
+        info.as_select ? ['Query', h('pre', {className: 'code'}, info.as_select)] : null,
+        ['Changed', info.metadata_modification_time],
+        ['UUID', info.uuid],
+        ['Comment', info.comment || '—'],
+        ['Used by', dependents.length ? h('span', {className: 'chips'}, dependents) : 'No view or materialized view reads it.'],
+    ])));
+    if (/^Replicated/.test(info.engine)) {
+        await tableSection(container, 'Replication', null,
+            () => adminRows(`SELECT is_readonly, is_session_expired, absolute_delay, queue_size, inserts_in_queue, merges_in_queue,
+                total_replicas, active_replicas, replica_name, zookeeper_path FROM system.replicas
+                WHERE database = {database:String} AND table = {table:String}`, {database: ctx.database, table: ctx.table}),
+            rows => (rows.length ? kvList([
+                ['Replica', rows[0].replica_name],
+                ['Replicas', `${rows[0].active_replicas} of ${rows[0].total_replicas} active`],
+                ['State', Number(rows[0].is_readonly) ? badge('Read-only', 'bad') : Number(rows[0].is_session_expired) ? badge('Keeper session expired', 'bad') : badge('OK', 'ok')],
+                ['Delay', formatSeconds(Number(rows[0].absolute_delay))],
+                ['Queue', `${rows[0].queue_size} tasks (${rows[0].inserts_in_queue} inserts, ${rows[0].merges_in_queue} merges)`],
+                ['Keeper path', h('code', {}, rows[0].zookeeper_path)],
+            ]) : paragraph('No replica information.')));
+    }
+    container.append(h('div', {className: 'box'}, h('h2', {}, 'Actions'), h('div', {className: 'actions-row'},
+        grantButton(ctx, 'comment', 'Edit comment', () => tableCommentDialog(ctx), {disabled: ctx.view}),
+        grantButton(ctx, 'drop', 'Rename', () => renameTableDialog(ctx)),
+        ctx.merge_tree ? grantButton(ctx, 'optimize', 'Optimize', () => optimizeDialog(ctx)) : null,
+        ctx.view ? null : grantButton(ctx, 'truncate', 'Truncate', () => truncateDialog(ctx), {className: 'danger'}),
+        grantButton(ctx, 'drop', 'Drop', () => dropTableDialog(ctx), {className: 'danger'}))));
+}
+
+function tableCommentDialog(ctx) {
+    const comment = textArea(ctx.info.comment, {autofocus: true});
+    tableFormDialog(`Comment of ${ctx.table}`, [adminField('Comment', comment)], 'Review', () =>
+        tablePlan(ctx, 'table_comment', `Change the comment of ${ctx.database}.${ctx.table}`,
+            [{description: 'Change the comment of the table', sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} MODIFY COMMENT ${quoteString(comment.value)}`}]));
+}
+
+function renameTableDialog(ctx) {
+    const name = textInput(ctx.table, {autofocus: true});
+    tableFormDialog(`Rename ${ctx.table}`, [adminField('New name', name,
+        'Queries and views that use the old name stop working. Needs DROP TABLE on the old name and CREATE TABLE on the new one.')], 'Review', () => {
+        const new_name = name.value.trim();
+        if (!new_name || new_name === ctx.table) return 'Enter a new name.';
+        return tablePlan(ctx, 'rename_table', `Rename ${ctx.database}.${ctx.table} to ${new_name}`,
+            [{description: `Rename the table to ${new_name}`, sql: `RENAME TABLE ${tableRef(ctx.database, ctx.table)} TO ${tableRef(ctx.database, new_name)}`}],
+            {onclose: () => navigate(adminPath(ctx.c.id, tableSub(ctx.database, new_name), 'overview'))});
+    });
+}
+
+function optimizeDialog(ctx) {
+    const final = checkbox('FINAL: merge each partition into one part, even when it already has one (heavy on large tables)', false);
+    const dedup = checkbox('DEDUPLICATE: also remove rows that are identical in every column', false);
+    tableFormDialog(`Optimize ${ctx.table}`, [paragraph('Starts a merge of the parts of the table now, instead of waiting for the background merges.'),
+        final.element, dedup.element], 'Review', () => tablePlan(ctx, 'optimize_table', `Optimize ${ctx.database}.${ctx.table}`,
+        [{description: `Merge the parts of the table${final.input.checked ? ' (FINAL)' : ''}${dedup.input.checked ? ', removing duplicates' : ''}`,
+            sql: `OPTIMIZE TABLE ${tableRef(ctx.database, ctx.table)}${final.input.checked ? ' FINAL' : ''}${dedup.input.checked ? ' DEDUPLICATE' : ''}`}]));
+}
+
+function truncateDialog(ctx) {
+    const confirm = confirmNameField(ctx);
+    tableFormDialog(`Truncate ${ctx.table}`, [h('div', {className: 'message warning'}, `Deletes every row of ${ctx.database}.${ctx.table}. `
+        + 'The table and its columns stay. UNDROP cannot bring the rows back: only a backup can.'), confirm.element], 'Review', () => {
+        if (!confirm.ok()) return `Type ${ctx.table} to confirm.`;
+        return tablePlan(ctx, 'truncate_table', `Truncate ${ctx.database}.${ctx.table}`,
+            [{description: 'Delete every row of the table', sql: `TRUNCATE TABLE ${tableRef(ctx.database, ctx.table)}`}], {danger: true, confirm_text: 'Truncate'});
+    });
+}
+
+function dropTableDialog(ctx) {
+    const confirm = confirmNameField(ctx);
+    tableFormDialog(`Drop ${ctx.table}`, [h('div', {className: 'message warning'}, `Deletes the table ${ctx.database}.${ctx.table} and its data. `
+        + 'In an Atomic database, UNDROP TABLE can bring it back for 8 minutes (database_atomic_delay_before_drop_table_sec).'),
+    confirm.element], 'Review', () => {
+        if (!confirm.ok()) return `Type ${ctx.table} to confirm.`;
+        return tablePlan(ctx, 'drop_table', `Drop ${ctx.database}.${ctx.table}`,
+            [{description: 'Drop the table', sql: `DROP TABLE ${tableRef(ctx.database, ctx.table)}`}],
+            {danger: true, confirm_text: 'Drop', onclose: () => navigate(adminPath(ctx.c.id))});
+    });
+}
+
+/// --- Tables: Columns ---
+
+async function loadTableColumns(ctx) {
+    return adminRows(`SELECT position, name, type, default_kind, default_expression, comment, compression_codec, data_compressed_bytes,
+        data_uncompressed_bytes, is_in_partition_key, is_in_sorting_key, is_in_primary_key, is_in_sampling_key
+        FROM system.columns WHERE database = {database:String} AND table = {table:String} ORDER BY position`,
+    {database: ctx.database, table: ctx.table});
+}
+
+function keyBadges(column) {
+    return [Number(column.is_in_partition_key) ? badge('partition key', '') : null, Number(column.is_in_sorting_key) ? badge('sorting key', '') : null,
+        Number(column.is_in_primary_key) && !Number(column.is_in_sorting_key) ? badge('primary key', '') : null,
+        Number(column.is_in_sampling_key) ? badge('sampling key', '') : null];
+}
+
+function isKeyColumn(column) {
+    return [column.is_in_partition_key, column.is_in_sorting_key, column.is_in_primary_key, column.is_in_sampling_key].some(Number);
+}
+
+async function renderTableColumns(container, ctx) {
+    const editable = !ctx.view;
+    await tableSection(container, 'Columns', editable ? grantButton(ctx, 'add_column', 'Add column', () => columnDialog(ctx, null, ctx.columns)) : null,
+        async () => (ctx.columns = await loadTableColumns(ctx)),
+        columns => [dataTable([
+            {title: 'Column', render: column => [h('strong', {}, column.name), h('div', {}, keyBadges(column))]},
+            {title: 'Type', render: column => h('code', {}, column.type)},
+            {title: 'Default', render: column => (column.default_kind ? h('code', {}, `${column.default_kind} ${column.default_expression}`) : '—')},
+            {title: 'Codec', render: column => (column.compression_codec ? h('code', {}, column.compression_codec) : 'default')},
+            {title: 'On disk', render: column => [formatBytes(column.data_compressed_bytes),
+                h('div', {className: 'note'}, `${compressionRatio(column.data_compressed_bytes, column.data_uncompressed_bytes)} of ${formatBytes(column.data_uncompressed_bytes)}`)]},
+            {title: 'Comment', render: column => column.comment},
+            editable ? {title: '', render: column => h('div', {className: 'actions-row'},
+                grantButton(ctx, 'modify_column', 'Edit', () => columnDialog(ctx, column, columns), {className: 'small'}),
+                grantButton(ctx, 'rename_column', 'Rename', () => renameColumnDialog(ctx, column), {className: 'small',
+                    disabled: isKeyColumn(column), title: isKeyColumn(column) ? 'A column of a key cannot be renamed.' : null}),
+                grantButton(ctx, 'drop_column', 'Drop', () => dropColumnDialog(ctx, column), {className: 'small danger',
+                    disabled: isKeyColumn(column), title: isKeyColumn(column) ? 'A column of a key cannot be dropped.' : null}))} : null,
+        ].filter(Boolean), columns, 'No columns.', 'Columns'),
+        ctx.view ? paragraph('The columns of a view come from its query: change the query to change them.') : null]);
+}
+
+const DEFAULT_KINDS = [['', 'No default'], ['DEFAULT', 'DEFAULT: used when a row does not give a value'],
+    ['MATERIALIZED', 'MATERIALIZED: always computed, not in SELECT *'], ['ALIAS', 'ALIAS: computed when read, not stored'],
+    ['EPHEMERAL', 'EPHEMERAL: only for computing other columns']];
+
+/// Adds a column (`existing` null) or changes one: its type, default, codec (MODIFY COLUMN), and comment (COMMENT COLUMN).
+function columnDialog(ctx, existing, columns) {
+    const name = textInput(existing ? existing.name : '', {disabled: !!existing, autofocus: !existing});
+    const type = typeInput(existing ? existing.type : 'String');
+    const kind = select(DEFAULT_KINDS, existing ? existing.default_kind : '');
+    const expression = textInput(existing ? existing.default_expression : '', {placeholder: 'expression'});
+    const codec = textInput(existing ? existing.compression_codec.replace(/^CODEC\((.*)\)$/, '$1') : '', {placeholder: 'ZSTD(3)   (empty: the default)'});
+    const comment = textInput(existing ? existing.comment : '');
+    const position = select([['', 'At the end'], ['FIRST', 'First'], ...(columns || []).map(column => [`AFTER ${column.name}`, `After ${column.name}`])], '');
+    const fields = [adminField('Name', name), adminField('Type', type.element,
+        existing && isKeyColumn(existing) ? 'The type of a key column can change only to a type with the same values (for example a wider integer).' : null),
+    h('div', {className: 'toolbar'}, adminField('Default', kind), adminField('Expression', expression)),
+    adminField('Codec', codec, 'Compression of the column, such as ZSTD(3), or Delta, ZSTD for sorted numbers.'),
+    adminField('Comment', comment), existing ? null : adminField('Position', position)];
+    if (existing && ctx.merge_tree) fields.push(h('p', {className: 'note'}, 'Changing the type rewrites the column in every part (a mutation, see the Mutations tab).'));
+    tableFormDialog(existing ? `Column ${existing.name}` : `Add a column to ${ctx.table}`, fields, 'Review', () => {
+        const column_name = name.value.trim();
+        if (!column_name) return 'Enter the name of the column.';
+        if (!type.input.value.trim()) return 'Enter the type of the column.';
+        if (kind.value && !expression.value.trim()) return `Enter the expression of ${kind.value}.`;
+        const definition = `${quoteIdentifier(column_name)} ${type.input.value.trim()}`
+            + (kind.value ? ` ${kind.value} ${expression.value.trim()}` : '')
+            + (codec.value.trim() ? ` CODEC(${codec.value.trim()})` : '');
+        const ref = tableRef(ctx.database, ctx.table);
+        if (!existing) {
+            const where = position.value === 'FIRST' ? ' FIRST'
+                : position.value ? ` AFTER ${quoteIdentifier(position.value.slice('AFTER '.length))}` : '';
+            return tablePlan(ctx, 'add_column', `Add the column ${column_name} to ${ctx.database}.${ctx.table}`,
+                [{description: `Add the column ${column_name} ${type.input.value.trim()}`,
+                    sql: `ALTER TABLE ${ref} ADD COLUMN ${definition}${comment.value ? ` COMMENT ${quoteString(comment.value)}` : ''}${where}`}]);
+        }
+        const steps = [];
+        const old_codec = existing.compression_codec.replace(/^CODEC\((.*)\)$/, '$1');
+        if (type.input.value.trim() !== existing.type || kind.value !== existing.default_kind
+            || (kind.value && expression.value.trim() !== existing.default_expression) || codec.value.trim() !== old_codec) {
+            if (!kind.value && existing.default_kind) {
+                steps.push({description: `Remove the ${existing.default_kind} of ${column_name}`,
+                    sql: `ALTER TABLE ${ref} MODIFY COLUMN ${quoteIdentifier(column_name)} REMOVE ${existing.default_kind}`});
+            }
+            /// A MODIFY COLUMN without CODEC keeps the codec: removing it is a statement of its own.
+            if (!codec.value.trim() && old_codec) {
+                steps.push({description: `Remove the codec of ${column_name}`,
+                    sql: `ALTER TABLE ${ref} MODIFY COLUMN ${quoteIdentifier(column_name)} REMOVE CODEC`});
+            }
+            steps.push({description: `Change the definition of ${column_name}`, sql: `ALTER TABLE ${ref} MODIFY COLUMN ${definition}`});
+        }
+        if (comment.value !== existing.comment) {
+            steps.push({description: `Change the comment of ${column_name}`,
+                sql: `ALTER TABLE ${ref} COMMENT COLUMN ${quoteIdentifier(column_name)} ${quoteString(comment.value)}`});
+        }
+        if (!steps.length) return 'Nothing changed.';
+        return tablePlan(ctx, 'modify_column', `Change the column ${column_name} of ${ctx.database}.${ctx.table}`, steps);
+    });
+}
+
+function renameColumnDialog(ctx, column) {
+    const name = textInput(column.name, {autofocus: true});
+    tableFormDialog(`Rename ${column.name}`, [adminField('New name', name, 'Queries, views, and materialized views that use the old name stop working.')],
+        'Review', () => {
+            const new_name = name.value.trim();
+            if (!new_name || new_name === column.name) return 'Enter a new name.';
+            return tablePlan(ctx, 'rename_column', `Rename the column ${column.name} of ${ctx.database}.${ctx.table}`,
+                [{description: `Rename ${column.name} to ${new_name}`,
+                    sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} RENAME COLUMN ${quoteIdentifier(column.name)} TO ${quoteIdentifier(new_name)}`}]);
+        });
+}
+
+function dropColumnDialog(ctx, column) {
+    tableFormDialog(`Drop ${column.name}`, [h('div', {className: 'message warning'}, `Deletes the column ${column.name} and its data from every part. `
+        + 'Only a backup can bring the data back.')], 'Review', () =>
+        tablePlan(ctx, 'drop_column', `Drop the column ${column.name} of ${ctx.database}.${ctx.table}`,
+            [{description: `Drop the column ${column.name}`, sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} DROP COLUMN ${quoteIdentifier(column.name)}`}],
+            {danger: true, confirm_text: 'Drop column'}));
+}
+
+/// --- Tables: Data ---
+
+const DATA_PAGE_SIZES = [['50', '50 rows'], ['100', '100 rows'], ['500', '500 rows']];
+
+/// The rows of a page, as text (`FORMAT JSONCompactStrings`, the text format of each type, which `typedLiteral` reads
+/// back), with `_part` and `_part_offset` for a MergeTree table: they name one row, so that editing a row changes that
+/// row only, even when another row has the same values. A part renamed by a merge or a mutation makes the reference
+/// match nothing, which the editor reports.
+async function loadTableRows(ctx, options) {
+    const where = options.filter ? ` WHERE ${options.filter}` : '';
+    const order = options.order ? ` ORDER BY ${quoteIdentifier(options.order)} ${options.desc ? 'DESC' : 'ASC'}` : '';
+    const identity = ctx.merge_tree ? ', _part, _part_offset' : '';
+    const [data, count] = await Promise.all([
+        runQuery(session, `SELECT *${identity} FROM ${tableRef(ctx.database, ctx.table)}${where}${order} LIMIT ${options.size} OFFSET ${options.offset}
+            FORMAT JSONCompactStrings`, session.controller.signal, 60000, {raw: true}),
+        options.filter || ctx.view ? adminRows(`SELECT count() AS c FROM ${tableRef(ctx.database, ctx.table)}${where}`, {}) : null,
+    ]);
+    if (data.kind === 'aborted') throw new AdminSessionChanged();
+    if (!data.ok) throw new AdminQueryError(data);
+    const json = JSON.parse(data.data);
+    return {meta: json.meta || [], rows: json.data || [], total: count ? Number(count[0].c) : Number(ctx.info.total_rows)};
+}
+
+/// How `FORMAT JSONCompactStrings` writes NULL.
+const NULL_TEXT = 'ᴺᵁᴸᴸ';
+
+async function renderTableData(container, ctx) {
+    ctx.columns = ctx.columns || await loadTableColumns(ctx);
+    const filter = textInput('', {placeholder: 'WHERE condition, for example city = \'Riyadh\'', 'aria-label': 'Filter'});
+    const order = select([['', 'No order'], ...ctx.columns.map(column => [column.name, column.name])], '');
+    const desc = checkbox('Descending', false);
+    const size = select(DATA_PAGE_SIZES, '50');
+    const state = {offset: 0, filter: '', last: null};
+    const grid = h('div', {}, loadingBox('Loading…'));
+    const pager = h('div', {className: 'actions-row'});
+    const editable = ctx.merge_tree;
+    const load = async () => {
+        grid.replaceChildren(loadingBox('Loading…'));
+        try {
+            const result = await loadTableRows(ctx, {filter: state.filter, order: order.value, desc: desc.input.checked, size: Number(size.value), offset: state.offset});
+            if (!isCurrent(ctx.page)) return;
+            state.last = result;
+            const names = result.meta.map(m => m.name).filter(name => name !== '_part' && name !== '_part_offset');
+            const index = Object.fromEntries(result.meta.map((m, i) => [m.name, i]));
+            grid.replaceChildren(dataTable([
+                ...names.map(name => ({title: name, render: row => (row[index[name]] === NULL_TEXT ? h('span', {className: 'note'}, 'NULL') : row[index[name]])})),
+                editable ? {title: '', render: row => h('div', {className: 'actions-row'},
+                    grantButton(ctx, 'update', 'Edit', () => editRowDialog(ctx, result.meta, row), {className: 'small'}),
+                    grantButton(ctx, 'delete', 'Delete', () => deleteRowDialog(ctx, result.meta, row), {className: 'small danger'}))} : null,
+            ].filter(Boolean), result.rows, state.filter ? 'No row matches the filter.' : 'The table is empty.', 'Rows'));
+            const first = result.rows.length ? state.offset + 1 : 0;
+            pager.replaceChildren(h('span', {className: 'note'}, `Rows ${first}–${state.offset + result.rows.length} of `
+                + `${Number.isFinite(result.total) ? result.total.toLocaleString('en-US') : 'unknown'}${state.filter ? ' matching' : ''}`),
+            button('Previous', () => { state.offset = Math.max(0, state.offset - Number(size.value)); load(); }, {className: 'small', disabled: state.offset === 0}),
+            button('Next', () => { state.offset += Number(size.value); load(); }, {className: 'small',
+                disabled: result.rows.length < Number(size.value) || (Number.isFinite(result.total) && state.offset + result.rows.length >= result.total)}));
+        } catch (e) {
+            if (e instanceof AdminSessionChanged || !isCurrent(ctx.page)) return;
+            grid.replaceChildren(errorBox(e));
+            pager.replaceChildren();
+        }
+    };
+    const apply = async () => {
+        const text = filter.value.trim();
+        if (text) {
+            try {
+                const problem = await validateRowFilter(ctx.database, ctx.table, text);
+                if (problem) {
+                    grid.replaceChildren(h('div', {className: 'message error', role: 'alert'}, problem));
+                    return;
+                }
+            } catch (e) {
+                if (e instanceof AdminSessionChanged) return;
+                grid.replaceChildren(errorBox(e, 'The filter is not valid:'));
+                return;
+            }
+        }
+        state.filter = text;
+        state.offset = 0;
+        load();
+    };
+    filter.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+    for (const control of [order, size]) control.addEventListener('change', () => { state.offset = 0; load(); });
+    desc.input.addEventListener('change', load);
+    container.append(h('div', {className: 'box'},
+        h('div', {className: 'toolbar'}, adminField('Filter', filter), button('Apply', apply), adminField('Order by', order), desc.element, adminField('Page', size)),
+        h('div', {className: 'actions-row'},
+            ctx.view ? null : grantButton(ctx, 'insert', 'Insert row', () => insertRowDialog(ctx)),
+            editable ? grantButton(ctx, 'update', 'Update matching rows', () => updateMatchingDialog(ctx, state.filter)) : null,
+            editable ? grantButton(ctx, 'delete', 'Delete matching rows', () => deleteMatchingDialog(ctx, state.filter), {className: 'danger'}) : null),
+        ctx.view ? h('p', {className: 'note'}, 'A view has no data of its own: the rows are the result of its query.')
+            : editable ? null : h('p', {className: 'note'}, 'Rows of this engine cannot be changed one by one: only MergeTree tables support UPDATE and DELETE.'),
+        grid, pager));
+    load();
+}
+
+/// The condition that names one row: its part and its position in the part (see `loadTableRows`).
+function rowIdentity(meta, row) {
+    const index = Object.fromEntries(meta.map((m, i) => [m.name, i]));
+    return `_part = ${quoteString(row[index._part])} AND _part_offset = ${Number(row[index._part_offset])}`;
+}
+
+/// A form field for a value of a column, as text in the format of its type, with a NULL box for a Nullable column.
+function valueField(column, value) {
+    const nullable = /^(LowCardinality\()?Nullable\(/.test(column.type);
+    const input = textInput(value === NULL_TEXT ? '' : value, {'aria-label': column.name, placeholder: column.default_kind ? `default: ${column.default_expression}` : ''});
+    const is_null = nullable ? checkbox('NULL', value === NULL_TEXT) : null;
+    if (is_null) {
+        input.disabled = is_null.input.checked;
+        is_null.input.addEventListener('change', () => { input.disabled = is_null.input.checked; });
+    }
+    return {input, is_null, column, element: adminField(`${column.name} (${column.type})`, is_null ? h('span', {className: 'toolbar'}, input, is_null.element) : input),
+        literal: () => (is_null && is_null.input.checked ? 'NULL' : typedLiteral(input.value, column.type))};
+}
+
+/// Writable columns: not MATERIALIZED or ALIAS, which the server computes.
+function writableColumns(ctx) {
+    return ctx.columns.filter(column => column.default_kind !== 'MATERIALIZED' && column.default_kind !== 'ALIAS');
+}
+
+function insertRowDialog(ctx) {
+    const fields = writableColumns(ctx).map(column => ({...valueField(column, ''), touched: false}));
+    for (const field of fields) {
+        field.input.addEventListener('input', () => { field.touched = true; });
+        if (field.is_null) field.is_null.input.addEventListener('change', () => { field.touched = true; });
+    }
+    tableFormDialog(`Insert a row into ${ctx.table}`, [paragraph('Values are typed in the text format of their type: 2026-11-15 for a Date, '
+        + "['a','b'] for an Array(String). A field left empty gets the default of the column."), ...fields.map(field => field.element)], 'Review', () => {
+        const given = fields.filter(field => field.touched && (field.input.value !== '' || (field.is_null && field.is_null.input.checked)));
+        if (!given.length) return 'Enter at least one value.';
+        return tablePlan(ctx, 'insert_row', `Insert a row into ${ctx.database}.${ctx.table}`,
+            [{description: `Insert a row with ${given.length} values`, sql: `INSERT INTO ${tableRef(ctx.database, ctx.table)} (`
+                + `${given.map(field => quoteIdentifier(field.column.name)).join(', ')}) VALUES (${given.map(field => field.literal()).join(', ')})`}]);
+    });
+}
+
+function editRowDialog(ctx, meta, row) {
+    const index = Object.fromEntries(meta.map((m, i) => [m.name, i]));
+    const fields = writableColumns(ctx).filter(column => column.name in index).map(column => ({...valueField(column, row[index[column.name]]),
+        original: row[index[column.name]]}));
+    for (const field of fields) {
+        if (isKeyColumn(field.column)) {
+            field.input.disabled = true;
+            field.input.title = 'A column of a key cannot be updated.';
+            if (field.is_null) field.is_null.input.disabled = true;
+        }
+    }
+    tableFormDialog(`Edit a row of ${ctx.table}`, [paragraph('Values are typed in the text format of their type. The change is a mutation '
+        + '(ALTER TABLE ... UPDATE) of this row only, which the server applies in the background: see the Mutations tab.'),
+    ...fields.map(field => field.element)], 'Review', async () => {
+        const changed = fields.filter(field => !field.input.disabled && ((field.is_null && field.is_null.input.checked) !== (field.original === NULL_TEXT)
+            || (!(field.is_null && field.is_null.input.checked) && field.input.value !== (field.original === NULL_TEXT ? '' : field.original))));
+        if (!changed.length) return 'Nothing changed.';
+        const moved = await rowStillThere(ctx, meta, row);
+        if (moved) return moved;
+        return tablePlan(ctx, 'update_row', `Update a row of ${ctx.database}.${ctx.table}`,
+            [{description: `Update ${changed.map(field => field.column.name).join(', ')} of one row`,
+                sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} UPDATE ${changed.map(field => `${quoteIdentifier(field.column.name)} = ${field.literal()}`).join(', ')}`
+                    + ` WHERE ${rowIdentity(meta, row)}`}]);
+    });
+}
+
+/// The row still is where the page read it: a merge or a mutation that rewrote its part since then makes its reference
+/// (`rowIdentity`) match nothing, and the change would do nothing without saying so.
+async function rowStillThere(ctx, meta, row) {
+    return (await countMatching(ctx, rowIdentity(meta, row))) === 1 ? null
+        : 'This row has moved since the page read it (a merge or a mutation rewrote its part): refresh the rows and try again.';
+}
+
+function deleteRowDialog(ctx, meta, row) {
+    tableFormDialog(`Delete a row of ${ctx.table}`, [paragraph('Deletes this row (DELETE FROM ... WHERE, a lightweight delete): it disappears '
+        + 'from queries at once, and from the disk at the next merges.')], 'Review', async () =>
+        (await rowStillThere(ctx, meta, row)) || tablePlan(ctx, 'delete_row', `Delete a row of ${ctx.database}.${ctx.table}`,
+            [{description: 'Delete one row', sql: `DELETE FROM ${tableRef(ctx.database, ctx.table)} WHERE ${rowIdentity(meta, row)}`}],
+            {danger: true, confirm_text: 'Delete'}));
+}
+
+async function countMatching(ctx, condition) {
+    const rows = await adminRows(`SELECT count() AS c FROM ${tableRef(ctx.database, ctx.table)} WHERE ${condition}`, {});
+    return Number(rows[0].c);
+}
+
+function updateMatchingDialog(ctx, filter) {
+    const condition = textInput(filter, {placeholder: 'WHERE condition'});
+    const column = select(writableColumns(ctx).filter(c => !isKeyColumn(c)).map(c => [c.name, `${c.name} (${c.type})`]), '');
+    const expression = textInput('', {placeholder: 'expression, for example upper(city)'});
+    tableFormDialog(`Update rows of ${ctx.table}`, [adminField('Rows', condition, 'The rows to update. Prefilled with the filter of the Data tab.'),
+        h('div', {className: 'toolbar'}, adminField('Set column', column), adminField('To', expression)),
+        h('p', {className: 'note'}, 'A mutation (ALTER TABLE ... UPDATE), applied in the background: see the Mutations tab. Columns of a key cannot be updated.')],
+    'Review', async () => {
+        if (!condition.value.trim()) return 'Enter the condition of the rows to update.';
+        if (!expression.value.trim()) return 'Enter the new value, as an expression.';
+        const problem = await validateRowFilter(ctx.database, ctx.table, condition.value.trim());
+        if (problem) return problem;
+        const count = await countMatching(ctx, condition.value.trim());
+        return tablePlan(ctx, 'update_rows', `Update ${count.toLocaleString('en-US')} rows of ${ctx.database}.${ctx.table}`,
+            [{description: `Set ${column.value} of the ${count.toLocaleString('en-US')} rows that match`,
+                sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} UPDATE ${quoteIdentifier(column.value)} = ${expression.value.trim()} WHERE ${condition.value.trim()}`}],
+            {warning: count === 0 ? 'No row matches the condition now.' : null});
+    });
+}
+
+function deleteMatchingDialog(ctx, filter) {
+    const condition = textInput(filter, {placeholder: 'WHERE condition'});
+    tableFormDialog(`Delete rows of ${ctx.table}`, [adminField('Rows', condition, 'The rows to delete. Prefilled with the filter of the Data tab.'),
+        h('p', {className: 'note'}, 'A lightweight delete (DELETE FROM ... WHERE): the rows disappear from queries at once. Only a backup brings them back.')],
+    'Review', async () => {
+        if (!condition.value.trim()) return 'Enter the condition of the rows to delete. To delete every row, truncate the table (Overview).';
+        const problem = await validateRowFilter(ctx.database, ctx.table, condition.value.trim());
+        if (problem) return problem;
+        const count = await countMatching(ctx, condition.value.trim());
+        return tablePlan(ctx, 'delete_rows', `Delete ${count.toLocaleString('en-US')} rows of ${ctx.database}.${ctx.table}`,
+            [{description: `Delete the ${count.toLocaleString('en-US')} rows that match`, sql: `DELETE FROM ${tableRef(ctx.database, ctx.table)} WHERE ${condition.value.trim()}`}],
+            {danger: true, confirm_text: 'Delete', warning: count === 0 ? 'No row matches the condition now.' : null});
+    });
+}
+
+/// --- Tables: Indexes & projections ---
+
+const INDEX_TYPES = [['minmax', 'minmax: the range of values per granule block'], ['set(100)', 'set(N): up to N distinct values per block'],
+    ['bloom_filter(0.01)', 'bloom_filter: equality and IN on high-cardinality values'],
+    ['ngrambf_v1(3, 10000, 3, 0)', 'ngrambf_v1: LIKE and substring search'], ['tokenbf_v1(10000, 3, 0)', 'tokenbf_v1: search of whole words']];
+
+async function renderTableIndexes(container, ctx) {
+    if (!ctx.merge_tree) {
+        container.append(h('div', {className: 'box'}, paragraph('Data skipping indexes and projections exist only for MergeTree tables.')));
+        return;
+    }
+    const ref = tableRef(ctx.database, ctx.table);
+    await tableSection(container, 'Data skipping indexes', grantButton(ctx, 'index', 'Add index', () => indexDialog(ctx)),
+        () => adminRows(`SELECT name, type_full, expr, granularity, data_compressed_bytes, marks_bytes FROM system.data_skipping_indices
+            WHERE database = {database:String} AND table = {table:String} ORDER BY name`, {database: ctx.database, table: ctx.table}),
+        rows => [dataTable([
+            {title: 'Index', render: row => h('strong', {}, row.name)},
+            {title: 'Type', render: row => h('code', {}, row.type_full)},
+            {title: 'Expression', render: row => h('code', {}, row.expr)},
+            {title: 'Granularity', render: row => row.granularity},
+            {title: 'On disk', render: row => formatBytes(Number(row.data_compressed_bytes) + Number(row.marks_bytes))},
+            {title: '', render: row => h('div', {className: 'actions-row'},
+                grantButton(ctx, 'index', 'Materialize', () => reviewPlan(tablePlan(ctx, 'materialize_index', `Build the index ${row.name} for the existing parts`,
+                    [{description: `Build ${row.name} in the parts written before it existed (a mutation)`, sql: `ALTER TABLE ${ref} MATERIALIZE INDEX ${quoteIdentifier(row.name)}`}])),
+                {className: 'small'}),
+                grantButton(ctx, 'index', 'Drop', () => reviewPlan(tablePlan(ctx, 'drop_index', `Drop the index ${row.name}`,
+                    [{description: `Drop the index ${row.name}`, sql: `ALTER TABLE ${ref} DROP INDEX ${quoteIdentifier(row.name)}`}], {danger: true, confirm_text: 'Drop index'})),
+                {className: 'small danger'}))},
+        ], rows, 'No data skipping index.', 'Indexes'),
+        h('p', {className: 'note'}, 'An index skips the blocks of granules that cannot match a condition. A new index applies to new parts; '
+            + 'Materialize builds it for the existing parts.')]);
+    await tableSection(container, 'Projections', grantButton(ctx, 'projection', 'Add projection', () => projectionDialog(ctx)),
+        async () => {
+            const [projections, sizes] = await Promise.all([
+                adminRows(`SELECT name, type, sorting_key, query FROM system.projections WHERE database = {database:String} AND table = {table:String} ORDER BY name`,
+                    {database: ctx.database, table: ctx.table}),
+                adminRows(`SELECT name, sum(bytes_on_disk) AS bytes, sum(rows) AS rows FROM system.projection_parts WHERE database = {database:String}
+                    AND table = {table:String} AND active GROUP BY name`, {database: ctx.database, table: ctx.table}),
+            ]);
+            const by_name = Object.fromEntries(sizes.map(row => [row.name, row]));
+            return projections.map(row => ({...row, size: by_name[row.name]}));
+        },
+        rows => [dataTable([
+            {title: 'Projection', render: row => [h('strong', {}, row.name), h('div', {className: 'note'}, row.type)]},
+            {title: 'Query', render: row => h('code', {}, row.query)},
+            {title: 'On disk', render: row => (row.size ? `${formatBytes(row.size.bytes)}, ${Number(row.size.rows).toLocaleString('en-US')} rows` : 'not built')},
+            {title: '', render: row => h('div', {className: 'actions-row'},
+                grantButton(ctx, 'projection', 'Materialize', () => reviewPlan(tablePlan(ctx, 'materialize_projection', `Build the projection ${row.name}`,
+                    [{description: `Build ${row.name} in the existing parts (a mutation)`, sql: `ALTER TABLE ${ref} MATERIALIZE PROJECTION ${quoteIdentifier(row.name)}`}])),
+                {className: 'small'}),
+                grantButton(ctx, 'projection', 'Drop', () => reviewPlan(tablePlan(ctx, 'drop_projection', `Drop the projection ${row.name}`,
+                    [{description: `Drop the projection ${row.name}`, sql: `ALTER TABLE ${ref} DROP PROJECTION ${quoteIdentifier(row.name)}`}], {danger: true, confirm_text: 'Drop projection'})),
+                {className: 'small danger'}))},
+        ], rows, 'No projection.', 'Projections'),
+        h('p', {className: 'note'}, 'A projection stores the rows again in another order, or pre-aggregated, and the server uses it for the '
+            + 'queries it fits. It takes disk space and slows inserts down.')]);
+}
+
+function indexDialog(ctx) {
+    const name = textInput('', {autofocus: true, placeholder: 'idx_city'});
+    const expression = textInput('', {placeholder: 'city'});
+    const type = select(INDEX_TYPES, 'minmax');
+    const custom = textInput('', {placeholder: 'or another type, such as set(1000)'});
+    const granularity = h('input', {type: 'number', min: 1, value: 1});
+    const materialize = checkbox('Also build it for the existing parts (MATERIALIZE INDEX, a mutation)', true);
+    tableFormDialog(`Add an index to ${ctx.table}`, [adminField('Name', name), adminField('Expression', expression, 'A column, or an expression over columns.'),
+        h('div', {className: 'toolbar'}, adminField('Type', type), adminField('Other type', custom)),
+        adminField('Granularity', granularity, 'The number of granules of a block of the index.'), materialize.element], 'Review', () => {
+        const index = name.value.trim();
+        if (!index || !expression.value.trim()) return 'Enter the name and the expression.';
+        const ref = tableRef(ctx.database, ctx.table);
+        const steps = [{description: `Add the index ${index}`, sql: `ALTER TABLE ${ref} ADD INDEX ${quoteIdentifier(index)} ${expression.value.trim()} `
+            + `TYPE ${custom.value.trim() || type.value} GRANULARITY ${Number(granularity.value) || 1}`}];
+        if (materialize.input.checked) steps.push({description: `Build ${index} for the existing parts`, sql: `ALTER TABLE ${ref} MATERIALIZE INDEX ${quoteIdentifier(index)}`});
+        return tablePlan(ctx, 'add_index', `Add the index ${index} to ${ctx.database}.${ctx.table}`, steps);
+    });
+}
+
+function projectionDialog(ctx) {
+    const name = textInput('', {autofocus: true, placeholder: 'by_city'});
+    const query = textArea('SELECT * ORDER BY ', {rows: 4});
+    const materialize = checkbox('Also build it for the existing parts (MATERIALIZE PROJECTION, a mutation)', true);
+    tableFormDialog(`Add a projection to ${ctx.table}`, [adminField('Name', name), adminField('Query', query,
+        'SELECT * ORDER BY another_key, or SELECT key, count() GROUP BY key for a pre-aggregated projection. No FROM.'), materialize.element], 'Review', () => {
+        const projection = name.value.trim();
+        if (!projection || !query.value.trim()) return 'Enter the name and the query.';
+        const ref = tableRef(ctx.database, ctx.table);
+        const steps = [{description: `Add the projection ${projection}`, sql: `ALTER TABLE ${ref} ADD PROJECTION ${quoteIdentifier(projection)} (${query.value.trim()})`}];
+        if (materialize.input.checked) steps.push({description: `Build ${projection} for the existing parts`, sql: `ALTER TABLE ${ref} MATERIALIZE PROJECTION ${quoteIdentifier(projection)}`});
+        return tablePlan(ctx, 'add_projection', `Add the projection ${projection} to ${ctx.database}.${ctx.table}`, steps);
+    });
+}
+
+/// --- Tables: Partitions & parts ---
+
+async function renderTablePartitions(container, ctx) {
+    if (!ctx.merge_tree) {
+        container.append(h('div', {className: 'box'}, paragraph('Partitions and parts exist only for MergeTree tables.')));
+        return;
+    }
+    const ref = tableRef(ctx.database, ctx.table);
+    const params = {database: ctx.database, table: ctx.table};
+    const partitionStep = (verb, partition_id, extra = '') => `ALTER TABLE ${ref} ${verb} PARTITION ID ${quoteString(partition_id)}${extra}`;
+    await tableSection(container, 'Partitions', null,
+        () => adminRows(`SELECT partition, partition_id, count() AS parts, sum(rows) AS rows, sum(bytes_on_disk) AS bytes, max(modification_time) AS changed
+            FROM system.parts WHERE database = {database:String} AND table = {table:String} AND active
+            GROUP BY partition, partition_id ORDER BY partition LIMIT 1000`, params),
+        rows => [dataTable([
+            {title: 'Partition', render: row => [h('code', {}, row.partition), h('div', {className: 'note'}, `ID ${row.partition_id}`)]},
+            {title: 'Parts', render: row => row.parts},
+            {title: 'Rows', render: row => Number(row.rows).toLocaleString('en-US')},
+            {title: 'On disk', render: row => formatBytes(row.bytes)},
+            {title: 'Changed', render: row => row.changed},
+            {title: '', render: row => h('div', {className: 'actions-row'},
+                grantButton(ctx, 'optimize', 'Optimize', () => reviewPlan(tablePlan(ctx, 'optimize_partition', `Merge the partition ${row.partition}`,
+                    [{description: `Merge the parts of the partition ${row.partition} into one`, sql: `OPTIMIZE TABLE ${ref} PARTITION ID ${quoteString(row.partition_id)} FINAL`}])),
+                {className: 'small'}),
+                grantButton(ctx, 'freeze', 'Freeze', () => reviewPlan(tablePlan(ctx, 'freeze_partition', `Freeze the partition ${row.partition}`,
+                    [{description: `Make a local copy of the partition ${row.partition} in the shadow directory of the server`, sql: partitionStep('FREEZE', row.partition_id)}])),
+                {className: 'small', title: 'A local copy of the partition (hard links in shadow/), for a manual backup.'}),
+                grantButton(ctx, 'delete', 'Detach', () => reviewPlan(tablePlan(ctx, 'detach_partition', `Detach the partition ${row.partition}`,
+                    [{description: `Detach the partition ${row.partition}: its parts leave the table but stay on disk, in detached/`, sql: partitionStep('DETACH', row.partition_id)}],
+                    {danger: true, confirm_text: 'Detach'})), {className: 'small danger'}),
+                grantButton(ctx, 'delete', 'Drop', () => reviewPlan(tablePlan(ctx, 'drop_partition', `Drop the partition ${row.partition}`,
+                    [{description: `Delete the partition ${row.partition} and its ${Number(row.rows).toLocaleString('en-US')} rows`, sql: partitionStep('DROP', row.partition_id)}],
+                    {danger: true, confirm_text: 'Drop partition'})), {className: 'small danger'}))},
+        ], rows, 'The table has no data.', 'Partitions'),
+        h('p', {className: 'note'}, `Partition key: ${ctx.info.partition_key || 'none (one partition, all)'}.`)]);
+    await tableSection(container, 'Detached parts', null,
+        () => adminRows(`SELECT name, partition_id, reason, disk, bytes_on_disk, modification_time FROM system.detached_parts
+            WHERE database = {database:String} AND table = {table:String} ORDER BY name LIMIT 500`, params),
+        rows => [dataTable([
+            {title: 'Part', render: row => h('code', {}, row.name)},
+            {title: 'Partition ID', render: row => row.partition_id},
+            {title: 'Reason', render: row => row.reason || 'detached by a user'},
+            {title: 'On disk', render: row => [formatBytes(row.bytes_on_disk), h('div', {className: 'note'}, row.disk)]},
+            {title: '', render: row => h('div', {className: 'actions-row'},
+                grantButton(ctx, 'insert', 'Attach', () => reviewPlan(tablePlan(ctx, 'attach_part', `Attach the part ${row.name}`,
+                    [{description: `Attach the detached part ${row.name} to the table`, sql: `ALTER TABLE ${ref} ATTACH PART ${quoteString(row.name)}`}])),
+                {className: 'small', disabled: !!row.reason, title: row.reason ? `Detached by the server (${row.reason}): check it before attaching it.` : null}),
+                grantButton(ctx, 'delete', 'Delete', () => reviewPlan(tablePlan(ctx, 'drop_detached_part', `Delete the detached part ${row.name}`,
+                    [{description: `Delete the files of the detached part ${row.name}`,
+                        sql: `ALTER TABLE ${ref} DROP DETACHED PART ${quoteString(row.name)} SETTINGS allow_drop_detached = 1`}],
+                    {danger: true, confirm_text: 'Delete'})), {className: 'small danger'}))},
+        ], rows, 'No detached part.', 'Detached parts')]);
+    await tableSection(container, 'Active parts', null,
+        () => adminRows(`SELECT name, partition, part_type, rows, bytes_on_disk, marks, level, modification_time, disk_name FROM system.parts
+            WHERE database = {database:String} AND table = {table:String} AND active ORDER BY modification_time DESC LIMIT 200`, params),
+        rows => dataTable([
+            {title: 'Part', render: row => h('code', {}, row.name)},
+            {title: 'Partition', render: row => row.partition},
+            {title: 'Format', render: row => row.part_type},
+            {title: 'Rows', render: row => Number(row.rows).toLocaleString('en-US')},
+            {title: 'On disk', render: row => [formatBytes(row.bytes_on_disk), h('div', {className: 'note'}, row.disk_name)]},
+            {title: 'Level', render: row => row.level},
+            {title: 'Written', render: row => row.modification_time},
+        ], rows, 'No active part.', 'Active parts'));
+}
+
+/// --- Tables: Mutations ---
+
+async function renderTableMutations(container, ctx) {
+    if (!ctx.merge_tree) {
+        container.append(h('div', {className: 'box'}, paragraph('Mutations exist only for MergeTree tables.')));
+        return;
+    }
+    const params = {database: ctx.database, table: ctx.table};
+    await tableSection(container, 'Mutations', null,
+        () => adminRows(`SELECT mutation_id, command, create_time, is_done, is_killed, parts_to_do, latest_fail_reason, latest_fail_time
+            FROM system.mutations WHERE database = {database:String} AND table = {table:String} ORDER BY create_time DESC LIMIT 200`, params),
+        rows => [dataTable([
+            {title: 'Mutation', render: row => [h('code', {}, row.command), h('div', {className: 'note'}, `${row.mutation_id} · ${row.create_time}`)]},
+            {title: 'State', render: row => (Number(row.is_done) ? badge('Done', 'ok') : Number(row.is_killed) ? badge('Killed', 'bad')
+                : [badge(row.latest_fail_reason ? 'Failing' : 'Running', row.latest_fail_reason ? 'bad' : 'warn'), h('div', {className: 'note'}, `${row.parts_to_do} parts to do`)])},
+            {title: 'Last error', render: row => (row.latest_fail_reason ? [row.latest_fail_reason, h('div', {className: 'note'}, row.latest_fail_time)] : '—')},
+            {title: '', render: row => (Number(row.is_done) || Number(row.is_killed) ? null
+                : button('Kill', () => reviewPlan(tablePlan(ctx, 'kill_mutation', `Stop the mutation ${row.mutation_id}`,
+                    [{description: `Stop the mutation ${row.mutation_id} (${row.command}). Parts it already changed stay changed.`,
+                        sql: `KILL MUTATION WHERE database = ${quoteString(ctx.database)} AND table = ${quoteString(ctx.table)} AND mutation_id = ${quoteString(row.mutation_id)}`}],
+                    {danger: true, confirm_text: 'Kill mutation'})), {className: 'small danger'}))},
+        ], rows, 'No mutation.', 'Mutations'),
+        h('p', {className: 'note'}, 'A mutation (ALTER TABLE ... UPDATE, DELETE, MODIFY COLUMN, MATERIALIZE) rewrites the parts it affects in the background. '
+            + 'A failing mutation is retried until it is killed.')]);
+    await tableSection(container, 'Merges in progress', null,
+        () => adminRows(`SELECT result_part_name, elapsed, progress, num_parts, rows_read, total_size_bytes_compressed, is_mutation
+            FROM system.merges WHERE database = {database:String} AND table = {table:String}`, params),
+        rows => dataTable([
+            {title: 'Result part', render: row => [h('code', {}, row.result_part_name), Number(row.is_mutation) ? h('div', {className: 'note'}, 'mutation') : null]},
+            {title: 'Progress', render: row => `${Math.round(Number(row.progress) * 100)} %`},
+            {title: 'Parts', render: row => row.num_parts},
+            {title: 'Size', render: row => formatBytes(row.total_size_bytes_compressed)},
+            {title: 'Running for', render: row => formatSeconds(Number(row.elapsed))},
+        ], rows, 'No merge is running.', 'Merges'));
+}
+
+/// --- Tables: Settings & TTL ---
+
+/// A clause of the `CREATE` statement in `create_table_query` (one line): its text up to the next clause. Used only to
+/// prefill forms, which are reviewed.
+function createClause(query, name, next) {
+    const start = query.indexOf(` ${name} `);
+    if (start < 0) return '';
+    const rest = query.slice(start + name.length + 2);
+    let end = rest.length;
+    for (const clause of next) {
+        const at = rest.indexOf(` ${clause} `);
+        if (at >= 0 && at < end) end = at;
+    }
+    return rest.slice(0, end).trim();
+}
+
+function tableSettingsOf(query) {
+    const text = createClause(query, 'SETTINGS', ['COMMENT']);
+    if (!text) return [];
+    return text.split(/,\s*(?=[a-z_0-9]+\s*=)/).map(pair => {
+        const eq = pair.indexOf('=');
+        return {name: pair.slice(0, eq).trim(), value: pair.slice(eq + 1).trim()};
+    }).filter(setting => setting.name);
+}
+
+function constraintsOf(query) {
+    const list = [];
+    const re = /CONSTRAINT (`[^`]+`|[A-Za-z_][A-Za-z0-9_]*) (CHECK|ASSUME) /g;
+    let match;
+    while ((match = re.exec(query))) list.push({name: match[1].replace(/^`|`$/g, ''), kind: match[2]});
+    return list;
+}
+
+async function renderTableSettings(container, ctx) {
+    const query = ctx.info.create_table_query;
+    const ref = tableRef(ctx.database, ctx.table);
+    if (ctx.merge_tree) {
+        const ttl = createClause(query, 'TTL', ['SETTINGS', 'COMMENT']);
+        container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, 'TTL'), h('span', {className: 'spacer'}),
+            grantButton(ctx, 'ttl', ttl ? 'Change TTL' : 'Add TTL', () => ttlDialog(ctx, ttl)),
+            ttl ? grantButton(ctx, 'ttl', 'Remove TTL', () => reviewPlan(tablePlan(ctx, 'remove_ttl', `Remove the TTL of ${ctx.database}.${ctx.table}`,
+                [{description: 'Remove the TTL: rows are kept forever', sql: `ALTER TABLE ${ref} REMOVE TTL`}]))) : null,
+            ttl ? grantButton(ctx, 'ttl', 'Apply now', () => reviewPlan(tablePlan(ctx, 'materialize_ttl', `Apply the TTL of ${ctx.database}.${ctx.table} now`,
+                [{description: 'Apply the TTL to the existing parts now (a mutation)', sql: `ALTER TABLE ${ref} MATERIALIZE TTL`}]))) : null),
+        ttl ? h('pre', {className: 'code'}, ttl) : paragraph('No TTL: rows are kept forever.')));
+        const settings = tableSettingsOf(query);
+        container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, 'Settings'), h('span', {className: 'spacer'}),
+            grantButton(ctx, 'settings', 'Change a setting', () => settingDialog(ctx, null))),
+        dataTable([
+            {title: 'Setting', render: setting => h('code', {}, setting.name)},
+            {title: 'Value', render: setting => h('code', {}, setting.value)},
+            {title: '', render: setting => h('div', {className: 'actions-row'},
+                grantButton(ctx, 'settings', 'Change', () => settingDialog(ctx, setting), {className: 'small'}),
+                grantButton(ctx, 'settings', 'Reset', () => reviewPlan(tablePlan(ctx, 'reset_setting', `Reset ${setting.name} of ${ctx.database}.${ctx.table}`,
+                    [{description: `Reset ${setting.name} to its default`, sql: `ALTER TABLE ${ref} RESET SETTING ${setting.name}`}])), {className: 'small'}))},
+        ], settings, 'Every setting has its default (system.merge_tree_settings).', 'Settings')));
+    }
+    if (!ctx.view) {
+        const constraints = constraintsOf(query);
+        container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, 'Constraints'), h('span', {className: 'spacer'}),
+            grantButton(ctx, 'constraint', 'Add constraint', () => constraintDialog(ctx))),
+        dataTable([
+            {title: 'Constraint', render: constraint => h('code', {}, constraint.name)},
+            {title: 'Kind', render: constraint => (constraint.kind === 'CHECK' ? 'CHECK: inserts that break it fail' : 'ASSUME: a hint for the optimizer')},
+            {title: '', render: constraint => grantButton(ctx, 'constraint', 'Drop', () => reviewPlan(tablePlan(ctx, 'drop_constraint',
+                `Drop the constraint ${constraint.name}`, [{description: `Drop the constraint ${constraint.name}`,
+                    sql: `ALTER TABLE ${ref} DROP CONSTRAINT ${quoteIdentifier(constraint.name)}`}])), {className: 'small danger'})},
+        ], constraints, 'No constraint.', 'Constraints'), h('p', {className: 'note'}, 'The expressions are in the DDL tab.')));
+    }
+    container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, 'Comment'), h('span', {className: 'spacer'}),
+        grantButton(ctx, 'comment', 'Edit comment', () => tableCommentDialog(ctx), {disabled: ctx.view})), paragraph(ctx.info.comment || 'No comment.')));
+}
+
+function ttlDialog(ctx, current) {
+    const ttl = textArea(current || 'event_date + INTERVAL 1 YEAR', {autofocus: true});
+    tableFormDialog(`TTL of ${ctx.table}`, [adminField('TTL', ttl, 'An expression of a Date or DateTime column, with an optional action: DELETE '
+        + '(the default), TO DISK \'name\', TO VOLUME \'name\', or GROUP BY. Several rules are separated by commas.')], 'Review', () => {
+        if (!ttl.value.trim()) return 'Enter the TTL.';
+        return tablePlan(ctx, 'modify_ttl', `Change the TTL of ${ctx.database}.${ctx.table}`,
+            [{description: 'Change the TTL (the parts are updated by a mutation)', sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} MODIFY TTL ${ttl.value.trim()}`}]);
+    });
+}
+
+function settingDialog(ctx, existing) {
+    const id = `merge-tree-settings-${Math.random().toString(36).slice(2)}`;
+    const name = textInput(existing ? existing.name : '', {list: id, disabled: !!existing, autofocus: !existing, placeholder: 'merge_with_ttl_timeout'});
+    const list = h('datalist', {id});
+    const value = textInput(existing ? existing.value : '', {autofocus: !!existing});
+    const description = h('p', {className: 'note'});
+    adminRows('SELECT name, value, description FROM system.merge_tree_settings WHERE NOT readonly ORDER BY name', {}).then(rows => {
+        list.replaceChildren(...rows.map(row => h('option', {value: row.name})));
+        const describe = () => {
+            const row = rows.find(r => r.name === name.value.trim());
+            description.textContent = row ? `${row.description.split('\n')[0]} Default: ${row.value}.` : '';
+        };
+        name.addEventListener('input', describe);
+        describe();
+    }).catch(() => {});
+    tableFormDialog(existing ? `Setting ${existing.name}` : `Change a setting of ${ctx.table}`, [adminField('Setting', h('span', {}, name, list)), description,
+        adminField('Value', value, 'A literal: a number, or a string in single quotes.')], 'Review', () => {
+        const setting = name.value.trim();
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(setting)) return 'Enter the name of a MergeTree setting.';
+        if (!value.value.trim()) return 'Enter the value.';
+        return tablePlan(ctx, 'modify_setting', `Set ${setting} of ${ctx.database}.${ctx.table}`,
+            [{description: `Set ${setting} to ${value.value.trim()}`, sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} MODIFY SETTING ${setting} = ${value.value.trim()}`}]);
+    });
+}
+
+function constraintDialog(ctx) {
+    const name = textInput('', {autofocus: true, placeholder: 'positive_amount'});
+    const kind = select([['CHECK', 'CHECK: inserts that break it fail'], ['ASSUME', 'ASSUME: a hint for the optimizer, not checked']], 'CHECK');
+    const expression = textInput('', {placeholder: 'amount >= 0'});
+    tableFormDialog(`Add a constraint to ${ctx.table}`, [adminField('Name', name), adminField('Kind', kind), adminField('Expression', expression,
+        'A condition over the columns of a row. It applies to new inserts, not to the rows already in the table.')], 'Review', () => {
+        if (!name.value.trim() || !expression.value.trim()) return 'Enter the name and the expression.';
+        return tablePlan(ctx, 'add_constraint', `Add the constraint ${name.value.trim()} to ${ctx.database}.${ctx.table}`,
+            [{description: `Add the constraint ${name.value.trim()}`, sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} ADD CONSTRAINT `
+                + `${quoteIdentifier(name.value.trim())} ${kind.value} ${expression.value.trim()}`}]);
+    });
+}
+
+/// --- Tables: DDL ---
+
+async function renderTableDDL(container, ctx) {
+    const ddl = await adminText(`SHOW CREATE TABLE ${tableRef(ctx.database, ctx.table)} FORMAT TSVRaw`);
+    const pre = h('pre', {className: 'code'}, ddl.trim());
+    container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, 'CREATE statement'), h('span', {className: 'spacer'}),
+        button('Copy', async e => {
+            try {
+                await navigator.clipboard.writeText(pre.textContent);
+                e.target.textContent = 'Copied';
+            } catch (error) {
+                e.target.textContent = 'Select the text to copy it';
+            }
+        })), pre, h('p', {className: 'note'}, 'The statement as the server stores it (SHOW CREATE TABLE).')));
+}
+
+const TABLE_TAB_RENDERERS = {
+    overview: renderTableOverview, columns: renderTableColumns, data: renderTableData, indexes: renderTableIndexes,
+    partitions: renderTablePartitions, mutations: renderTableMutations, settings: renderTableSettings, ddl: renderTableDDL,
+};
+
+ADMIN_PAGES.tables = (root, route, page) => {
+    if (route.sub) renderTablePage(root, route, page);
+    else renderTableList(root, page);
+};
+
 
 /// --- Workspace: Import data ---
 
