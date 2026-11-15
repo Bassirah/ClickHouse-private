@@ -844,6 +844,33 @@ await test('SQL Console: signing out deletes its stored results and keeps the sa
     await context.close();
 });
 
+await test('SQL Console: a reload deletes the stored results of the closed session, unless another tab has a session', async () => {
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await runQueryInSQLConsole(page);
+
+    /// Another tab of the browser with a session: a reload of the first one keeps the data that tab may use.
+    const other = await context.newPage();
+    await other.goto(`${BASE}/console`);
+    await login(other, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(other);
+    await page.reload();
+    await page.waitForSelector('#login-view:not([hidden])');
+    check((await page.evaluate(() => sql_console_cleanup)).length === 0, 'cleanup problems');
+    check((await sqlConsoleStorage(page)).rows > 0, 'the results were deleted while another tab had a session');
+
+    /// Closing that tab ends its session without a sign-out; the next load deletes what is left, and keeps the tabs.
+    await other.close();
+    await page.reload();
+    await page.waitForSelector('#login-view:not([hidden])');
+    check((await page.evaluate(() => sql_console_cleanup)).length === 0, 'cleanup problems');
+    const stored = await waitForSQLConsoleStorage(page, s => s.rows === 0, 'the results of the closed session were left');
+    check(stored.local.some(k => k.startsWith('tabs:encrypted:')), `tabs deleted: ${stored.local}`);
+    await context.close();
+});
+
 await test('SQL Console: with sql_console_clear_on_sign_out = all, signing out also deletes the saved work', async () => {
     const {context, page} = await newContext();
     await setClearOnSignOut(context, 'all');
