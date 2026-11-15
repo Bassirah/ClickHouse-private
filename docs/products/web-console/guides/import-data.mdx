@@ -1,5 +1,5 @@
 ---
-description: 'How the Import data page of the web console loads a CSV, TSV, JSON, or Parquet file from your computer into a new or an existing ClickHouse table, with the columns the server infers.'
+description: 'How the Import data page of the web console loads a CSV, TSV, JSON, Parquet, Avro, or Arrow file from your computer into a new or an existing ClickHouse table, with the columns the server infers.'
 sidebarTitle: 'Import data'
 slug: /web-console/guides/import-data
 title: 'Import data'
@@ -22,9 +22,13 @@ The page chooses the format from the file extension, and you can change it:
 | `TSV` | | `c1`, `c2`, and so on. |
 | `JSONEachRow` | `.json`, `.jsonl`, `.ndjson` | From the keys of the objects, one object per line. |
 | `Parquet` | `.parquet` | From the schema of the file. |
+| `Avro` | `.avro` | From the schema of the file. |
+| `Arrow` (IPC file) | `.arrow`, `.feather` | From the schema of the file. |
+| `ArrowStream` (IPC stream) | `.arrows` | From the schema of the stream. |
 
-Other formats, such as ORC or Avro, are not supported: load them with `clickhouse-client` or the `INSERT ... FORMAT`
-statement of the HTTP interface.
+ORC is not supported: the server infers its columns from the footer of the file, and its reader checks the offsets of
+the footer against the whole file, which the page does not send before the import. Load ORC files with
+`clickhouse-client` or the `INSERT ... FORMAT ORC` statement of the HTTP interface.
 
 ## Who can use it {#who-can-use-it}
 
@@ -46,14 +50,18 @@ each statement:
    - For Parquet, the sample is the footer of the file, which holds its schema, sent in Base64 (`base64Decode`). The
      size of the file does not matter. The page also shows the number of rows and row groups, from
      `format(ParquetMetadata, ...)`. A footer that does not fit in `max_query_size` raises that setting for the query.
+   - For Avro and Arrow, the sample is the first 1 MiB of the file, where the schema is, sent in Base64. For an Arrow
+     IPC file, it is the stream inside the file, after its `ARROW1` magic, read as `ArrowStream`. The query is larger
+     than `max_query_size` allows by default, so the page raises that setting for it.
 2. **Review the columns.** Rename a column or change its type in the table, then select **Preview** to read the first
-   rows of the sample again with them. For Parquet, the names cannot be changed, because the import matches the columns
-   of the file by name, and the rows are not previewed: only the footer is sent before the import. By default, columns are not `Nullable`, and a missing value becomes the default
+   rows of the sample again with them. For Parquet, Avro, and Arrow, the names cannot be changed, because the import
+   matches the columns of the file by name, and the rows are not previewed: only the footer or the beginning of the
+   file is sent before the import. By default, columns are not `Nullable`, and a missing value becomes the default
    of its type; select **Allow missing values (Nullable columns)** to keep the `Nullable` types the server infers.
 3. **Choose the destination.**
    - **A new table**: the database, the table name (suggested from the file name), and the sorting key. The table is
      a `MergeTree` table with the reviewed columns and `ORDER BY` the chosen column, or `tuple()`.
-   - **An existing table**: the database and the table. With a header row, JSON, or Parquet, the columns are matched by name, and
+   - **An existing table**: the database and the table. With a header row, JSON, Parquet, Avro, or Arrow, the columns are matched by name, and
      the columns of the table that the file does not have get their defaults. Without a header row, the columns of the
      file must be in the order of the table.
 4. **Review import** shows the statements: `CREATE TABLE` for a new table, and `INSERT INTO <table> FORMAT <format>`
@@ -68,11 +76,12 @@ the file name, its size, and the format.
 |---|---|
 | The server cannot read the sample as the chosen format | The page shows the error of the server under the file. Choose another format, or fix the file. |
 | A `.parquet` file does not end with the Parquet footer | The page says that the file is not a Parquet file, before sending anything. |
+| An `.arrow` file does not start with `ARROW1` | The page says that the file is not an Arrow IPC file. If it is an Arrow stream, choose **Arrow (IPC stream)**. |
 | A value further in the file does not fit its column | The `INSERT` fails with the error of the server, and inserts no rows of the failed blocks. A new table stays, empty or with the rows of the blocks before the error: drop it, or fix the columns and import into it. |
 | The connection is lost during the upload | The step fails. Rows of complete blocks may already be in the table: check it before importing again. |
 
 ## Limitations {#limitations}
 
-- CSV, TSV, JSON with one object per line, and Parquet only.
+- CSV, TSV, JSON with one object per line, Parquet, Avro, and Arrow only: not ORC.
 - The browser sends the file in one request. For files of several gigabytes, prefer `clickhouse-client`.
 - The columns of a text file are inferred from its beginning: a value further down that does not fit fails the import.
