@@ -935,6 +935,175 @@ await test('Play UI: runs with the connection of the console, sends credentials 
     await context.close();
 });
 
+/// Opens the Play UI panel of the console and returns its frame.
+async function openPlay(page) {
+    await clickConsole(page, '#sidebar a[data-component="play"]');
+    await page.waitForSelector('.frame-host[data-component="play"] iframe');
+    await waitUntil(page, () => {
+        const doc = document.querySelector('.frame-host[data-component="play"] iframe').contentDocument;
+        return doc && doc.getElementById('query') && doc.getElementById('ai-button');
+    });
+    return frameOf(page, '/play');
+}
+
+await test('Play UI: copy a result as Markdown or INSERT statements, and function documentation under the editor', async () => {
+    await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_play');
+    await adminQuery('CREATE TABLE IF NOT EXISTS e2e_play.context_columns (unusual_column_name UInt8, other_column_name String) ENGINE = Memory');
+    const {context, page} = await newContext();
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {origin: ORIGIN});
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    const play = await openPlay(page);
+
+    await runInPlay(play, "SELECT 1 AS a, 'x' AS b");
+    await waitUntil(play, () => [...document.querySelectorAll('query-result')].some(r => (r.shadowRoot || r).textContent.includes('x')));
+    for (const [format, expected] of [['Markdown', '| a | b |'], ['SQLInsert', "INSERT INTO table (`a`, `b`) VALUES (1, 'x');"]]) {
+        await play.click('#download-div');
+        await play.selectOption('#download-format', format);
+        await play.click('#copy-export-button');
+        await waitUntil(play, () => document.getElementById('copy-export-button').textContent === 'Copied');
+        const copied = await play.evaluate(() => navigator.clipboard.readText());
+        check(copied.includes(expected), `${format} copy: ${copied}`);
+    }
+
+    /// The documentation of the function the cursor is in.
+    await play.fill('#query', 'SELECT toStartOfMonth(');
+    await play.focus('#query');
+    await play.press('#query', 'End');
+    await waitUntil(play, () => !document.getElementById('function-doc').hidden);
+    const doc = await play.textContent('#function-doc');
+    check(doc.includes('toStartOfMonth') && doc.length > 30, `function documentation: ${doc}`);
+
+    /// The columns of the table of the statement are offered first.
+    const text = 'SELECT unu FROM e2e_play.context_columns';
+    await play.fill('#query', text);
+    const position = 'SELECT unu'.length;
+    await play.evaluate(p => completionContext(document.getElementById('query').value, p), position);
+    const candidates = await waitUntil(play, p => {
+        const found = findCandidates('unu', p - 3);
+        return found.length && found;
+    }, position);
+    check(JSON.stringify(candidates).includes('unusual_column_name'), `candidates: ${JSON.stringify(candidates)}`);
+    await context.close();
+});
+
+await test('Play UI: profile mode and the flame graph of a query', async () => {
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    const play = await openPlay(page);
+    await play.check('#profile-mode');
+    await runInPlay(play, 'SELECT sum(cityHash64(number)) FROM numbers(300000000)');
+    await waitUntil(play, () => !document.getElementById('flame-graph-button').hidden, null, {timeout: 60000});
+    await waitUntil(play, () => document.getElementById('run').textContent.trim() !== 'Stop', null, {timeout: 60000});
+    await play.click('#flame-graph-button');
+    await waitUntil(play, () => document.querySelectorAll('#flame-graph svg rect').length > 3, null, {timeout: 40000});
+    const status = await play.textContent('#flame-status');
+    check(/\d+ samples/.test(status), `flame graph status: ${status}`);
+    await screenshot(page, '11-flame-graph');
+    await context.close();
+});
+
+await test('Play UI: the AI assistant writes a query with the model of the server, and is hidden without one', async () => {
+    await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_play');
+    await adminQuery('CREATE TABLE IF NOT EXISTS e2e_play.ai_cities (city String, population UInt64) ENGINE = Memory');
+    const endpoint = 'http://ai.e2e.test/v1/chat/completions';
+    const {context, page} = await newContext();
+    const asked = [];
+    await setConfigValues(context, {ai_endpoint: endpoint, ai_model: 'e2e-model'});
+    await context.route(endpoint, route => {
+        const cors = {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'content-type', 'Access-Control-Allow-Methods': 'POST'};
+        if (route.request().method() === 'OPTIONS') return route.fulfill({status: 204, headers: cors});
+        asked.push(JSON.parse(route.request().postData()));
+        return route.fulfill({status: 200, headers: {...cors, 'Content-Type': 'application/json'},
+            body: JSON.stringify({choices: [{message: {content: 'Here it is:\n```sql\nSELECT city FROM ai_cities ORDER BY population DESC LIMIT 3\n```'}}]})});
+    });
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    const play = await openPlay(page);
+    await waitUntil(play, () => !document.getElementById('ai-button').hidden);
+    await play.evaluate(() => { selected_database = 'e2e_play'; });
+    await play.fill('#query', '');
+    await play.click('#ai-button');
+    await play.fill('#ai-question', 'the three largest cities');
+    await play.click('#ai-write');
+    await waitUntil(play, () => !document.getElementById('ai-insert').hidden);
+    check(asked.length === 1 && asked[0].model === 'e2e-model', `request: ${JSON.stringify(asked)}`);
+    check(asked[0].messages[0].content.includes('ai_cities(city String, population UInt64)'), 'the schema was not sent');
+    check(asked[0].messages[1].content === 'the three largest cities', 'the question was not sent');
+    await play.click('#ai-insert');
+    check((await play.inputValue('#query')).includes('SELECT city FROM ai_cities ORDER BY population DESC LIMIT 3'), 'the query is not in the editor');
+    await context.close();
+
+    /// Without ai_endpoint, the button stays hidden.
+    const plain = await newContext();
+    await plain.page.goto(`${BASE}/console`);
+    await login(plain.page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(plain.page);
+    const play2 = await openPlay(plain.page);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    check(await play2.evaluate(() => document.getElementById('ai-button').hidden), 'the AI button is shown without an endpoint');
+    await plain.context.close();
+});
+
+await test('Play UI: keyboard and narrow screens', async () => {
+    const {context, page} = await newContext({viewport: {width: 390, height: 800}});
+    await page.goto(`${BASE}/play`);
+    check(await page.evaluate(() => document.documentElement.lang) === 'en', 'no lang');
+    /// The skip link is the first focusable element of the page (the editor has the focus at load, and Tab indents there).
+    const first = await page.evaluate(() => document.querySelector('a[href], button, input, textarea, select, [tabindex]').id);
+    check(first === 'skip-to-editor', `the first focusable element is ${first}`);
+    await page.focus('#skip-to-editor');
+    await page.keyboard.press('Enter');
+    await waitUntil(page, () => document.activeElement.id === 'query');
+    /// An icon control that is not a button works from the keyboard: Enter on the visible theme toggle switches the theme.
+    const before = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+    const toggle = before === 'dark' ? '#toggle-light' : '#toggle-dark';
+    await page.focus(toggle);
+    await page.keyboard.press('Enter');
+    await waitUntil(page, b => document.documentElement.getAttribute('data-theme') !== b, before);
+    check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'the page scrolls sideways at 390 px');
+    await context.close();
+});
+
+await test('Table Editor: a dictionary shows its state, reloads, and is dropped with DROP DICTIONARY', async () => {
+    const name = `dict_${Date.now()}`;
+    await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_te');
+    await adminQuery('CREATE TABLE IF NOT EXISTS e2e_te.dict_source (id UInt64, name String) ENGINE = MergeTree ORDER BY id');
+    await adminQuery("INSERT INTO e2e_te.dict_source VALUES (1, 'one'), (2, 'two')");
+    await adminQuery(`CREATE DICTIONARY e2e_te.${name} (id UInt64, name String) PRIMARY KEY id SOURCE(CLICKHOUSE(TABLE 'dict_source' DB 'e2e_te' USER '${ADMIN_USER}' PASSWORD '${ADMIN_PASSWORD}')) LAYOUT(FLAT()) LIFETIME(0)`);
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="tables"]');
+    await page.waitForSelector('#admin-view table[aria-label="Tables"]');
+    await openTableTab(page, 'e2e_te', name, 'overview');
+    await page.click('#admin-view button:text("Reload")');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await page.waitForSelector('#admin-dialog .message.info');
+    await page.click('#admin-dialog .dialog-actions button');
+    /// The status reads NOT_LOADED until the reload is done.
+    await waitUntil(page, () => /Status\s*LOADED/.test(document.getElementById('admin-view').textContent));
+    check((await page.textContent('#admin-view')).includes('Elements'), 'the dictionary section');
+    check(!(await page.$('#admin-view button:text("Truncate")')), 'Truncate is offered for a dictionary');
+    await openTableTab(page, 'e2e_te', name, 'ddl');
+    check((await page.textContent('#admin-view pre.code')).startsWith('CREATE DICTIONARY'), 'the DDL tab');
+    await openTableTab(page, 'e2e_te', name, 'overview');
+    await page.click('#admin-view button:text("Drop")');
+    await page.fill('#admin-dialog input', name);
+    await page.click('#admin-dialog button[type="submit"]');
+    await waitUntil(page, () => (document.getElementById('admin-dialog-title') || {}).textContent?.startsWith('Review:'));
+    check((await page.textContent('#admin-dialog')).includes(`DROP DICTIONARY`), 'DROP DICTIONARY');
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await page.waitForSelector('#admin-dialog .message.info');
+    check(await adminQuery(`EXISTS DICTIONARY e2e_te.${name}`) === '0', 'the dictionary was not dropped');
+    await context.close();
+});
+
 /// What the SQL Console stored in the browser, read in the console page (same origin): the number of result rows
 /// in IndexedDB (-1 without the database, which is not opened then, so as not to create it), and its storage keys.
 async function sqlConsoleStorage(page) {
@@ -984,6 +1153,14 @@ async function runQueryInSQLConsole(page) {
     return waitForSQLConsoleStorage(page,
         s => s.rows > 0 && s.local.some(k => k.startsWith('tabs:encrypted:')) && s.session.some(k => k.startsWith('tabs:encrypted:')),
         'the SQL Console did not store its result');
+}
+
+/// Serves `/console/config.json` with `values` added to what the server returns.
+async function setConfigValues(context, values) {
+    await context.route(`${BASE}/console/config.json`, async route => {
+        const response = await route.fetch();
+        route.fulfill({response, json: {...await response.json(), ...values}});
+    });
 }
 
 /// Serves `/console/config.json` with `sql_console_clear_on_sign_out` set to `value`.

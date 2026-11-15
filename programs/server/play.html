@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1701,6 +1701,122 @@
             color: var(--misc-text-color);
         }
 
+        /* Visible only when focused with the keyboard: the first stop of the tab order. */
+        #skip-to-editor
+        {
+            position: absolute;
+            left: 0.5rem;
+            top: -10rem;
+            z-index: 100;
+            padding: 0.5rem 1rem;
+            color: var(--button-text-color);
+            background-color: var(--button-color);
+        }
+
+        #skip-to-editor:focus
+        {
+            top: 0.5rem;
+        }
+
+        /* A phone or a narrow window: the panel of databases opens over the page instead of next to it, the run row wraps,
+           and the shortcut hint, which needs a keyboard, gives its room to the controls. */
+        @media (max-width: 40rem)
+        {
+            #main
+            {
+                padding: 0.25rem;
+            }
+
+            #menu.databases-opened
+            {
+                position: fixed;
+                left: 0;
+                z-index: 20;
+                width: min(85vw, 20rem);
+                box-shadow: 0 0 1rem var(--shadow-color, rgba(0, 0, 0, 0.3));
+                background: var(--background-color);
+            }
+
+            #run_div
+            {
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+
+            #hint
+            {
+                display: none;
+            }
+        }
+
+        #function-doc
+        {
+            margin: 0.25rem 0;
+            padding: 0.25rem 0.5rem;
+            font-size: 90%;
+            color: var(--misc-text-color);
+            border-left: 3px solid var(--border-color);
+            overflow-wrap: anywhere;
+        }
+
+        #function-doc code
+        {
+            color: var(--text-color);
+        }
+
+        #profile-toggle
+        {
+            margin-left: 1rem;
+            white-space: nowrap;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        #profile-toggle:has(input:checked)
+        {
+            color: var(--text-color);
+            font-weight: bold;
+        }
+
+        #ai-button
+        {
+            margin-left: 0.5rem;
+        }
+
+        #ai-answer
+        {
+            margin: 0;
+            padding: 0.5rem;
+            overflow: auto;
+            white-space: pre-wrap;
+            border: 1px solid var(--border-color);
+        }
+
+        #flame-graph-button
+        {
+            margin-left: 0.5rem;
+        }
+
+        #flame-graph
+        {
+            flex: 1;
+            overflow: auto;
+            min-height: 0;
+        }
+
+        #flame-graph svg text
+        {
+            font-size: 11px;
+            fill: #000;
+            pointer-events: none;
+        }
+
+        #flame-graph svg rect
+        {
+            stroke: var(--background-color);
+            cursor: pointer;
+        }
+
         #readonly-toggle
         {
             margin-left: 1rem;
@@ -1865,7 +1981,14 @@
             display: block;
         }
 
-        #download-button
+        /* Copy and Download, side by side under the format. */
+        .download-buttons
+        {
+            display: flex;
+            gap: 0.25rem;
+        }
+
+        #download-button, #copy-export-button
         {
             width: 100%;
             margin-top: 0rem;
@@ -2488,6 +2611,7 @@
 </head>
 
 <body>
+    <a id="skip-to-editor" href="#query">Skip to the query editor</a>
     <div id="menu">
         <a id="databases-icon" class="menu-icon" href="" title="Databases and tables">
             <svg id="databases-toggle" viewBox="0 0 9 9"><path d="M0,0 h1 v8 h-1 z"/><path d="M2,0 h1 v8 h-1 z"/><path d="M4,0 h1 v8 h-1 z"/><path d="M6,0 h1 v8 h-1 z"/><path d="M8,3.25 h1 v1.5 h-1 z"/></svg>
@@ -2536,28 +2660,30 @@
                  query. In notebook mode both nodes are moved into the active notebook cell
                  (see `dockEditor`), and this placeholder stays empty until they come back. -->
             <div id="editor-home"><div id="query_div"><div id="query-backdrop" class="q-syntax"></div><div id="completion-mirror"></div><textarea autofocus spellcheck="false" autocorrect="false" autocomplete="false" data-gramm="false" class="monospace shadow" id="query"></textarea><div id="completion-overlay"></div><button type="button" id="format-query" title="Format the query">Format</button></div>
-            <div id="query-params"></div></div>
+            <div id="query-params"></div>
+            <!-- The signature and description of the function the cursor is in (see `updateFunctionDoc`). -->
+            <div id="function-doc" aria-live="polite" hidden></div></div>
             <div id="run_div">
                 <!-- `form=` keeps the implicit submission working in notebook mode, where this
                      whole row is moved out of the form and into the active cell (see `dockEditor`). -->
                 <button type="submit" form="controls" class="shadow" id="run">Run</button>
                 <button type="button" class="shadow" id="run-all">Run all</button>
-                <div id="hint">&nbsp;(<span id="hint-modifier">Ctrl/Cmd</span>+Enter<span id="hint-run-all" style="display: none">, +Shift to run all</span>)<label id="readonly-toggle" title="Run every query with readonly = 2: the server refuses statements that change data or the schema."><input type="checkbox" id="readonly-mode" /> Read-only</label></div>
-                <query-progress id="query-progress"></query-progress>
-                <div id="copy-div" class="shadow" title="Copy raw result to clipboard">
+                <div id="hint">&nbsp;(<span id="hint-modifier">Ctrl/Cmd</span>+Enter<span id="hint-run-all" style="display: none">, +Shift to run all</span>)<label id="readonly-toggle" title="Run every query with readonly = 2: the server refuses statements that change data or the schema."><input type="checkbox" id="readonly-mode" /> Read-only</label><label id="profile-toggle" title="Sample the queries with the query profiler every 10 ms, for a flame graph of where their time goes."><input type="checkbox" id="profile-mode" /> Profile</label><button type="button" id="flame-graph-button" hidden>Flame graph</button><button type="button" id="ai-button" hidden title="Write or fix a query with the AI model of this server">AI</button></div>
+                <query-progress id="query-progress" role="status" aria-live="polite"></query-progress>
+                <div id="copy-div" class="shadow" title="Copy raw result to clipboard" role="button" tabindex="0" aria-label="Copy the raw result">
                     <svg id="copy-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                         <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                     </svg>
                 </div>
-                <div id="download-div" class="shadow">
+                <div id="download-div" class="shadow" role="button" tabindex="0" aria-label="Download or copy the result" title="Download or copy the result">
                     <svg id="download" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                         <polyline points="7 10 12 15 17 10"/>
                         <line x1="12" y1="15" x2="12" y2="3"/>
                     </svg>
                 </div>
-                <div id="theme"><span id="toggle-dark">🌘</span><span id="toggle-light">☀️</span></div>
+                <div id="theme"><span id="toggle-dark" role="button" tabindex="0" aria-label="Dark theme">🌘</span><span id="toggle-light" role="button" tabindex="0" aria-label="Light theme">☀️</span></div>
             </div>
         </form>
         <div id="result-panels"></div>
@@ -2579,12 +2705,16 @@
                         <option value="NDJSON" selected>JSONLines</option>
                         <option value="Parquet">Parquet</option>
                         <option value="Markdown">Markdown</option>
+                        <option value="SQLInsert">SQL INSERT</option>
                         <option value="other">Other...</option>
                     </select>
                 </div>
                 <input type="text" id="download-format-other" placeholder="Enter format name (e.g., Arrow, Avro)" />
             </div>
-            <button id="download-button">Download</button>
+            <div class="download-buttons">
+                <button id="copy-export-button" type="button" title="Copy the result in this format">Copy</button>
+                <button id="download-button">Download</button>
+            </div>
         </div>
         <!-- The Save / Load modals of the tab bar. `<dialog>` gives the backdrop, the Escape key
              and the focus trap for free; the close [x] is a `method="dialog"` submit button, which
@@ -2613,6 +2743,34 @@
                 <button id="tabs-load-apply" type="button">Load</button>
             </div>
             <input id="tabs-load-file" type="file" accept=".md,.markdown,text/markdown,text/plain" hidden />
+        </dialog>
+        <!-- The AI assistant (see `askAI`): shown when the server configures `web_console.ai_endpoint`. -->
+        <dialog id="ai-dialog" class="tabs-dialog confirm-run-dialog" aria-labelledby="ai-title">
+            <form method="dialog" class="tabs-dialog-head">
+                <h2 id="ai-title">AI assistant</h2>
+                <button class="tabs-dialog-close" type="submit" title="Close" aria-label="Close">&times;</button>
+            </form>
+            <p class="tabs-dialog-hint" id="ai-privacy"></p>
+            <textarea id="ai-question" class="monospace" rows="3" aria-label="Question" placeholder="For example: the 10 cities with the most events last month"></textarea>
+            <div class="tabs-dialog-buttons">
+                <button id="ai-fix" type="button">Fix the last error</button>
+                <button id="ai-write" type="button">Write a query</button>
+            </div>
+            <p id="ai-status" class="tabs-dialog-hint" role="status"></p>
+            <pre id="ai-answer" class="monospace" hidden></pre>
+            <div class="tabs-dialog-buttons">
+                <button id="ai-insert" type="button" hidden>Put into the editor</button>
+            </div>
+        </dialog>
+        <!-- The flame graph of the last profiled query (see `showFlameGraph`). -->
+        <dialog id="flame-dialog" class="tabs-dialog" aria-labelledby="flame-title">
+            <form method="dialog" class="tabs-dialog-head">
+                <h2 id="flame-title">Flame graph</h2>
+                <button class="tabs-dialog-close" type="submit" title="Close" aria-label="Close">&times;</button>
+            </form>
+            <p class="tabs-dialog-hint"><label>Samples <select id="flame-kind"><option value="CPU">CPU time</option><option value="Real">Wall-clock time</option></select></label>
+                <span id="flame-status"></span></p>
+            <div id="flame-graph"></div>
         </dialog>
         <!-- Asked before running statements that change or delete data (see `confirmDestructive`). Cancel has the focus,
              and Escape cancels. -->
@@ -4890,7 +5048,7 @@ class QueryResultElement extends HTMLElement
                 <img id="image" class="shadow" alt="Query result image">
                 <div id="chart"></div>
                 <div id="graph"></div>
-                <p id="error" class="monospace shadow"></p>
+                <p id="error" class="monospace shadow" role="alert"></p>
             </div>
             <div id="logs_div"><div id="logs-content" class="monospace"></div></div>
             <div id="metrics_div"><table id="metrics-table" class="monospace"><tbody id="metrics-body"></tbody></table></div>
@@ -8772,6 +8930,10 @@ const url_pagination = sanitizePagination({
 let url_elem = document.getElementById('url');
 /// Read-only mode, remembered in this browser (`READONLY_MODE_KEY`).
 let readonly_elem = document.getElementById('readonly-mode');
+/// Profile mode, for this page only: it slows queries down a little.
+let profile_elem = document.getElementById('profile-mode');
+/// The last query run in profile mode: `{ id, connection, query }`, for its flame graph.
+let last_profiled_query = null;
 const READONLY_MODE_KEY = 'readonly_mode';
 try { readonly_elem.checked = window.localStorage.getItem(READONLY_MODE_KEY) === '1'; } catch (e) { /* storage disabled: off */ }
 readonly_elem.addEventListener('change', () => {
@@ -11774,6 +11936,13 @@ async function postImpl(cell, posted_request_num, query, targetResultEl, abortCo
     /// Read-only mode (`readonly_elem`): the server refuses statements that change data or the schema, and still
     /// accepts the settings this page sends with each query, which `readonly = 1` would refuse.
     if (connection.readonly) url += '&readonly=2';
+    /// Profile mode (`profile_elem`): the query profiler samples the stacks of the query every 10 ms into
+    /// `system.trace_log`, and the Flame graph button shows them (`showFlameGraph`).
+    if (connection.profile) {
+        url += '&query_profiler_cpu_time_period_ns=10000000&query_profiler_real_time_period_ns=10000000';
+        last_profiled_query = { id: query_id, connection, query };
+        document.getElementById('flame-graph-button').hidden = false;
+    }
     abortController.running_query = { id: query_id, connection, resultEl: targetResultEl };
     /// We will put the result in the query cache, so it can be used when download is initiated later.
     /// But we don't use cached results, so the results that we get here, are always fresh.
@@ -14719,6 +14888,8 @@ function cellOwnsChrome(cell) {
 const editorHomeEl = document.getElementById('editor-home');
 const editorDivEl = document.getElementById('query_div');
 const editorParamsEl = document.getElementById('query-params');
+/// The documentation of the function at the cursor (`updateFunctionDoc`), moved with the editor (`dockEditor`).
+const functionDocEl = document.getElementById('function-doc');
 /// The Run / Run all / progress / copy / download row. Like the editor there is one of it, and in
 /// notebook mode it is docked under the active cell's query: that is where the run it reports
 /// belongs, and it doubles as the separation between the query and its result. Its home is the end
@@ -14737,7 +14908,7 @@ function dockEditor() {
     /// one while the tab is in flight, the active one otherwise (see `chromeCell`).
     const run_cell = chromeCell(tab);
     const run_host = (notebook && run_cell && run_cell.runSlot) ? run_cell.runSlot : controls_form_elem;
-    if (editorDivEl.parentNode === host && editorParamsEl.parentNode === host
+    if (editorDivEl.parentNode === host && editorParamsEl.parentNode === host && functionDocEl.parentNode === host
         && runDivEl.parentNode === run_host) return;
     /// Re-parenting a focused textarea drops focus and (in some browsers) the selection.
     const had_focus = document.activeElement === query_area;
@@ -14745,6 +14916,7 @@ function dockEditor() {
     const sel_end = query_area.selectionEnd;
     host.appendChild(editorDivEl);
     host.appendChild(editorParamsEl);
+    host.appendChild(functionDocEl);
     run_host.appendChild(runDivEl);
     if (had_focus) {
         query_area.focus();
@@ -15646,6 +15818,17 @@ function captureActiveTab() {
     tab.params = values;
     tab.paramsSyncedQuery = tab.query;
 }
+
+/// The icon controls that are not `<button>` elements (`role="button"`) are activated with Enter and Space too, as a
+/// button is, so that they work from the keyboard.
+document.addEventListener('keydown', (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement) || target.getAttribute('role') !== 'button' || target.tagName === 'BUTTON') return;
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        target.click();
+    }
+});
 
 /// A random `query_id` (a version 4 UUID). `crypto.randomUUID` exists only on secure origins, and this page is also
 /// served over plain HTTP.
@@ -17792,7 +17975,8 @@ async function postOne()
     /// `postImpl` used to) would let a tab switch + connection edit during it send this run's
     /// snapshotted query to the newly entered server or identity.
     dropAutofilledStalePassword();
-    const connection = { url: url_elem.value, user: user_elem.value, password: password_elem.value, readonly: readonly_elem.checked };
+    const connection = { url: url_elem.value, user: user_elem.value, password: password_elem.value, readonly: readonly_elem.checked,
+        profile: profile_elem.checked };
     /// Snapshot the selected database at launch too (see the connection above): the panel selection
     /// is shared, so re-reading it after the preflight await would let a mid-await database change
     /// retarget this run. It is threaded through to `postImpl` (the request URL) and the saved
@@ -17917,7 +18101,8 @@ async function postAll()
     /// See `postOne`: the connection context and selected database are snapshotted at launch so a tab
     /// switch + connection/database edit during the preflight await cannot reroute this run.
     dropAutofilledStalePassword();
-    const connection = { url: url_elem.value, user: user_elem.value, password: password_elem.value, readonly: readonly_elem.checked };
+    const connection = { url: url_elem.value, user: user_elem.value, password: password_elem.value, readonly: readonly_elem.checked,
+        profile: profile_elem.checked };
     const query_database = selected_database;
     ++activation_num;
     const my_run = ++tab.reqNum;
@@ -19365,6 +19550,255 @@ function statementIsReadOnly(tokens)
     return keyword !== null && PARALLELIZABLE_KEYWORDS.has(keyword);
 }
 
+/// ----- AI assistant ---------------------------------------------------------------------------
+
+/// The AI model of the server, from the configuration of the web console (`web_console.ai_endpoint`, `ai_model`): an
+/// OpenAI-compatible chat completions endpoint. Those values are public, so the endpoint needs no secret: a model on the
+/// local network, or a gateway that authenticates by network. Null when not configured, or when the page is not served
+/// by a ClickHouse server.
+let ai_config = null;
+
+async function loadAIConfig() {
+    if (opened_locally) return;
+    try {
+        const response = await fetch('/console/config.json', { credentials: 'omit', cache: 'no-store' });
+        if (!response.ok) return;
+        const config = await response.json();
+        if (config.ai_endpoint) ai_config = { endpoint: config.ai_endpoint, model: config.ai_model || '' };
+    } catch (e) {
+        /// A server without the web console: the assistant stays hidden.
+    }
+    document.getElementById('ai-button').hidden = !ai_config;
+    if (ai_config) {
+        document.getElementById('ai-privacy').textContent = `The question, the statement under the cursor, and the names and types of the columns `
+            + `of the database are sent to ${new URL(ai_config.endpoint, location.href).host}, the AI model of this server. No rows are sent. `
+            + 'The answer goes into the editor, not to the server: read it before you run it.';
+    }
+}
+loadAIConfig();
+
+/// The columns of the tables of the database the editor uses, as `table(column Type, ...)` lines, for the model.
+async function aiSchema() {
+    const rows = await editorQuery(`SELECT table, arrayStringConcat(groupArray(name || ' ' || type), ', ') AS columns FROM (
+        SELECT table, name, type FROM system.columns WHERE database = if({db:String} = '', currentDatabase(), {db:String})
+        ORDER BY table, position LIMIT 60 BY table) GROUP BY table ORDER BY table LIMIT 100`, { db: selected_database || '' });
+    return (rows || []).map(row => `${row.table}(${row.columns})`).join('\n');
+}
+
+/// Asks the model, and shows its answer; the SQL of the answer can be put into the editor.
+async function askAI(task) {
+    const status = document.getElementById('ai-status');
+    const answer = document.getElementById('ai-answer');
+    const insert = document.getElementById('ai-insert');
+    const question = document.getElementById('ai-question').value.trim();
+    const statement = statementAround(query_area.value, query_area.selectionStart).trim();
+    const error_el = resultEl && resultEl.shadowRoot ? resultEl.shadowRoot.getElementById('error') : null;
+    const error = error_el && error_el.style.display !== 'none' ? error_el.innerText.trim() : '';
+    if (task === 'write' && !question) {
+        status.textContent = 'Write what the query should return.';
+        return;
+    }
+    if (task === 'fix' && !error) {
+        status.textContent = 'The last result has no error to fix.';
+        return;
+    }
+    answer.hidden = true;
+    insert.hidden = true;
+    status.textContent = 'Asking the model…';
+    let schema = '';
+    try {
+        schema = await aiSchema();
+    } catch (e) {
+        /// Without the schema the model can still answer from the question.
+    }
+    const system = 'You write ClickHouse SQL. Answer with one SQL query in a ```sql block, then at most two sentences. '
+        + 'Use only the tables and columns of this schema; say so if they cannot answer the question.\n'
+        + `Database: ${selected_database || 'the current database'}\nSchema:\n${schema || '(unknown)'}`;
+    const user = task === 'write'
+        ? question
+        : `This query failed. Fix it.\nQuery:\n${statement}\nError:\n${error.slice(0, 4000)}${question ? `\nNote: ${question}` : ''}`;
+    let content;
+    try {
+        const response = await fetch(ai_config.endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'omit',
+            body: JSON.stringify({ model: ai_config.model, temperature: 0.1,
+                messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+        });
+        const text = await response.text();
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 300)}`);
+        content = JSON.parse(text).choices[0].message.content;
+    } catch (e) {
+        status.textContent = `The model did not answer: ${e.message}`;
+        return;
+    }
+    answer.textContent = content;
+    answer.hidden = false;
+    const sql = (content.match(/```(?:sql)?\s*\n([\s\S]*?)```/i) || [])[1];
+    status.textContent = sql ? 'Read the query before you run it.' : 'The answer has no SQL block.';
+    insert.hidden = !sql;
+    insert.onclick = () => {
+        /// The query replaces the statement under the cursor when fixing it, and is added at the end otherwise.
+        const text = sql.trim();
+        if (task === 'fix' && statement) {
+            const start = query_area.value.lastIndexOf(';', query_area.selectionStart - 1) + 1;
+            let end = query_area.value.indexOf(';', query_area.selectionStart);
+            if (end < 0) end = query_area.value.length;
+            query_area.setRangeText(`\n${text}\n`, start, end, 'select');
+        } else {
+            query_area.setRangeText((query_area.value.trim() ? '\n\n' : '') + text, query_area.value.length, query_area.value.length, 'select');
+        }
+        query_area.dispatchEvent(new Event('input', { bubbles: true }));
+        document.getElementById('ai-dialog').close();
+        query_area.focus();
+    };
+}
+
+document.getElementById('ai-button').addEventListener('click', () => {
+    document.getElementById('ai-status').textContent = '';
+    document.getElementById('ai-answer').hidden = true;
+    document.getElementById('ai-insert').hidden = true;
+    document.getElementById('ai-dialog').showModal();
+    document.getElementById('ai-question').focus();
+});
+document.getElementById('ai-write').addEventListener('click', () => askAI('write'));
+document.getElementById('ai-fix').addEventListener('click', () => askAI('fix'));
+
+/// ----- Flame graph ----------------------------------------------------------------------------
+
+/// The stacks of a profiled query from `system.trace_log`, as `[frames, samples]`, the outermost frame first. The
+/// symbols need the introspection functions (`allow_introspection_functions`, the INTROSPECTION privilege).
+async function loadFlameStacks(profiled, kind) {
+    const { id, connection } = profiled;
+    const url_params = '&allow_introspection_functions=1&param_id=' + encodeURIComponent(id) + '&param_kind=' + encodeURIComponent(kind);
+    let error = null;
+    const json = await auxiliaryQuery(connection.url, connection.user, connection.password,
+        `SELECT arrayStringConcat(arrayReverse(arrayMap(x -> demangle(addressToSymbol(x)), trace)), ';') AS stack, count() AS samples
+         FROM system.trace_log WHERE query_id = {id:String} AND trace_type = {kind:String} GROUP BY stack`,
+        url_params, /*quiet=*/ true, null, e => { error = e; });
+    if (!json) throw new Error(error || 'The samples could not be read.');
+    return json.data.map(row => [row.stack.split(';').filter(Boolean), Number(row.samples)]);
+}
+
+/// A flame graph (an icicle: the outermost frames at the top) of `stacks`, drawn in SVG. Selecting a frame shows it
+/// and its callees on the full width; selecting the top frame goes back up.
+function renderFlameGraph(container, stacks) {
+    const root = { name: 'all', value: 0, children: new Map(), parent: null };
+    for (const [frames, samples] of stacks) {
+        root.value += samples;
+        let node = root;
+        for (const frame of frames) {
+            let child = node.children.get(frame);
+            if (!child) {
+                child = { name: frame, value: 0, children: new Map(), parent: node };
+                node.children.set(frame, child);
+            }
+            child.value += samples;
+            node = child;
+        }
+    }
+    const total = root.value;
+    const ROW = 18;
+    const WIDTH = 1200;
+    const hue = (name) => {
+        let h = 0;
+        for (let i = 0; i < name.length; ++i) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+        return 10 + h % 45;
+    };
+    const short = (name) => name.replace(/\(.*$/, '').replace(/^.*::(?=[^:]+::[^:]+$)/, '');
+    const draw = (focus) => {
+        const rects = [];
+        let depth_max = 0;
+        const walk = (node, depth, x, width) => {
+            depth_max = Math.max(depth_max, depth);
+            rects.push({ node, depth, x, width });
+            let offset = x;
+            const children = [...node.children.values()].sort((a, b) => b.value - a.value);
+            for (const child of children) {
+                const w = width * child.value / node.value;
+                if (w >= 0.5) walk(child, depth + 1, offset, w);
+                offset += w;
+            }
+        };
+        walk(focus, 0, 0, WIDTH);
+        const svg_ns = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(svg_ns, 'svg');
+        svg.setAttribute('viewBox', `0 0 ${WIDTH} ${(depth_max + 1) * ROW}`);
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('role', 'img');
+        svg.setAttribute('aria-label', `Flame graph of ${total} samples`);
+        for (const { node, depth, x, width } of rects) {
+            const g = document.createElementNS(svg_ns, 'g');
+            const rect = document.createElementNS(svg_ns, 'rect');
+            rect.setAttribute('x', x);
+            rect.setAttribute('y', depth * ROW);
+            rect.setAttribute('width', width);
+            rect.setAttribute('height', ROW - 1);
+            rect.setAttribute('fill', node === root ? '#c8c8c8' : `hsl(${hue(node.name)}, 85%, ${60 + depth % 3 * 5}%)`);
+            const title = document.createElementNS(svg_ns, 'title');
+            title.textContent = `${node.name}\n${node.value} samples, ${(node.value / total * 100).toFixed(1)} %`;
+            rect.appendChild(title);
+            rect.addEventListener('click', () => draw(node === focus && node.parent ? node.parent : node));
+            g.appendChild(rect);
+            if (width > 40) {
+                const text = document.createElementNS(svg_ns, 'text');
+                text.setAttribute('x', x + 3);
+                text.setAttribute('y', depth * ROW + 12);
+                const label = short(node.name);
+                text.textContent = label.length * 6.5 > width - 6 ? label.slice(0, Math.max(0, Math.floor((width - 6) / 6.5) - 1)) + '…' : label;
+                g.appendChild(text);
+            }
+            svg.appendChild(g);
+        }
+        container.replaceChildren(svg);
+    };
+    draw(root);
+}
+
+/// Opens the flame graph of the last query run in profile mode. The server writes the samples to `system.trace_log`
+/// every few seconds (`flush_interval_milliseconds`), so the dialog reads them again until they are there.
+async function showFlameGraph() {
+    const profiled = last_profiled_query;
+    if (!profiled) return;
+    const dialog = document.getElementById('flame-dialog');
+    const status = document.getElementById('flame-status');
+    const graph = document.getElementById('flame-graph');
+    const kind = document.getElementById('flame-kind');
+    const generation = ++flame_generation;
+    graph.replaceChildren();
+    if (!dialog.open) dialog.showModal();
+    const started = Date.now();
+    for (;;) {
+        status.textContent = ' Reading the samples…';
+        let stacks;
+        try {
+            stacks = await loadFlameStacks(profiled, kind.value);
+        } catch (e) {
+            if (generation !== flame_generation) return;
+            status.textContent = ` ${e.message}`;
+            return;
+        }
+        if (generation !== flame_generation) return;
+        if (stacks.length) {
+            const samples = stacks.reduce((sum, [, n]) => sum + n, 0);
+            status.textContent = ` ${samples} samples of ${profiled.id}, every 10 ms. Select a frame to zoom in; select it again to zoom out.`;
+            renderFlameGraph(graph, stacks);
+            return;
+        }
+        if (Date.now() - started > 20000) {
+            status.textContent = ' No samples: the query took less than the 10 ms between samples, or system.trace_log is disabled on the server.';
+            return;
+        }
+        status.textContent = ' Waiting for the server to write the samples to system.trace_log (it does every few seconds)…';
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (generation !== flame_generation || !dialog.open) return;
+    }
+}
+let flame_generation = 0;
+document.getElementById('flame-graph-button').addEventListener('click', showFlameGraph);
+document.getElementById('flame-kind').addEventListener('change', showFlameGraph);
+
 /// Statement kinds that change or delete existing data or objects. `Run` asks before them (`confirmDestructive`).
 const DESTRUCTIVE_KEYWORDS = new Set(['DROP', 'TRUNCATE', 'DELETE', 'UPDATE', 'DETACH', 'EXCHANGE', 'REPLACE']);
 /// The actions of an `ALTER` that delete or rewrite data: `DROP COLUMN`, `DROP PARTITION`, `DELETE`, `UPDATE`,
@@ -20629,6 +21063,7 @@ function resetConnectionScopedState() {
     connectionGeneration++;
     completionsLoadStarted = false;
     completionWords = [];
+    resetCompletionContext();
     closeCompletions();
     opened_databases.clear();
     /// The selected database is a namespace on the SEMANTIC connection identity
@@ -20785,9 +21220,151 @@ function queryIdentifierWords(excludeStart) {
     return words;
 }
 
+/// ----- Context of the completion, and the documentation of functions ------------------------
+
+/// The columns of the tables a statement reads, by `<database>.<table>` (`''` for the current database): an array of
+/// names, or null while loading. Loaded once per connection (`resetCompletionContext`).
+const completionColumns = new Map();
+/// The names of the settings, for the completion after SETTINGS: null until needed.
+let completionSettings = null;
+let completionSettingsLoading = false;
+
+function resetCompletionContext() {
+    completionColumns.clear();
+    completionSettings = null;
+    completionSettingsLoading = false;
+    functionDocs.clear();
+}
+
+/// The statement around a position: from the previous `;` to the next one.
+function statementAround(text, pos) {
+    const start = text.lastIndexOf(';', pos - 1) + 1;
+    let end = text.indexOf(';', pos);
+    if (end < 0) end = text.length;
+    return text.slice(start, end);
+}
+
+/// The tables a statement names after FROM, JOIN, INTO, UPDATE, or TABLE, as `[database, table]`; not table functions.
+/// After INTO, a `(` opens the list of columns, not the arguments of a table function.
+const TABLE_REFERENCE_RE = /\b(?:FROM|JOIN|UPDATE|TABLE)\s+(`[^`]+`|[A-Za-z_]\w*)(?:\s*\.\s*(`[^`]+`|[A-Za-z_]\w*))?(?![\w`.])(?!\s*\()/gi;
+const INSERT_TABLE_RE = /\bINTO\s+(?:TABLE\s+)?(`[^`]+`|[A-Za-z_]\w*)(?:\s*\.\s*(`[^`]+`|[A-Za-z_]\w*))?(?![\w`.])/gi;
+function referencedTables(statement) {
+    const unquote = (name) => (name.startsWith('`') ? name.slice(1, -1) : name);
+    const tables = [];
+    for (const match of [...statement.matchAll(TABLE_REFERENCE_RE), ...statement.matchAll(INSERT_TABLE_RE)]) {
+        tables.push(match[2] !== undefined ? [unquote(match[1]), unquote(match[2])] : [selected_database || '', unquote(match[1])]);
+    }
+    return tables;
+}
+
+/// Runs a small query for the editor with the live connection, quietly: a failure leaves the feature inactive.
+async function editorQuery(query, params = {}) {
+    dropAutofilledStalePassword();
+    let url_params = '';
+    for (const [name, value] of Object.entries(params)) url_params += '&param_' + encodeURIComponent(name) + '=' + encodeURIComponent(value);
+    const json = await auxiliaryQuery(url_elem.value, user_elem.value, password_elem.value, query, url_params, /*quiet=*/ true);
+    return json ? json.data : null;
+}
+
+/// The words that fit at the cursor (lower case → word): the columns of the tables of the statement, and the setting
+/// names when the cursor is after SETTINGS. What is not loaded yet is requested, and offered from the next keystroke.
+function completionContext(text, pos) {
+    const words = new Map();
+    const statement = statementAround(text, pos);
+    for (const [database, table] of referencedTables(statement)) {
+        const key = `${database}.${table}`;
+        if (!completionColumns.has(key)) {
+            completionColumns.set(key, null);
+            editorQuery(`SELECT name FROM system.columns WHERE database = if({db:String} = '', currentDatabase(), {db:String}) AND table = {t:String}`,
+                {db: database, t: table}).then(rows => { completionColumns.set(key, rows ? rows.map(row => row.name) : []); });
+        }
+        for (const name of completionColumns.get(key) || []) words.set(name.toLowerCase(), name);
+    }
+    const before = text.slice(text.lastIndexOf(';', pos - 1) + 1, pos);
+    if (/\bSETTINGS\b/i.test(before)) {
+        if (!completionSettings && !completionSettingsLoading) {
+            completionSettingsLoading = true;
+            editorQuery('SELECT name FROM system.settings').then(rows => { completionSettings = rows ? rows.map(row => row.name) : []; });
+        }
+        for (const name of completionSettings || []) words.set(name.toLowerCase(), name);
+    }
+    return words;
+}
+
+/// The documentation of functions, by name: a row of `system.functions`, null when unknown, or a promise while loading.
+const functionDocs = new Map();
+
+/// The name of the innermost function call the cursor is in: the identifier before the `(` that is still open.
+function functionAtCursor(text, pos) {
+    let depth = 0;
+    let quote = null;
+    for (let i = pos - 1; i >= 0 && pos - i < 4000; --i) {
+        const c = text[i];
+        if (quote) {
+            if (c === quote && text[i - 1] !== '\\') quote = null;
+            continue;
+        }
+        if (c === "'" || c === '"' || c === '`') { quote = c; continue; }
+        if (c === ';') return null;
+        if (c === ')') ++depth;
+        else if (c === '(') {
+            if (depth === 0) {
+                const match = text.slice(Math.max(0, i - 128), i).match(/([A-Za-z_]\w*)\s*$/);
+                return match ? match[1] : null;
+            }
+            --depth;
+        }
+    }
+    return null;
+}
+
+/// Shows, under the editor, the signature and the description of the function the cursor is in, from
+/// `system.functions` of the server: what the SQL Console of ClickHouse Cloud shows on hover.
+async function updateFunctionDoc() {
+    if (document.activeElement !== query_area) return;
+    const name = functionAtCursor(query_area.value, query_area.selectionStart);
+    const KEYWORDS = /^(IN|AND|OR|NOT|VALUES|EXISTS|OVER|USING|AS|ON|FROM|SELECT|WHERE|TUPLE)$/i;
+    if (!name || KEYWORDS.test(name)) {
+        functionDocEl.hidden = true;
+        return;
+    }
+    let doc = functionDocs.get(name);
+    if (doc === undefined) {
+        doc = editorQuery(`SELECT name, alias_to, syntax, description, returned_value FROM system.functions
+            WHERE name = {n:String} OR (case_insensitive AND lower(name) = lower({n:String})) LIMIT 1`, {n: name})
+            .then(rows => (rows && rows.length ? rows[0] : null));
+        functionDocs.set(name, doc);
+    }
+    if (doc instanceof Promise) {
+        doc = await doc;
+        functionDocs.set(name, doc);
+        if (functionAtCursor(query_area.value, query_area.selectionStart) !== name) return;
+    }
+    if (!doc) {
+        functionDocEl.hidden = true;
+        return;
+    }
+    const first = (text) => (text || '').trim().split(/\n\s*\n/)[0].replace(/\s+/g, ' ');
+    const signature = document.createElement('code');
+    signature.textContent = first(doc.syntax) || `${doc.name}(…)`;
+    functionDocEl.replaceChildren(signature, document.createTextNode(
+        (doc.alias_to ? ` (alias of ${doc.alias_to})` : '') + (first(doc.description) ? ` — ${first(doc.description)}` : '')
+        + (first(doc.returned_value) ? ` Returns: ${first(doc.returned_value)}` : '')));
+    functionDocEl.hidden = false;
+}
+
+let functionDocTimer = null;
+function scheduleFunctionDoc() {
+    clearTimeout(functionDocTimer);
+    functionDocTimer = setTimeout(updateFunctionDoc, 150);
+}
+for (const event of ['input', 'keyup', 'click', 'focus']) query_area.addEventListener(event, scheduleFunctionDoc);
+query_area.addEventListener('blur', () => { functionDocEl.hidden = true; });
+
 /// Compute the candidate list for the given prefix (up to MAX_COMPLETION_CANDIDATES), applying priorities:
 ///   1. an exact match (a word equal to what was typed) — shown as an empty completion, always first
-///   2. previously accepted completions (usage count, desc)
+///   2. words that fit the context (`completionContext`): columns of the tables of the statement, settings after SETTINGS
+///   3. previously accepted completions (usage count, desc)
 ///   3. identifier-like words already present in the query
 ///   4. case-exact prefix match (so the ghost text continues the typed casing)
 ///   5. shorter words first, then alphabetical
@@ -20795,6 +21372,9 @@ function findCandidates(prefix, prefixStart) {
     const lprefix = prefix.toLowerCase();
     const queryWords = queryIdentifierWords(prefixStart);
     const present = new Set(queryWords.map(w => w.toLowerCase()));
+    /// The words that fit where the cursor is: the columns of the tables the statement reads, or setting names after
+    /// SETTINGS (`completionContext`). They are offered even when the catalog list is capped, and ranked first.
+    const contextWords = completionContext(query_area.value, prefixStart);
     const matches = [];
     for (let i = completionLowerBound(lprefix); i < completionWords.length; ++i) {
         const entry = completionWords[i];
@@ -20810,6 +21390,11 @@ function findCandidates(prefix, prefixStart) {
             matches.push(w);
         }
     }
+    for (const w of contextWords.values()) {
+        if (w.toLowerCase().startsWith(lprefix)) {
+            matches.push(w);
+        }
+    }
 
     /// Do not open a popup that would only offer the already-typed word (an empty completion
     /// on its own has nothing to show and would needlessly capture Tab/Enter). The empty
@@ -20820,6 +21405,7 @@ function findCandidates(prefix, prefixStart) {
 
     const score = (w) => ({
         exact: w.length === prefix.length ? 1 : 0,
+        context: contextWords.has(w.toLowerCase()) ? 1 : 0,
         usage: completionUsage.get(w) || 0,
         present: present.has(w.toLowerCase()) ? 1 : 0,
         caseExact: w.startsWith(prefix) ? 1 : 0,
@@ -20829,6 +21415,7 @@ function findCandidates(prefix, prefixStart) {
         const sa = score(a);
         const sb = score(b);
         if (sa.exact !== sb.exact) return sb.exact - sa.exact;
+        if (sa.context !== sb.context) return sb.context - sa.context;
         if (sa.usage !== sb.usage) return sb.usage - sa.usage;
         if (sa.present !== sb.present) return sb.present - sa.present;
         if (sa.caseExact !== sb.caseExact) return sb.caseExact - sa.caseExact;
@@ -22463,14 +23050,16 @@ document.getElementById('download-format').addEventListener('change', function()
 });
 
 const formatExtensions = {
+  SQLInsert: "sql",
   CSVWithNames: "csv",
   NDJSON: "jsonl",
   JSONEachRow: "jsonl",
   Markdown: "md"
 };
 
-// Handle download button click
-document.getElementById('download-button').addEventListener('click', async function() {
+/// The request that runs the shown query again in the format chosen in the download menu, for **Download** and
+/// **Copy**. Returns null after telling the user why when the query cannot be exported.
+async function buildExportRequest() {
     const formatSelect = document.getElementById('download-format');
     const formatOther = document.getElementById('download-format-other');
 
@@ -22479,7 +23068,7 @@ document.getElementById('download-button').addEventListener('click', async funct
         format = formatOther.value.trim();
         if (!format) {
             alert('Please enter a format name');
-            return;
+            return null;
         }
     }
 
@@ -22499,7 +23088,7 @@ document.getElementById('download-button').addEventListener('click', async funct
 
     if (!query) {
         alert('No query to download results for');
-        return;
+        return null;
     }
 
     /// A query that carries its own `framing_output_format` in a `SETTINGS` clause overrides the
@@ -22514,7 +23103,7 @@ document.getElementById('download-button').addEventListener('click', async funct
     const { user_framing, user_sets_session_framing } = await detectFramingSetting(query);
     if (user_framing || user_sets_session_framing) {
         alert(`This query chooses its own framing_output_format, which overrides the download format, so the downloaded file would contain framing packets instead of ${format}. Remove the framing_output_format setting from the query to download the result as ${format}.`);
-        return;
+        return null;
     }
 
     // Build download URL
@@ -22551,6 +23140,19 @@ document.getElementById('download-button').addEventListener('click', async funct
         ? query.slice(0, format_clause.start) + query.slice(format_clause.end)
         : query;
 
+    return { url, body: downloadQuery, format, extension, user, password };
+}
+
+/// Formats whose output is text, which **Copy** can put into the clipboard.
+const BINARY_EXPORT_FORMATS = /^(Parquet|ORC|Arrow|ArrowStream|Avro|Native|RowBinary.*|Protobuf.*|CapnProto|MsgPack|BSONEachRow|Npy)$/i;
+
+/// The largest result **Copy** puts into the clipboard; a larger one is better downloaded.
+const COPY_EXPORT_MAX_BYTES = 10 * 1024 * 1024;
+
+// Handle download button click
+document.getElementById('download-button').addEventListener('click', async function() {
+    const request = await buildExportRequest();
+    if (!request) return;
     /// The query runs with `fetch`, so that the credentials go in headers (`authHeaders`) and never in the URL, which a
     /// form submission would need. The browser keeps the whole result in memory until it is saved, so a very large
     /// result is better exported with `INTO OUTFILE` or `clickhouse-client`. A failure is shown instead of being saved
@@ -22561,7 +23163,7 @@ document.getElementById('download-button').addEventListener('click', async funct
     const label = button.textContent;
     button.textContent = 'Downloading…';
     try {
-        const response = await fetch(url, { method: 'POST', body: downloadQuery, headers: authHeaders(user, password) });
+        const response = await fetch(request.url, { method: 'POST', body: request.body, headers: authHeaders(request.user, request.password) });
         if (!response.ok) {
             alert(`The download failed: ${(await response.text()).trim()}`);
             return;
@@ -22569,7 +23171,7 @@ document.getElementById('download-button').addEventListener('click', async funct
         const blob = await response.blob();
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = `result.${extension}`;
+        link.download = `result.${request.extension}`;
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -22580,6 +23182,41 @@ document.getElementById('download-button').addEventListener('click', async funct
     } finally {
         button.disabled = false;
         button.textContent = label;
+    }
+});
+
+/// **Copy**: the result in the chosen format, into the clipboard, for pasting it into a document, a ticket, or another
+/// query (Markdown for a table, SQLInsert for `INSERT` statements). Text formats only, up to `COPY_EXPORT_MAX_BYTES`.
+document.getElementById('copy-export-button').addEventListener('click', async function() {
+    const request = await buildExportRequest();
+    if (!request) return;
+    if (BINARY_EXPORT_FORMATS.test(request.format)) {
+        alert(`${request.format} is a binary format: download it instead of copying it.`);
+        return;
+    }
+    const button = this;
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Copying…';
+    try {
+        const response = await fetch(request.url, { method: 'POST', body: request.body, headers: authHeaders(request.user, request.password) });
+        const text = await response.text();
+        if (!response.ok) {
+            alert(`The copy failed: ${text.trim()}`);
+            return;
+        }
+        if (text.length > COPY_EXPORT_MAX_BYTES) {
+            alert(`The result is ${Math.round(text.length / 1024 / 1024)} MB: download it instead of copying it.`);
+            return;
+        }
+        await navigator.clipboard.writeText(text);
+        button.textContent = 'Copied';
+        document.getElementById('download-dropdown').classList.remove('show');
+    } catch (e) {
+        alert(`The copy failed: ${e.message}`);
+    } finally {
+        button.disabled = false;
+        setTimeout(() => { button.textContent = label; }, 1500);
     }
 });
 

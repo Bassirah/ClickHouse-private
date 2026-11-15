@@ -1,0 +1,79 @@
+---
+description: 'What the Play UI of the web console adds to the SQL Console: confirmation and read-only mode, a result per statement, export and copy in every format, function documentation and context-aware completion, profiling with a flame graph, and an AI assistant with a model of your own.'
+sidebarTitle: 'Play UI'
+slug: /web-console/guides/play-ui
+title: 'Play UI'
+doc_type: 'guide'
+---
+
+The **Play UI** panel, in the **Workspace** category, is the query page of the ClickHouse server (`/play`). Inside the
+console it uses the console's connection and hides its own connection fields. It complements the **SQL Console**
+(`/ui`), a separate application whose source is not part of ClickHouse, with what the SQL Console does not have:
+
+| Need | In the Play UI |
+|---|---|
+| Not running `DROP` or `TRUNCATE` by mistake | A confirmation before statements that change or delete data, and **Read-only** mode. |
+| Several statements | **Run all** shows a result per statement. |
+| Results elsewhere | Download in every ClickHouse format (Parquet included), or **Copy** in a text format. |
+| Writing queries | Completion of the columns of the tables of the statement and of settings, and the documentation of the function at the cursor. |
+| Slow queries | Server logs and metrics per query, the graph of `EXPLAIN ... graph = 1`, and a flame graph in **Profile** mode. |
+| Help with SQL | An AI assistant, with a model that the server configures. |
+| Large results | The page shows the first 1,000 rows and then disconnects, which stops the query on the server. |
+
+## Confirmation and read-only mode {#confirmation-and-read-only-mode}
+
+Before it runs statements that change or delete existing data or objects (`DROP`, `TRUNCATE`, `DELETE`, `UPDATE`,
+destructive `ALTER`, and others), the Play UI lists them and asks; **Cancel** has the focus. **Read-only**, next to
+**Run**, runs every query with `readonly = 2`, so that the server refuses changes. See
+[Prevent and undo accidental drops](/products/web-console/how-to/prevent-and-undo-accidental-drops#the-play-ui).
+
+## Copying and downloading a result {#copying-and-downloading-a-result}
+
+The download menu (the arrow next to the result) runs the query again in the chosen format:
+
+- **Download** saves the result as a file, in any format, Parquet included.
+- **Copy** puts it into the clipboard, for a text format and up to 10 MB: **Markdown** for a table in a document or a
+  ticket, **SQL INSERT** (`SQLInsert`) for `INSERT` statements, CSV, TSV, or JSON.
+
+## Writing queries {#writing-queries}
+
+- **Completion** offers the words of the server (functions, tables, columns, settings) as you type. The columns of the
+  tables that the statement names after `FROM`, `JOIN`, `INTO`, or `UPDATE` are offered first, and the setting names
+  after `SETTINGS`.
+- **Function documentation**: when the cursor is in the arguments of a function, the line under the editor shows its
+  signature, its description, and what it returns, from `system.functions`.
+- **Errors**: the position that the server reports in an error is marked in the editor.
+
+## Profiling a query {#profiling-a-query}
+
+Select **Profile** next to **Run**: queries then run with the query profiler sampling their stacks every 10 ms
+(`query_profiler_cpu_time_period_ns`, `query_profiler_real_time_period_ns`). After a query, **Flame graph** shows where
+its time went, from `system.trace_log`:
+
+- **Samples** chooses CPU time or wall-clock time (which includes waiting for disk and network).
+- The outermost frames are at the top. Select a frame to show it and what it calls on the full width; select it again
+  to go back.
+- The server writes the samples every few seconds, so the graph can take a moment to appear. A query shorter than
+  10 ms has no samples.
+
+The flame graph needs `system.trace_log` to be enabled on the server, and the `INTROSPECTION` privilege for the names of
+the functions (`addressToSymbol`, `demangle`). Profiling slows queries down a little: keep it off when not needed.
+
+## AI assistant {#ai-assistant}
+
+When the server configures an AI model ([`ai_endpoint`](/products/web-console/reference/configuration#ai-keys)),
+**AI** next to **Run** opens the assistant:
+
+- **Write a query** sends your question, and the names and types of the columns of the tables of the selected database
+  (at most 100 tables of 60 columns), to the model.
+- **Fix the last error** sends the statement under the cursor and the error of the last result.
+- The answer is shown with its SQL; **Put into the editor** adds the query to the editor, or replaces the statement
+  under the cursor for a fix. Nothing runs until you select **Run**: read the query first.
+
+No rows are sent to the model. The model answers from the names it is given and can be wrong.
+
+## Accessibility {#accessibility}
+
+The page has a **Skip to the query editor** link as its first stop, every control works with the keyboard (Enter and
+Space on the icons), the progress and the errors are announced to screen readers, and on a narrow screen the database
+panel opens over the page.
