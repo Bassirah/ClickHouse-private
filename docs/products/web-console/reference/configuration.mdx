@@ -128,7 +128,8 @@ The deployment examples set these keys from the environment of the server contai
 ### `sql_console_clear_on_sign_out` {#sql-console-clear-on-sign-out}
 
 The SQL Console and the Play UI keep data in the browser, and the console deletes part of it when you select **Sign out** or
-**Switch connection**, and when a single sign-on session ends. See
+**Switch connection**, when a single sign-on session ends, and when it loads after a session that ended by closing or
+reloading the page (if no other tab has a session). See
 [Data in the browser's storage](/products/web-console/guides/console#data-in-the-browsers-storage).
 
 | Value | Deleted at the end of a session |

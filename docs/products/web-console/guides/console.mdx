@@ -171,8 +171,12 @@ same browser profile, so use a browser profile of your own on a shared computer.
 **Sign out**, **Switch connection**, and the end of a single sign-on session delete the result rows and the SQL
 Console's data in the session storage of the tab. They keep the tabs, the history, and the saved queries, unless the
 server sets [`sql_console_clear_on_sign_out`](/products/web-console/reference/configuration#sql-console-clear-on-sign-out)
-to `all`. If the deletion fails, the sign-in page says so. Closing or reloading the page signs you out without
-deleting anything: sign out first.
+to `all`. If the deletion fails, the sign-in page says so.
+
+Closing or reloading the page also ends the session, but leaves the data until the console loads again in this
+browser: it then deletes the same data, provided no other tab of the browser has a console session (each signed-in tab
+holds a Web Lock for that). Web Locks exist only on HTTPS and on `localhost`: on a plain HTTP address of another host,
+nothing is deleted at load, so sign out before you close the page.
 
 The Play UI keeps its tabs, with their queries and the last result of each tab and notebook cell, in the IndexedDB
 database `clickhouse-play`, in clear text and shared by every user of the browser. The end of a session deletes the

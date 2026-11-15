@@ -1388,6 +1388,7 @@ function startSession(connection, info) {
     session.status_timer = setInterval(() => {
         if (document.visibilityState === 'visible') checkConnection();
     }, 60000);
+    holdSessionLock(session);
     runProbes(session);
     loadAdminContext(session);
 }
@@ -1520,8 +1521,31 @@ async function clearSqlConsoleStorage() {
     return problems;
 }
 
-/// The last deletion started by `endSession`; the browser checks (`utils/web-console/console_e2e.mjs`) wait for it.
+/// The last deletion started by `endSession` or at load (`clearLeftoverStorage`); the browser checks
+/// (`utils/web-console/console_e2e.mjs`) wait for it.
 let sql_console_cleanup = Promise.resolve([]);
+
+/// Every console tab with a session holds this Web Lock, shared, until the session ends (`holdSessionLock`). Closing or
+/// reloading the page ends a session without `endSession`, so the console deletes what the session left when it loads
+/// again (`clearLeftoverStorage`), but only when it can take the lock exclusively: when no other tab of the browser has
+/// a session that still uses the data.
+const SESSION_LOCK = 'clickhouse-console-session';
+
+function holdSessionLock(current) {
+    /// Web Locks exist only in secure contexts (HTTPS, or `localhost`); without them, nothing is deleted at load.
+    if (!navigator.locks) return;
+    navigator.locks.request(SESSION_LOCK, {mode: 'shared'}, () => new Promise(resolve => { current.release_session_lock = resolve; }));
+}
+
+/// Deletes, at load, the data that a session closed by closing or reloading the page left in the browser: as at sign-out
+/// (`clearSqlConsoleStorage`), when no other tab has a session. Problems are reported on the sign-in page.
+function clearLeftoverStorage() {
+    if (!navigator.locks) return Promise.resolve([]);
+    sql_console_cleanup = navigator.locks.request(SESSION_LOCK, {mode: 'exclusive', ifAvailable: true},
+        async lock => (lock ? clearSqlConsoleStorage() : []));
+    sql_console_cleanup.then(problems => { if (!session) reportSqlConsoleCleanup(problems); });
+    return sql_console_cleanup;
+}
 
 /// Adds the outcome of `clearSqlConsoleStorage` to the notice of the sign-in page.
 function reportSqlConsoleCleanup(problems) {
@@ -1537,6 +1561,7 @@ function reportSqlConsoleCleanup(problems) {
 function endSession() {
     if (!session) return Promise.resolve([]);
     if (session.sso) clearTimeout(session.sso.timer);
+    if (session.release_session_lock) session.release_session_lock();
     session.controller.abort();
     clearInterval(session.status_timer);
     for (const id of [...frames.keys()]) destroyFrame(id);
@@ -13463,6 +13488,8 @@ if (location.pathname === OIDC_CALLBACK_PATH) {
 } else {
     loadConfig().then(() => {
         render();
+        /// After the configuration: it says what to delete.
+        clearLeftoverStorage();
     });
 }
 </script>
