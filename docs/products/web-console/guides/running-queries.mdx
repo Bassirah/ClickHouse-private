@@ -1,5 +1,5 @@
 ---
-description: 'What the Running queries page of the web console shows: the queries running on the server, from system.processes, with their progress and memory, and how to stop one with KILL QUERY.'
+description: 'What the Running queries page of the web console shows: the queries running on the server or on every server of a cluster, from system.processes, with their progress and memory, and how to stop one with KILL QUERY.'
 sidebarTitle: 'Running queries'
 slug: /web-console/guides/running-queries
 title: 'Running queries'
@@ -7,7 +7,7 @@ doc_type: 'guide'
 ---
 
 The **Running queries** page, in the **Diagnostics** category, lists the queries running on the server the console is
-connected to, and stops a query. It reads `system.processes`, so it shows the queries of every user and client: the SQL
+connected to, or on every server of a cluster, and stops a query. It reads `system.processes`, so it shows the queries of every user and client: the SQL
 Console, the Web Terminal, `clickhouse-client`, drivers, and the console itself. The SQL Console shows the same list
 in its **Queries** panel, but cannot stop a query of another tab or user; this page can.
 
@@ -25,6 +25,13 @@ includes the privilege as an option.
 
 ## The list {#the-list}
 
+**Servers** chooses where the queries come from: **This server**, or a cluster of `system.clusters` (listed for users who
+can read it). For a cluster, the page reads `clusterAllReplicas('<cluster>', system.processes)` with
+`skip_unavailable_shards = 1`: a server that does not answer is skipped, and the queries of the others are shown. A
+**Server** column then shows the host name of each query, and when some servers do not answer, the page says how many
+of the cluster's servers did. Reading a cluster needs `SELECT ON system.processes` on each server and `READ ON REMOTE`
+for the table function.
+
 The list shows the queries, the longest-running first, without the query that reads the list. It is read again every 5
 seconds while the page is shown and the browser tab is visible; clear **Refresh every 5 seconds** to keep it still, or
 select **Refresh**. Above the table, the page shows the number of queries and the memory they use.
@@ -32,6 +39,7 @@ select **Refresh**. Above the table, the page shows the number of queries and th
 | Column | Content |
 |---|---|
 | **Running for** | Time since the query started (`elapsed`). |
+| **Server** | With a cluster: the host name of the server that runs the query. |
 | **User** | The user that runs the query. For a query that a server runs for another one (a part of a distributed query), also `for` the user of the initial query. |
 | **Query** | The beginning of the text; select it for the whole text, the query ID, and the current database. |
 | **Read** | The rows and bytes read so far, and the percentage of `total_rows_approx` when the server knows it. |
@@ -53,12 +61,14 @@ already finished is not affected. The console records the action as `kill_query`
 [audit log](/products/web-console/guides/audit-activity), with the user, the running time, and the beginning of the
 query text.
 
-The statement runs on the server the console is connected to. Each server of a cluster has its own list: to stop a
-distributed query, stop its initial query, and the server cancels its parts on the other servers.
+For a query on this server, the statement runs on it. For a query on another server of the cluster, the statement is
+`KILL QUERY ON CLUSTER '<cluster>' WHERE query_id = ... ASYNC`: it runs through the distributed DDL queue (which needs
+Keeper and `distributed_ddl`), and the server that has the query stops it. To stop a distributed query, stop its initial
+query: the server cancels its parts on the other servers.
 
 ## Limitations {#limitations}
 
-- The page shows one server. For the queries of a whole cluster, query
-  `clusterAllReplicas('<cluster>', system.processes)` in the SQL Console.
+- With a cluster, the page counts the servers that answered, but cannot name the ones that did not:
+  `clusterAllReplicas` does not report which servers it skipped.
 - `KILL QUERY` cannot stop every query at once: some operations check for cancellation only between steps.
   [`system.processes`](/reference/system-tables/processes) shows `is_cancelled` for a query that is being stopped.
