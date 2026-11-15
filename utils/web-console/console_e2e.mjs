@@ -400,6 +400,28 @@ await test('Running queries: lists a running query and stops it with KILL QUERY'
     check(result.text.includes('QUERY_WAS_CANCELLED'), `the query was not cancelled: ${result.status} ${result.text.slice(0, 300)}`);
     await page.click('#admin-dialog .dialog-actions button');
     await waitUntil(page, id => ![...document.querySelectorAll('#admin-view details')].some(d => d.dataset.queryId === id), query_id);
+
+    /// The servers of a cluster: console_test has a second shard where nothing listens, which is skipped.
+    const cluster_query_id = `e2e-running-cluster-${Date.now()}`;
+    const cluster_running = fetch(`${BASE}/?query_id=${cluster_query_id}&max_block_size=1`, {method: 'POST',
+        headers: {'X-ClickHouse-User': ADMIN_USER, 'X-ClickHouse-Key': ADMIN_PASSWORD},
+        body: 'SELECT sleepEachRow(1) FROM numbers(60) FORMAT Null'}).then(async response => ({status: response.status, text: await response.text()}));
+    await waitUntil(page, () => [...document.querySelectorAll('#admin-view select option')].some(o => o.value === 'console_test'));
+    await page.selectOption('#admin-view select >> nth=0', 'console_test');
+    await waitUntil(page, id => [...document.querySelectorAll('#admin-view details')].some(d => d.dataset.queryId === id), cluster_query_id);
+    const cluster_row = page.locator('#admin-view tr', {has: page.locator(`details[data-query-id="${cluster_query_id}"]`)});
+    const host = await page.evaluate(() => session.hostname);
+    check((await cluster_row.textContent()).includes(host), 'the server of the query is not shown');
+    check((await page.textContent('#admin-view .box')).includes('on the servers of console_test'), 'the cluster is not named');
+    check(!(await page.$('#admin-view .message.error')), `error: ${await page.textContent('#admin-view .message.error').catch(() => '')}`);
+    const skipped = await page.textContent('#admin-view .message.warning');
+    check(skipped.includes('1 of 2 servers of console_test answered'), `skipped servers: ${skipped}`);
+    await cluster_row.getByRole('button', {name: 'Stop'}).click();
+    await page.waitForSelector('#admin-dialog[open]');
+    /// On this server: no ON CLUSTER.
+    check((await page.textContent('#admin-dialog')).includes(`KILL QUERY WHERE query_id = '${cluster_query_id}' ASYNC`), 'review of the cluster stop');
+    await page.click('#admin-dialog button.danger');
+    check((await cluster_running).text.includes('QUERY_WAS_CANCELLED'), 'the query on the cluster was not cancelled');
     await context.close();
 });
 

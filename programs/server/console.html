@@ -7686,25 +7686,48 @@ ADMIN_PAGES.import = (root, route, page) => {
 /// How often the Running queries page reads `system.processes` again while it is shown and the browser tab is visible.
 const RUNNING_QUERIES_REFRESH_MS = 5000;
 
-/// The queries of `system.processes` on this server, except the query that reads them.
-async function loadRunningQueries() {
-    return adminRows(`SELECT query_id, user, initial_user, is_initial_query, elapsed, read_rows, read_bytes, total_rows_approx,
-        memory_usage, current_database, query
-        FROM system.processes WHERE query_id != queryID() ORDER BY elapsed DESC LIMIT 500`, {});
+/// The queries of `system.processes` on this server, or on every server of `cluster`
+/// (`clusterAllReplicas(<cluster>, system.processes)`), except the query that reads them and its parts on the other
+/// servers. A server of the cluster that does not answer is skipped (`skip_unavailable_shards`), so that one stopped
+/// server does not hide the queries of the others. Each row has the `host` that runs it. Returns `{rows, answered,
+/// servers}`: with a cluster, `answered` is the number of servers that answered (each one lists its part of the query
+/// that reads the list, which is then left out) and `servers` the number of servers of the cluster.
+async function loadRunningQueries(cluster) {
+    const self = crypto.randomUUID();
+    const source = cluster ? `clusterAllReplicas(${quoteIdentifier(cluster)}, system.processes)` : 'system.processes';
+    const [result, servers] = await Promise.all([
+        runQuery(session, `SELECT hostName() AS host, initial_query_id, query_id, user, initial_user, is_initial_query, elapsed, read_rows,
+            read_bytes, total_rows_approx, memory_usage, current_database, query
+            FROM ${source} ORDER BY initial_query_id = {self:String} DESC, elapsed DESC LIMIT 1000 FORMAT JSON`, session.controller.signal, 30000,
+            {params: {self}, settings: {query_id: self, ...(cluster ? {skip_unavailable_shards: '1'} : {})}}),
+        cluster ? adminRows('SELECT count() AS servers FROM system.clusters WHERE cluster = {cluster:String}', {cluster}) : null,
+    ]);
+    if (result.kind === 'aborted') throw new AdminSessionChanged();
+    if (!result.ok) throw new AdminQueryError(result);
+    const own = result.data.filter(row => row.initial_query_id === self);
+    return {rows: result.data.filter(row => row.initial_query_id !== self).slice(0, 500),
+        answered: new Set(own.map(row => row.host)).size, servers: servers ? Number(servers[0].servers) : 1};
 }
 
 /// The plan that stops one query, reviewed and run like every change of the console, and recorded in its audit log.
-/// `KILL QUERY` needs the privilege only for the queries of other users.
-function stopQueryPlan(row) {
+/// `KILL QUERY` needs the privilege only for the queries of other users. A query on another server of the cluster is
+/// stopped with `ON CLUSTER`, which runs through the distributed DDL queue: the server that has the query stops it.
+function stopQueryPlan(row, cluster) {
+    const remote = cluster && row.host !== session.hostname;
     return {action: 'kill_query', target_type: 'query', target_name: row.query_id, local_only: true, danger: true, confirm_text: 'Stop query',
-        summary: `Stop a query of ${row.user}`,
-        steps: [{description: `Stop the query ${row.query_id} of ${row.user}, running for ${formatSeconds(Number(row.elapsed))}`,
-            sql: `KILL QUERY WHERE query_id = ${quoteString(row.query_id)} ASYNC`}],
-        audit_details: {user: row.user, elapsed_seconds: Number(row.elapsed), query: row.query.slice(0, 1000)},
+        summary: `Stop a query of ${row.user} on ${row.host}`,
+        steps: [{description: `Stop the query ${row.query_id} of ${row.user} on ${row.host}, running for ${formatSeconds(Number(row.elapsed))}`,
+            sql: `KILL QUERY${remote ? ` ON CLUSTER ${quoteIdentifier(cluster)}` : ''} WHERE query_id = ${quoteString(row.query_id)} ASYNC`}],
+        audit_details: {user: row.user, host: row.host, elapsed_seconds: Number(row.elapsed), query: row.query.slice(0, 1000)},
         recovery: 'The server stops the query at its next check; a query that already finished is not affected.'};
 }
 
-function runningQueriesTable(rows, open_ids) {
+/// The key of a running query: the same query ID can run on several servers of a cluster.
+function runningQueryKey(row) {
+    return `${row.host}/${row.query_id}`;
+}
+
+function runningQueriesTable(rows, open_ids, cluster) {
     const can_kill_others = session.admin.can.kill_query;
     const progress = row => {
         const read = Number(row.read_rows);
@@ -7716,8 +7739,9 @@ function runningQueriesTable(rows, open_ids) {
     };
     return dataTable([
         {title: 'Running for', render: row => formatSeconds(Number(row.elapsed))},
+        cluster ? {title: 'Server', render: row => row.host} : null,
         {title: 'User', render: row => [row.user, Number(row.is_initial_query) ? null : h('div', {className: 'note'}, `for ${row.initial_user}`)]},
-        {title: 'Query', render: row => h('details', {open: open_ids.has(row.query_id), dataset: {queryId: row.query_id}},
+        {title: 'Query', render: row => h('details', {open: open_ids.has(runningQueryKey(row)), dataset: {queryId: row.query_id, key: runningQueryKey(row)}},
             h('summary', {}, row.query.length > 120 ? `${row.query.slice(0, 120)}…` : row.query),
             h('pre', {className: 'code'}, row.query),
             h('div', {className: 'note'}, `Query ID ${row.query_id}${row.current_database ? ` · database ${row.current_database}` : ''}`))},
@@ -7725,10 +7749,11 @@ function runningQueriesTable(rows, open_ids) {
         {title: 'Memory', render: row => formatBytes(row.memory_usage)},
         {title: '', render: row => {
             const own = row.user === session.server_user;
-            return button('Stop', () => reviewPlan(stopQueryPlan(row)), {className: 'danger small', disabled: !own && !can_kill_others,
+            return button('Stop', () => reviewPlan(stopQueryPlan(row, cluster)), {className: 'danger small', disabled: !own && !can_kill_others,
                 title: !own && !can_kill_others ? 'Stopping the queries of other users needs the KILL QUERY privilege.' : `Stop this query (KILL QUERY)`});
         }},
-    ], rows, 'No other query is running on this server.', 'Running queries');
+    ].filter(Boolean), rows, cluster ? `No other query is running on the servers of ${cluster} that answered.` : 'No other query is running on this server.',
+        'Running queries');
 }
 
 ADMIN_PAGES.processes = (root, route, page) => {
@@ -7738,27 +7763,40 @@ ADMIN_PAGES.processes = (root, route, page) => {
     const q = h('input', {type: 'search', autocomplete: 'off', spellcheck: false, placeholder: 'User, query text, or query ID'});
     const mine = checkbox('Only my queries', false);
     const auto = checkbox(`Refresh every ${RUNNING_QUERIES_REFRESH_MS / 1000} seconds`, true);
+    /// This server, or every server of a cluster of `system.clusters` (listed when the user can read it).
+    const servers = select([['', `This server (${session.hostname})`]], '');
     let rows = null;
+    let rows_cluster = '';
+    let answered = {answered: 1, servers: 1};
     let timer = null;
     const render = () => {
         if (!rows) return;
         const text = q.value.trim().toLowerCase();
         const shown = rows.filter(row => (!mine.input.checked || row.user === session.server_user)
-            && (!text || [row.user, row.initial_user, row.query, row.query_id].some(value => value.toLowerCase().includes(text))));
+            && (!text || [row.user, row.initial_user, row.query, row.query_id, row.host].some(value => value.toLowerCase().includes(text))));
         /// Keep the queries whose text is expanded open across refreshes.
-        const open_ids = new Set([...results.querySelectorAll('details[open]')].map(d => d.dataset.queryId));
+        const open_ids = new Set([...results.querySelectorAll('details[open]')].map(d => d.dataset.key));
         const memory = rows.reduce((sum, row) => sum + Number(row.memory_usage), 0);
+        const missing = answered.servers - answered.answered;
         results.replaceChildren(
-            h('p', {className: 'note'}, `${rows.length} ${rows.length === 1 ? 'query' : 'queries'} running, using ${formatBytes(memory)} of memory`
-                + `${shown.length !== rows.length ? `; ${shown.length} shown` : ''}.`),
-            runningQueriesTable(shown, open_ids));
+            h('p', {className: 'note'}, `${rows.length} ${rows.length === 1 ? 'query' : 'queries'} running`
+                + (rows_cluster ? ` on the servers of ${rows_cluster}` : '')
+                + `, using ${formatBytes(memory)} of memory${shown.length !== rows.length ? `; ${shown.length} shown` : ''}.`),
+            rows_cluster && missing > 0 ? h('div', {className: 'message warning', role: 'status'},
+                `${answered.answered} of ${answered.servers} servers of ${rows_cluster} answered: the queries of the other `
+                + `${missing === 1 ? 'server are' : `${missing} servers are`} not shown.`) : null,
+            runningQueriesTable(shown, open_ids, rows_cluster));
     };
     /// The table stays on screen while it is read again, so that a refresh does not flicker or close what is expanded.
     const refresh = async () => {
         clearTimeout(timer);
         if (!document.hidden) {
             try {
-                rows = await loadRunningQueries();
+                const cluster = servers.value;
+                const loaded = await loadRunningQueries(cluster);
+                rows = loaded.rows;
+                answered = loaded;
+                rows_cluster = cluster;
                 if (!isCurrent(page)) return;
                 render();
                 updated.textContent = `Updated at ${formatTime(new Date())}`;
@@ -7773,13 +7811,23 @@ ADMIN_PAGES.processes = (root, route, page) => {
     q.addEventListener('input', render);
     mine.input.addEventListener('change', render);
     auto.input.addEventListener('change', () => (auto.input.checked ? refresh() : clearTimeout(timer)));
+    servers.addEventListener('change', () => { results.replaceChildren(loadingBox('Loading…')); refresh(); });
     put(root, pageHeader(c, 'Running queries', null, [button('Refresh', refresh)]),
-        h('p', {className: 'note'}, `The queries running on ${session.hostname}, from system.processes, the longest first. Each server of a cluster `
-            + 'has its own list. Stop asks the server to cancel a query (KILL QUERY): you can always stop your own queries; stopping the queries '
-            + 'of other users needs the KILL QUERY privilege.'),
-        h('div', {className: 'toolbar'}, adminField('Search', q), mine.element, auto.element, updated),
+        h('p', {className: 'note'}, `The queries running on ${session.hostname}, or on every server of a cluster, from system.processes, the longest `
+            + 'first. Stop asks the server to cancel a query (KILL QUERY): you can always stop your own queries; stopping the queries of other users '
+            + 'needs the KILL QUERY privilege. A query on another server of a cluster is stopped with ON CLUSTER, which needs the distributed DDL queue.'),
+        h('div', {className: 'toolbar'}, adminField('Servers', servers), adminField('Search', q), mine.element, auto.element, updated),
         h('div', {className: 'box'}, results));
     refresh();
+    if (session.admin.can.read_clusters) {
+        adminRows('SELECT DISTINCT cluster FROM system.clusters ORDER BY cluster', {}).then(clusters => {
+            if (!isCurrent(page)) return;
+            servers.append(...clusters.map(row => h('option', {value: row.cluster}, `Cluster ${row.cluster}`)));
+        }).catch(e => {
+            if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
+            results.prepend(errorBox(e, 'The clusters cannot be listed:'));
+        });
+    }
 };
 
 /// --- Administration: Data Access Policies, access model ---
