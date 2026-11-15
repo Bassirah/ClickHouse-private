@@ -1,0 +1,93 @@
+---
+description: 'How the Table Editor of the web console shows and changes a ClickHouse table: its columns, data, indexes and projections, partitions and parts, mutations, settings, TTL, constraints, and DDL, and how to create a table.'
+sidebarTitle: 'Table Editor'
+slug: /web-console/guides/table-editor
+title: 'Table Editor'
+doc_type: 'guide'
+---
+
+The **Tables** page, in the **Workspace** category, is the Table Editor of the console. It lists the tables of the
+server the console is connected to, and shows and changes one table: its columns, its data, its indexes and
+projections, its partitions and parts, its mutations, its settings, TTL, and constraints, and its DDL.
+
+Every change is a statement that the console builds from the form, parses with the server (`EXPLAIN AST`) so that an
+error in an expression is shown in the form, and shows for review before it runs. It runs with your privileges, and the
+console records it in the [audit log](/products/web-console/guides/audit-activity) with the table as its target.
+
+## Who can use it {#who-can-use-it}
+
+The page is listed for users who can read `system.tables`, and when the
+[console access policy](/products/web-console/guides/component-access) allows it. For each table, the console checks
+your privileges with `CHECK GRANT`, and an action you do not have the privilege for is disabled, with the privilege it
+needs:
+
+| Actions | Privilege on the table |
+|---|---|
+| See the rows | `SELECT` |
+| Insert a row | `INSERT` |
+| Add, change, rename, or drop a column | `ALTER ADD COLUMN`, `ALTER MODIFY COLUMN`, `ALTER RENAME COLUMN`, `ALTER DROP COLUMN`, `ALTER COMMENT COLUMN` |
+| Edit rows | `ALTER UPDATE` |
+| Delete rows, drop or detach a partition, delete a detached part | `ALTER DELETE` |
+| Indexes, projections, constraints | `ALTER INDEX`, `ALTER PROJECTION`, `ALTER CONSTRAINT` |
+| Settings, TTL, comment | `ALTER SETTINGS`, `ALTER TTL`, `ALTER MODIFY COMMENT` |
+| Optimize, freeze | `OPTIMIZE`, `ALTER FREEZE PARTITION` |
+| Truncate, rename, drop | `TRUNCATE`, `DROP TABLE` (and `CREATE TABLE` on the new name for a rename) |
+
+The server checks every statement anyway: a disabled button only saves you from an `ACCESS_DENIED`.
+
+## The list of tables {#the-list-of-tables}
+
+The list shows each table with its engine, rows, size on disk, compression ratio, last change, and comment, from
+`system.tables`. **Search** filters by database, table, or engine; **Database** shows one database; **Show system
+databases** adds `system` and `information_schema`. Select a table to open it.
+
+**New table** creates a table: the database, the name, the engine (`MergeTree` and its variants, `Memory`, or `Log`),
+the columns (name, type, default, and comment), and for a `MergeTree` table its sorting key, partition key, and TTL,
+with the `CREATE TABLE` statement shown as you type. Keep the partition key coarse, such as a month: thousands of
+partitions slow the server down.
+
+## A table {#a-table}
+
+The tabs of a table:
+
+| Tab | Shows | Changes |
+|---|---|---|
+| **Overview** | Engine, rows, size, compression, parts, keys, storage policy, the query of a view, and the views and materialized views that read the table. For a `Replicated` table: its replicas, delay, and queue. | Comment, rename, optimize (with `FINAL` or `DEDUPLICATE`), truncate, drop. |
+| **Columns** | Each column with its keys, type, default, codec, size on disk, compression, and comment, from `system.columns`. | Add a column (with its position), change its type, default, codec, or comment, rename it, drop it. A column of a key cannot be renamed or dropped. |
+| **Data** | The rows, a page at a time, with a filter (a `WHERE` condition) and an order. | Insert a row, edit or delete one row, update or delete the rows that match a condition. |
+| **Indexes & projections** | Data skipping indexes (`system.data_skipping_indices`) and projections (`system.projections`), with their size on disk. | Add, build for the existing parts (`MATERIALIZE`), drop. |
+| **Partitions & parts** | Partitions with their parts, rows, and size; detached parts with the reason; the last 200 active parts. | Optimize, freeze, detach, or drop a partition; attach or delete a detached part. |
+| **Mutations** | The mutations of the table (`system.mutations`) with their state and last error, and the merges in progress. | Kill a mutation. |
+| **Settings & TTL** | The TTL, the settings set on the table, the constraints, and the comment. | Change or remove the TTL, apply it now, change or reset a setting, add or drop a constraint. |
+| **DDL** | The `CREATE` statement (`SHOW CREATE TABLE`), with a **Copy** button. | |
+
+Views, materialized views, and tables of other engines show what applies to them: a view has no data of its own, and
+indexes, partitions, mutations, and row changes exist only for `MergeTree` tables.
+
+## Editing data {#editing-data}
+
+ClickHouse has no row identifier. To change one row, the Data tab reads, with each row of a `MergeTree` table, the
+virtual columns `_part` and `_part_offset`: the part that holds the row and its position in the part. **Edit** and
+**Delete** use them in the condition, so that they change that row only, even when another row has the same values.
+
+- **Edit** runs `ALTER TABLE ... UPDATE ... WHERE _part = ... AND _part_offset = ...`, a mutation that the server
+  applies in the background (see the Mutations tab). The columns of a key cannot be updated.
+- **Delete** runs `DELETE FROM ... WHERE ...`, a lightweight delete: the row disappears from queries at once.
+- A merge or a mutation rewrites parts, so a row read before it is no longer where it was. Before the review, the
+  console checks that the row is still there, and asks you to refresh the rows when it is not.
+
+Values are typed in the text format of their type, such as `2026-11-15` for a `Date` or `['a','b']` for an
+`Array(String)`, and sent as `CAST('<text>' AS <type>)`. A `Nullable` column has a **NULL** box. When inserting, a field
+left empty gets the default of the column.
+
+**Update matching rows** and **Delete matching rows** take a `WHERE` condition, prefilled with the filter of the tab,
+and show in the review how many rows match now. To delete every row, truncate the table instead.
+
+## Limitations {#limitations}
+
+- Changes run on the server the console is connected to. A `Replicated` table replicates them; for other tables of a
+  cluster, change each server, or use `ON CLUSTER` in the SQL Console.
+- The settings, TTL, and constraints are read from the `CREATE` statement of the table; their expressions are in the DDL
+  tab.
+- The sorting key and the partition key cannot be changed: create a new table and copy the data.
+- Moving a partition to another disk or volume is not offered.
