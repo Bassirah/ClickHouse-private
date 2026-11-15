@@ -615,6 +615,45 @@ await test('Play UI: asks before statements that change or delete data, and read
     await context.close();
 });
 
+await test('Import data: Avro and Arrow files, with the columns from their schema', async () => {
+    const suffix = Date.now();
+    await adminQuery(`CREATE DATABASE IF NOT EXISTS e2e_import`);
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="import"]');
+    await page.waitForSelector('#admin-view input[type="file"]');
+    await waitUntil(page, () => [...document.querySelectorAll('#admin-view select option')].some(o => o.value === 'e2e_import'));
+
+    for (const [format, name] of [['Avro', 'numbers.avro'], ['Arrow', 'numbers.arrow']]) {
+        /// 200,000 rows, larger than the sample of the page, made by the server.
+        const response = await fetch(`${BASE}/`, {method: 'POST', headers: {'X-ClickHouse-User': ADMIN_USER, 'X-ClickHouse-Key': ADMIN_PASSWORD},
+            body: `SELECT number AS id, toString(number) || ' ü' AS name, number * 1.5 AS score FROM numbers(200000) FORMAT ${format}`});
+        check(response.ok, `the ${format} file was not made: ${response.status}`);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        await page.setInputFiles('#admin-view input[type="file"]', {name, mimeType: 'application/octet-stream', buffer});
+        await waitUntil(page, () => document.querySelector('#admin-view input[aria-label="Type of score"]'));
+        check(await page.inputValue('#admin-view select >> nth=0') === format, `${format}: the format is not chosen from the extension`);
+        const types = await page.evaluate(() => [...document.querySelectorAll('#admin-view input[aria-label^="Type of"]')].map(i => i.value));
+        check(types.length === 3 && types[1] === 'String' && types[2] === 'Float64', `${format}: inferred types ${types}`);
+        await waitUntil(page, () => document.getElementById('admin-view').textContent.includes('are not previewed'));
+        const table = `${format.toLowerCase()}_${suffix}`;
+        await page.fill('#admin-view input[placeholder="table name"]', table);
+        await page.selectOption('#admin-view select >> nth=1', 'new');
+        await page.selectOption('#admin-view select >> nth=2', 'e2e_import');
+        await page.click('#admin-view button:text("Review import")');
+        await page.waitForSelector('#admin-dialog[open]');
+        check((await page.textContent('#admin-dialog')).includes(`FORMAT ${format}`), `${format}: review`);
+        await page.click('#admin-dialog .dialog-actions button.primary');
+        await page.waitForSelector('#admin-dialog .message.info', {timeout: 60000});
+        await page.click('#admin-dialog .dialog-actions button');
+        const imported = await adminQuery(`SELECT count(), sum(score), anyIf(name, id = 7) FROM e2e_import.${table} FORMAT CSV`);
+        check(imported === '200000,29999850000,"7 ü"', `${format}: imported ${imported}`);
+    }
+    await context.close();
+});
+
 /// The text of every result of the Play UI (their shadow roots included).
 async function playResultText(play) {
     return play.evaluate(() => [...document.querySelectorAll('query-result')].map(r => (r.shadowRoot || r).textContent).join('\n'));
