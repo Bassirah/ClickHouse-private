@@ -521,6 +521,78 @@ await test('Import data: a Parquet file, with the columns from its footer', asyn
     await context.close();
 });
 
+await test('Play UI: asks before statements that change or delete data, and read-only mode makes the server refuse them', async () => {
+    const table = `e2e_import.confirm_${Date.now()}`;
+    await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_import');
+    const {context, page, log} = await newContext();
+    /// Waits until the Play UI sent `sql`, with `readonly=2` in its URL or without; returns the request.
+    const sent = async (sql, readonly) => {
+        const deadline = Date.now() + 15000;
+        for (;;) {
+            const request = log.requests.find(r => r.post_data === sql && r.url && r.url.includes('readonly=2') === readonly);
+            if (request) return request;
+            if (Date.now() > deadline) throw new Error(`not sent${readonly ? ' read-only' : ''}: ${sql}`);
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    };
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await clickConsole(page, '#sidebar a[data-component="play"]');
+    await page.waitForSelector('.frame-host[data-component="play"] iframe');
+    await waitUntil(page, () => {
+        const doc = document.querySelector('.frame-host[data-component="play"] iframe').contentDocument;
+        return doc && doc.getElementById('readonly-mode');
+    });
+    const play = frameOf(page, '/play');
+    const exists = async () => (await adminQuery(`EXISTS TABLE ${table}`)) === '1';
+    const dialogOpen = () => play.evaluate(() => document.getElementById('confirm-run-dialog').open);
+    const results = () => play.evaluate(() => [...document.querySelectorAll('query-result')].map(r => (r.shadowRoot || r).textContent).join('\n'));
+
+    /// Creating a table and reading are not asked about.
+    await runInPlay(play, `CREATE TABLE ${table} (x UInt8, y UInt8) ENGINE = MergeTree ORDER BY x`);
+    await waitUntil(play, () => document.getElementById('run').textContent.trim() !== 'Stop');
+    await (async () => { for (let i = 0; i < 100 && !(await exists()); ++i) await new Promise(r => setTimeout(r, 100)); })();
+    check(await exists(), 'CREATE TABLE did not run');
+    check(!(await dialogOpen()), 'asked before CREATE TABLE');
+    await runInPlay(play, `ALTER TABLE ${table} ADD COLUMN z UInt8`);
+    await sent(`ALTER TABLE ${table} ADD COLUMN z UInt8`, false);
+    check(!(await dialogOpen()), 'asked before ALTER ... ADD COLUMN');
+
+    /// DROP is asked about: Cancel keeps the table, Run drops it.
+    await runInPlay(play, `DROP TABLE ${table}`);
+    await waitUntil(play, () => document.getElementById('confirm-run-dialog').open);
+    check((await play.textContent('#confirm-run-statements')).includes(`DROP TABLE ${table}`), 'the statement is not shown');
+    check(await play.evaluate(() => document.activeElement.id) === 'confirm-run-cancel', 'Cancel does not have the focus');
+    await screenshot(page, '09-play-confirm');
+    await play.click('#confirm-run-cancel');
+    check(await exists(), 'Cancel dropped the table');
+    await runInPlay(play, `ALTER TABLE ${table} DELETE WHERE x = 1`);
+    await waitUntil(play, () => document.getElementById('confirm-run-dialog').open);
+    await play.press('#confirm-run-dialog', 'Escape');
+    check(!(await dialogOpen()), 'Escape did not close the question');
+
+    /// Read-only mode: the server refuses the statement, and nothing is asked.
+    await play.check('#readonly-mode');
+    await runInPlay(play, `INSERT INTO ${table} (x, y) VALUES (1, 1)`);
+    await sent(`INSERT INTO ${table} (x, y) VALUES (1, 1)`, true);
+    await waitUntil(play, () => [...document.querySelectorAll('query-result')].some(r => /readonly/i.test((r.shadowRoot || r).textContent)));
+    check(await adminQuery(`SELECT count() FROM ${table}`) === '0', 'read-only mode inserted a row');
+    await runInPlay(play, `DROP TABLE ${table}`);
+    await sent(`DROP TABLE ${table}`, true);
+    check(!(await dialogOpen()), 'asked in read-only mode');
+    check(await exists(), 'read-only mode dropped the table');
+    await play.uncheck('#readonly-mode');
+
+    await runInPlay(play, `DROP TABLE ${table}`);
+    await waitUntil(play, () => document.getElementById('confirm-run-dialog').open);
+    await play.click('#confirm-run-ok');
+    await (async () => { for (let i = 0; i < 100 && (await exists()); ++i) await new Promise(r => setTimeout(r, 100)); })();
+    check(!(await exists()), 'Run did not drop the table');
+    check(!(await results()).includes('Exception'), 'the DROP failed');
+    await context.close();
+});
+
 /// The text of every result of the Play UI (their shadow roots included).
 async function playResultText(play) {
     return play.evaluate(() => [...document.querySelectorAll('query-result')].map(r => (r.shadowRoot || r).textContent).join('\n'));

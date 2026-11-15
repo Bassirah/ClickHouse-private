@@ -178,7 +178,8 @@ The Play UI keeps its tabs, with their queries and the last result of each tab a
 database `clickhouse-play`, in clear text and shared by every user of the browser. The end of a session deletes the
 results and keeps the queries, or, with `sql_console_clear_on_sign_out` set to `all`, deletes the tabs too. Inside the
 console, the Play UI uses the console's connection, hides its own connection fields, and never offers the password to
-the browser's password manager.
+the browser's password manager. It asks before statements that change or delete data, and has a **Read-only** mode
+(see [Prevent and undo accidental drops](/products/web-console/how-to/prevent-and-undo-accidental-drops#the-play-ui)).
 
 The console itself stores only two preferences in local storage: the theme (light or dark, shared with the other web UIs of the server) and whether the sidebar is collapsed.
 
