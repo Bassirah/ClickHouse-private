@@ -1,5 +1,5 @@
 ---
-description: 'How the Import data page of the web console loads a CSV, TSV, or JSON file from your computer into a new or an existing ClickHouse table, with the columns the server infers.'
+description: 'How the Import data page of the web console loads a CSV, TSV, JSON, or Parquet file from your computer into a new or an existing ClickHouse table, with the columns the server infers.'
 sidebarTitle: 'Import data'
 slug: /web-console/guides/import-data
 title: 'Import data'
@@ -12,7 +12,7 @@ creates the table if needed and sends the file as the data of an `INSERT` statem
 
 ## Formats {#formats}
 
-The page imports text formats. It chooses the format from the file extension, and you can change it:
+The page chooses the format from the file extension, and you can change it:
 
 | Format | Extension | Columns |
 |---|---|---|
@@ -21,8 +21,9 @@ The page imports text formats. It chooses the format from the file extension, an
 | `TSVWithNames` | `.tsv`, `.tab` | From the header row. |
 | `TSV` | | `c1`, `c2`, and so on. |
 | `JSONEachRow` | `.json`, `.jsonl`, `.ndjson` | From the keys of the objects, one object per line. |
+| `Parquet` | `.parquet` | From the schema of the file. |
 
-Binary formats such as Parquet are not supported yet: load them with `clickhouse-client` or the `INSERT ... FORMAT`
+Other formats, such as ORC or Avro, are not supported: load them with `clickhouse-client` or the `INSERT ... FORMAT`
 statement of the HTTP interface.
 
 ## Who can use it {#who-can-use-it}
@@ -39,16 +40,20 @@ each statement:
 
 ## Importing a file {#importing-a-file}
 
-1. **Choose the file.** The page reads its first 64 KiB, cut after the last complete line (the whole file if it is
-   smaller), and asks the server for its columns with `DESCRIBE TABLE format(<format>, '<sample>')`. The sample is sent
-   as a string literal in the query, so it counts toward `max_query_size`.
+1. **Choose the file.** The page asks the server for its columns with `DESCRIBE TABLE format(<format>, <sample>)`:
+   - For a text format, the sample is the first 64 KiB of the file, cut after the last complete line (the whole file if
+     it is smaller), sent as a string literal in the query.
+   - For Parquet, the sample is the footer of the file, which holds its schema, sent in Base64 (`base64Decode`). The
+     size of the file does not matter. The page also shows the number of rows and row groups, from
+     `format(ParquetMetadata, ...)`. A footer that does not fit in `max_query_size` raises that setting for the query.
 2. **Review the columns.** Rename a column or change its type in the table, then select **Preview** to read the first
-   rows of the sample again with them. By default, columns are not `Nullable`, and a missing value becomes the default
+   rows of the sample again with them. For Parquet, the names cannot be changed, because the import matches the columns
+   of the file by name, and the rows are not previewed: only the footer is sent before the import. By default, columns are not `Nullable`, and a missing value becomes the default
    of its type; select **Allow missing values (Nullable columns)** to keep the `Nullable` types the server infers.
 3. **Choose the destination.**
    - **A new table**: the database, the table name (suggested from the file name), and the sorting key. The table is
      a `MergeTree` table with the reviewed columns and `ORDER BY` the chosen column, or `tuple()`.
-   - **An existing table**: the database and the table. With a header row or JSON, the columns are matched by name, and
+   - **An existing table**: the database and the table. With a header row, JSON, or Parquet, the columns are matched by name, and
      the columns of the table that the file does not have get their defaults. Without a header row, the columns of the
      file must be in the order of the table.
 4. **Review import** shows the statements: `CREATE TABLE` for a new table, and `INSERT INTO <table> FORMAT <format>`
@@ -62,11 +67,12 @@ the file name, its size, and the format.
 | Problem | What happens |
 |---|---|
 | The server cannot read the sample as the chosen format | The page shows the error of the server under the file. Choose another format, or fix the file. |
+| A `.parquet` file does not end with the Parquet footer | The page says that the file is not a Parquet file, before sending anything. |
 | A value further in the file does not fit its column | The `INSERT` fails with the error of the server, and inserts no rows of the failed blocks. A new table stays, empty or with the rows of the blocks before the error: drop it, or fix the columns and import into it. |
 | The connection is lost during the upload | The step fails. Rows of complete blocks may already be in the table: check it before importing again. |
 
 ## Limitations {#limitations}
 
-- Text formats only.
+- CSV, TSV, JSON with one object per line, and Parquet only.
 - The browser sends the file in one request. For files of several gigabytes, prefer `clickhouse-client`.
-- The columns are inferred from the beginning of the file: a value further down that does not fit fails the import.
+- The columns of a text file are inferred from its beginning: a value further down that does not fit fails the import.
