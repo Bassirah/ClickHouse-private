@@ -165,6 +165,12 @@ if (await sql(`SELECT count() FROM system.tables WHERE database = '${DB}' AND na
     const outcome = await applyPlan();
     check(outcome.includes('Applied'), `the setup of the administration pages failed: ${outcome}`);
 }
+/// Users who cannot read the console access policy do not see the panels it governs, and the refresh checks open the
+/// Dashboard as the Keycloak user. The setup gives the reader role to the roles that exist at that time: when another
+/// suite set the console up before this role existed, the role is given it here, as an administrator would.
+if (await sql(`SELECT count() FROM system.roles WHERE name = '${DB}_reader'`) === '1') {
+    check(!(await sql(`GRANT ${DB}_reader TO ${ROLE}`)), `grant of ${DB}_reader to ${ROLE} failed`);
+}
 
 await test('The sidebar has Identity Providers with LDAP and SSO, and the Users page points there', async () => {
     await signIn(ADMIN_USER, ADMIN_PASSWORD);
