@@ -31,7 +31,8 @@
     lives in ordinary tables of the `admin_database` (see `ADMIN_TABLES`), created on request.
 -->
 <style>
-:root
+/* The theme of the console, on `html`; `#embedded-admin-view` takes the one of the SQL Console it is shown in. */
+:root, [data-theme="light"]
 {
     color-scheme: light;
     --bg: #ffffff;
@@ -320,7 +321,10 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 
 /* Administration */
 
-#admin-view { flex: 1; min-height: 0; overflow-y: auto; padding: 1.25rem 1.5rem 2rem; }
+:is(#admin-view, #embedded-admin-view) { flex: 1; min-height: 0; overflow-y: auto; padding: 1.25rem 1.5rem 2rem; }
+/* An administration page in a tab of the SQL Console (`openSqlConsoleTab`): over the content area of the SQL Console,
+   below its tab bar, where the content of its own tabs is. */
+#embedded-admin-view { position: absolute; z-index: 1; background: var(--bg); color: var(--text); }
 .admin-page { max-width: 80rem; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; }
 .admin-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
 .admin-head .spacer { flex: 1; }
@@ -402,7 +406,7 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .guide-layout { display: grid; grid-template-columns: 16rem minmax(0, 1fr) 15rem; gap: 2.5rem; align-items: start; width: 100%; padding-top: 1rem; }
 .guide-layout:not(:has(> .guide-toc)) { grid-template-columns: 16rem minmax(0, 1fr); }
 .guide-toc { position: sticky; top: 68px; max-height: calc(100vh - var(--header-height) - 76px); overflow-y: auto; font-size: 14px; padding-bottom: 1rem; }
-#admin-view .admin-page .guide-toc h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0.2rem 0 0.5rem; }
+:is(#admin-view, #embedded-admin-view) .admin-page .guide-toc h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0.2rem 0 0.5rem; }
 .guide-toc ul { list-style: none; margin: 0; padding: 0 0 0 0.1rem; border-left: 1px solid var(--hairline); display: flex; flex-direction: column; }
 .guide-toc a { display: block; padding: 0.25rem 0 0.25rem 0.8rem; margin-left: -1px; border-left: 2px solid transparent; color: var(--muted); text-decoration: none; line-height: 1.4; }
 .guide-toc a:hover { color: var(--text); border-left-color: var(--border-hover); }
@@ -418,7 +422,7 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 /* Below the sticky header of the page (52px). */
 .guide-nav { position: sticky; top: 68px; font-size: 15px; display: flex; flex-direction: column; gap: 0.6rem; max-height: calc(100vh - var(--header-height) - 76px); overflow-y: auto; padding: 0.25rem 0.25rem 1rem 0; }
 .guide-nav input[type="search"] { width: 100%; min-height: 2.4rem; padding: 0.35rem 0.6rem; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg); font: inherit; color: inherit; }
-#admin-view .admin-page .guide-nav h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0.4rem 0 0.1rem; }
+:is(#admin-view, #embedded-admin-view) .admin-page .guide-nav h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0.4rem 0 0.1rem; }
 .guide-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
 .guide-nav a { display: block; padding: 0.3rem 0.6rem; line-height: 1.4; border-radius: 4px; color: var(--text); text-decoration: none; }
 .guide-nav a:hover { background: var(--surface-hover); }
@@ -428,14 +432,14 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 /* `position: relative` keeps the absolutely positioned `.visually-hidden` texts of the links inside the scrolling view:
    without it, they extended the document below the console and gave the window a second scroll bar. */
 .guide-article { position: relative; min-width: 0; font-size: 16px; line-height: 1.65; }
-#admin-view .admin-page h1.guide-page-title { font-size: 30px; font-weight: 700; line-height: 1.25; margin: 0 0 0.6rem; letter-spacing: -0.01em; }
-#admin-view .admin-page h1.guide-page-title:focus { outline: none; }
-#admin-view .guide-article > .note { font-size: 18px; line-height: 1.55; margin: 0 0 1.4rem; }
+:is(#admin-view, #embedded-admin-view) .admin-page h1.guide-page-title { font-size: 30px; font-weight: 700; line-height: 1.25; margin: 0 0 0.6rem; letter-spacing: -0.01em; }
+:is(#admin-view, #embedded-admin-view) .admin-page h1.guide-page-title:focus { outline: none; }
+:is(#admin-view, #embedded-admin-view) .guide-article > .note { font-size: 18px; line-height: 1.55; margin: 0 0 1.4rem; }
 .guide-content > :first-child { margin-top: 0; }
 .guide-content :is(h2, h3, h4) { scroll-margin-top: 64px; line-height: 1.3; }
-#admin-view .admin-page .guide-content h2 { font-size: 24px; font-weight: 600; margin: 2.4rem 0 0.8rem; padding-top: 1rem; border-top: 1px solid var(--hairline); }
-#admin-view .admin-page .guide-content h3 { font-size: 19px; font-weight: 600; margin: 1.8rem 0 0.6rem; }
-#admin-view .admin-page .guide-content h4 { font-size: 16px; font-weight: 600; margin: 1.4rem 0 0.5rem; }
+:is(#admin-view, #embedded-admin-view) .admin-page .guide-content h2 { font-size: 24px; font-weight: 600; margin: 2.4rem 0 0.8rem; padding-top: 1rem; border-top: 1px solid var(--hairline); }
+:is(#admin-view, #embedded-admin-view) .admin-page .guide-content h3 { font-size: 19px; font-weight: 600; margin: 1.8rem 0 0.6rem; }
+:is(#admin-view, #embedded-admin-view) .admin-page .guide-content h4 { font-size: 16px; font-weight: 600; margin: 1.4rem 0 0.5rem; }
 .guide-content p { margin: 0.9rem 0; }
 .guide-content :is(ul, ol) { margin: 0.8rem 0; padding-left: 1.5rem; }
 .guide-content li { margin: 0.35rem 0; }
@@ -477,7 +481,7 @@ table.data .empty { color: var(--muted); text-align: center; padding: 1.25rem; }
 .guide-pager a { text-decoration: none; display: flex; flex-direction: column; padding: 0.5rem 0.8rem; border: 1px solid var(--border); border-radius: 6px; color: var(--text); max-width: 48%; font-size: 15px; font-weight: 500; }
 .guide-pager a:hover { border-color: var(--border-hover); background: var(--surface-hover); }
 .guide-pager a.next { margin-left: auto; text-align: right; }
-#admin-view .guide-pager .note { font-size: 13px; }
+:is(#admin-view, #embedded-admin-view) .guide-pager .note { font-size: 13px; }
 details.guide-contents { margin: 0 0 1.4rem; font-size: 15px; border: 1px solid var(--hairline); border-radius: 6px; padding: 0.4rem 0.8rem; }
 details.guide-contents summary { cursor: pointer; font-weight: 600; }
 details.guide-contents ul { margin: 0.3rem 0 0.2rem; padding-left: 1.1rem; }
@@ -485,12 +489,12 @@ details.guide-contents li.level-3 { margin-left: 1rem; }
 .guide-home-link { display: flex !important; align-items: center; gap: 0.4rem; font-weight: 600; }
 .guide-landing-body { width: 100%; font-size: 16px; line-height: 1.6; display: flex; flex-direction: column; gap: 1.4rem; padding-top: 0.6rem; }
 .guide-rule { border: 0; border-top: 1px solid var(--hairline); margin: 0; }
-#admin-view .admin-page .guide-landing-body h2 { font-size: 22px; font-weight: 600; margin: 0 0 0.5rem; }
+:is(#admin-view, #embedded-admin-view) .admin-page .guide-landing-body h2 { font-size: 22px; font-weight: 600; margin: 0 0 0.5rem; }
 .guide-welcome { display: flex; flex-direction: column; gap: 0.6rem; }
-#admin-view .guide-welcome > .note { font-size: 17px; line-height: 1.55; max-width: 46rem; }
+:is(#admin-view, #embedded-admin-view) .guide-welcome > .note { font-size: 17px; line-height: 1.55; max-width: 46rem; }
 .guide-search { display: flex; align-items: center; gap: 0.5rem; max-width: 36rem; padding: 0 0.7rem; border: 1px solid var(--border); border-radius: 6px; background: var(--input-bg); }
 .guide-search:focus-within { outline: 2px solid var(--focus); outline-offset: 1px; }
-#admin-view .guide-search input[type="search"]
+:is(#admin-view, #embedded-admin-view) .guide-search input[type="search"]
 {
     flex: 1; min-width: 0; min-height: 2.5rem; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none;
     font: inherit; font-size: 16px; color: inherit; outline: none;
@@ -499,14 +503,14 @@ details.guide-contents li.level-3 { margin-left: 1rem; }
 .guide-landing-results ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.4rem; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); }
 .guide-landing-results a { display: block; padding: 0.65rem 0.85rem; font-size: 15px; border: 1px solid var(--border); border-radius: 6px; text-decoration: none; color: var(--text); font-weight: 600; }
 .guide-landing-results a:hover { border-color: var(--border-hover); background: var(--surface-hover); }
-#admin-view .guide-get-started .note { font-size: 15px; margin-top: 0.6rem; }
+:is(#admin-view, #embedded-admin-view) .guide-get-started .note { font-size: 15px; margin-top: 0.6rem; }
 .guide-get-started .button { text-decoration: none; display: inline-flex; align-items: center; gap: 0.4rem; }
 .guide-get-started a:not(.button) { color: var(--link); }
 .guide-sections { display: flex; flex-direction: column; gap: 1.8rem; }
 .guide-section { display: flex; flex-direction: column; gap: 0.4rem; scroll-margin-top: 64px; }
 .guide-section-head { display: flex; align-items: baseline; gap: 0.6rem; }
-#admin-view .admin-page .guide-section-head h2 { margin: 0; }
-#admin-view .guide-section > .note { font-size: 15px; margin-bottom: 0.4rem; }
+:is(#admin-view, #embedded-admin-view) .admin-page .guide-section-head h2 { margin: 0; }
+:is(#admin-view, #embedded-admin-view) .guide-section > .note { font-size: 15px; margin-bottom: 0.4rem; }
 .guide-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 1.1rem; grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr)); }
 .guide-card
 {
@@ -523,7 +527,7 @@ details.guide-contents li.level-3 { margin-left: 1rem; }
     border-radius: 8px; background: var(--bg-subtle); border: 1px solid var(--hairline); color: var(--text);
 }
 .guide-card-icon .icon { width: 1.5rem; height: 1.5rem; }
-#admin-view .admin-page .guide-card h3 { font-size: 18px; font-weight: 600; line-height: 1.35; margin: 0; }
+:is(#admin-view, #embedded-admin-view) .admin-page .guide-card h3 { font-size: 18px; font-weight: 600; line-height: 1.35; margin: 0; }
 .guide-card h3 a { color: var(--text); text-decoration: none; outline: none; }
 /* The link of the title covers the card. */
 .guide-card h3 a::after { content: ''; position: absolute; inset: 0; border-radius: 10px; }
@@ -542,8 +546,8 @@ details.guide-contents li.level-3 { margin-left: 1rem; }
     .guide-nav { position: static; max-height: none; }
     .guide-nav .guide-groups { display: none; }
     .guide-nav.open .guide-groups { display: flex; flex-direction: column; gap: 0.4rem; }
-    #admin-view .guide-nav .guide-toggle.button { min-height: 2.4rem; font-size: 15px; }
-    #admin-view .admin-page h1.guide-page-title { font-size: 26px; }
+    :is(#admin-view, #embedded-admin-view) .guide-nav .guide-toggle.button { min-height: 2.4rem; font-size: 15px; }
+    :is(#admin-view, #embedded-admin-view) .admin-page h1.guide-page-title { font-size: 26px; }
 }
 @media (min-width: 60.01rem) { .guide-nav .guide-toggle { display: none; } }
 pre.code
@@ -576,77 +580,77 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 /* Administration pages and their dialog follow the look of ClickStack (Mantine): 13px text, filled inputs
    with hairline borders, a slim header bar with a breadcrumb, compact tables, and dialogs with the labels
    beside the fields. Sizes are in px, as in ClickStack, because the root font size of the console is larger. */
-#admin-view, #admin-dialog { font-size: 13px; line-height: 1.5; }
-#admin-view { padding: 0; }
-#admin-view > .admin-page { max-width: none; padding: 0 16px 24px; gap: 14px; }
-#admin-view .admin-page .admin-page { padding: 0; }
+#admin-view, #embedded-admin-view, #admin-dialog { font-size: 13px; line-height: 1.5; }
+:is(#admin-view, #embedded-admin-view) { padding: 0; }
+:is(#admin-view, #embedded-admin-view) > .admin-page { max-width: none; padding: 0 16px 24px; gap: 14px; }
+:is(#admin-view, #embedded-admin-view) .admin-page .admin-page { padding: 0; }
 /* The header bar of the page; section headings inside it reuse `.admin-head` for their layout only. */
-#admin-view > .admin-page > .admin-head:first-child
+:is(#admin-view, #embedded-admin-view) > .admin-page > .admin-head:first-child
 {
     position: sticky; top: 0; z-index: 3; margin: 0 -16px; padding: 8px 16px; min-height: 52px; gap: 8px;
     background: var(--bg); border-bottom: 1px solid var(--hairline);
 }
-#admin-view .admin-head .icon { width: 16px; height: 16px; color: var(--muted); }
-#admin-view .admin-head .page-title { font-size: 14px; font-weight: 600; }
-#admin-view .admin-head .crumbs { flex-basis: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
-#admin-view .admin-head .crumbs a { text-decoration: none; }
-#admin-view .admin-head .crumbs a:hover { color: var(--text); text-decoration: underline; }
-#admin-view .admin-head .button { min-height: 30px; padding: 0 12px; }
-#admin-view .note, #admin-dialog .note { font-size: 12px; }
-#admin-view .admin-page h2 { font-size: 14px; font-weight: 600; }
-#admin-view .box h3, #admin-dialog .box h3 { font-size: 13px; }
+:is(#admin-view, #embedded-admin-view) .admin-head .icon { width: 16px; height: 16px; color: var(--muted); }
+:is(#admin-view, #embedded-admin-view) .admin-head .page-title { font-size: 14px; font-weight: 600; }
+:is(#admin-view, #embedded-admin-view) .admin-head .crumbs { flex-basis: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+:is(#admin-view, #embedded-admin-view) .admin-head .crumbs a { text-decoration: none; }
+:is(#admin-view, #embedded-admin-view) .admin-head .crumbs a:hover { color: var(--text); text-decoration: underline; }
+:is(#admin-view, #embedded-admin-view) .admin-head .button { min-height: 30px; padding: 0 12px; }
+:is(#admin-view, #embedded-admin-view) .note, #admin-dialog .note { font-size: 12px; }
+:is(#admin-view, #embedded-admin-view) .admin-page h2 { font-size: 14px; font-weight: 600; }
+:is(#admin-view, #embedded-admin-view) .box h3, #admin-dialog .box h3 { font-size: 13px; }
 
-#admin-view .button, #admin-dialog .button { min-height: 34px; padding: 0 14px; font-size: 13px; font-weight: 500; }
-#admin-view .button.primary, #admin-dialog .button.primary { font-weight: 600; }
-#admin-view .button.small, #admin-dialog .button.small { min-height: 26px; padding: 0 10px; font-size: 12px; }
+:is(#admin-view, #embedded-admin-view) .button, #admin-dialog .button { min-height: 34px; padding: 0 14px; font-size: 13px; font-weight: 500; }
+:is(#admin-view, #embedded-admin-view) .button.primary, #admin-dialog .button.primary { font-weight: 600; }
+:is(#admin-view, #embedded-admin-view) .button.small, #admin-dialog .button.small { min-height: 26px; padding: 0 10px; font-size: 12px; }
 
-#admin-view .field, #admin-dialog .field { gap: 4px; }
-#admin-view .field label, #admin-dialog .field label { font-size: 13px; font-weight: 500; }
-#admin-view .field .hint, #admin-dialog .field .hint { font-size: 12px; }
-:is(#admin-view, #admin-dialog) :is(input:not([type]), input[type="text"], input[type="search"], input[type="url"], input[type="password"], input[type="number"],
+:is(#admin-view, #embedded-admin-view) .field, #admin-dialog .field { gap: 4px; }
+:is(#admin-view, #embedded-admin-view) .field label, #admin-dialog .field label { font-size: 13px; font-weight: 500; }
+:is(#admin-view, #embedded-admin-view) .field .hint, #admin-dialog .field .hint { font-size: 12px; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) :is(input:not([type]), input[type="text"], input[type="search"], input[type="url"], input[type="password"], input[type="number"],
     input[type="date"], input[type="datetime-local"], input[type="time"], select, textarea)
 {
     min-height: 36px; padding: 0 12px; font-size: 13px; color: var(--text);
     background-color: var(--input-bg); border: 1px solid var(--input-border); border-radius: 4px;
 }
-:is(#admin-view, #admin-dialog) textarea { padding: 8px 12px; min-height: 72px; }
-:is(#admin-view, #admin-dialog) select:not([multiple])
+:is(#admin-view, #embedded-admin-view, #admin-dialog) textarea { padding: 8px 12px; min-height: 72px; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) select:not([multiple])
 {
     appearance: none; padding-right: 32px; cursor: pointer;
     background-image: var(--select-chevron); background-repeat: no-repeat; background-position: right 10px center; background-size: 14px;
 }
-:is(#admin-view, #admin-dialog) :is(input, select, textarea):focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; border-color: var(--focus); }
-:is(#admin-view, #admin-dialog) :is(input, select, textarea)::placeholder { color: var(--muted); opacity: 0.8; }
-#admin-view .toolbar :is(input, select) { min-height: 30px; }
-:is(#admin-view, #admin-dialog) :is(.check input, input[type="checkbox"], input[type="radio"]) { accent-color: var(--control-accent); }
-#admin-view .check, #admin-dialog .check { font-size: 13px; }
-:is(#admin-view, #admin-dialog) fieldset.box { padding: 8px 12px 12px; gap: 8px; margin: 0; }
-:is(#admin-view, #admin-dialog) legend { padding: 0 4px; font-size: 13px; font-weight: 500; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) :is(input, select, textarea):focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; border-color: var(--focus); }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) :is(input, select, textarea)::placeholder { color: var(--muted); opacity: 0.8; }
+:is(#admin-view, #embedded-admin-view) .toolbar :is(input, select) { min-height: 30px; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) :is(.check input, input[type="checkbox"], input[type="radio"]) { accent-color: var(--control-accent); }
+:is(#admin-view, #embedded-admin-view) .check, #admin-dialog .check { font-size: 13px; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) fieldset.box { padding: 8px 12px 12px; gap: 8px; margin: 0; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) legend { padding: 0 4px; font-size: 13px; font-weight: 500; }
 
-#admin-view .box, #admin-dialog .box { border-color: var(--hairline); border-radius: 4px; padding: 12px 16px; gap: 10px; }
-#admin-view .box h2 { font-size: 14px; }
+:is(#admin-view, #embedded-admin-view) .box, #admin-dialog .box { border-color: var(--hairline); border-radius: 4px; padding: 12px 16px; gap: 10px; }
+:is(#admin-view, #embedded-admin-view) .box h2 { font-size: 14px; }
 /* A box that only holds a table (and its pager) shows the table's own border, without a frame around it. */
-#admin-view .box:is(:has(> .table-wrap:first-child), :has(> div:only-child > .table-wrap:first-child)) { border: 0; padding: 0; background: none; }
-#admin-view .kv, #admin-dialog .kv { gap: 6px 24px; }
+:is(#admin-view, #embedded-admin-view) .box:is(:has(> .table-wrap:first-child), :has(> div:only-child > .table-wrap:first-child)) { border: 0; padding: 0; background: none; }
+:is(#admin-view, #embedded-admin-view) .kv, #admin-dialog .kv { gap: 6px 24px; }
 
-#admin-view .tablist { border-bottom-color: var(--hairline); gap: 2px; }
-#admin-view .tablist a { padding: 8px 12px; font-size: 13px; font-weight: 500; }
-#admin-view .tablist a[aria-current="page"] { border-bottom-color: var(--tab-active); font-weight: 600; }
+:is(#admin-view, #embedded-admin-view) .tablist { border-bottom-color: var(--hairline); gap: 2px; }
+:is(#admin-view, #embedded-admin-view) .tablist a { padding: 8px 12px; font-size: 13px; font-weight: 500; }
+:is(#admin-view, #embedded-admin-view) .tablist a[aria-current="page"] { border-bottom-color: var(--tab-active); font-weight: 600; }
 
-:is(#admin-view, #admin-dialog) .table-wrap { border-color: var(--hairline); border-radius: 4px; }
-:is(#admin-view, #admin-dialog) table.data { font-size: 13px; }
-:is(#admin-view, #admin-dialog) table.data :is(th, td) { padding: 8px 10px; border-bottom-color: var(--hairline); }
-:is(#admin-view, #admin-dialog) table.data th
+:is(#admin-view, #embedded-admin-view, #admin-dialog) .table-wrap { border-color: var(--hairline); border-radius: 4px; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) table.data { font-size: 13px; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) table.data :is(th, td) { padding: 8px 10px; border-bottom-color: var(--hairline); }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) table.data th
 {
     font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); background: var(--bg);
 }
-:is(#admin-view, #admin-dialog) table.data tbody tr:hover td { background: var(--row-hover); }
-:is(#admin-view, #admin-dialog) :is(td a:not(.button), .note a, .message a) { color: var(--link); text-decoration: none; }
-:is(#admin-view, #admin-dialog) :is(td a:not(.button), .note a, .message a):hover { text-decoration: underline; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) table.data tbody tr:hover td { background: var(--row-hover); }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) :is(td a:not(.button), .note a, .message a) { color: var(--link); text-decoration: none; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) :is(td a:not(.button), .note a, .message a):hover { text-decoration: underline; }
 
-:is(#admin-view, #admin-dialog) .badge { font-size: 11px; font-weight: 500; padding: 1px 8px; border-color: var(--hairline); }
-:is(#admin-view, #admin-dialog) .message { border-color: transparent; padding: 10px 12px; }
-:is(#admin-view, #admin-dialog) pre.code { font-size: 12px; border-color: var(--hairline); }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) .badge { font-size: 11px; font-weight: 500; padding: 1px 8px; border-color: var(--hairline); }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) .message { border-color: transparent; padding: 10px 12px; }
+:is(#admin-view, #embedded-admin-view, #admin-dialog) pre.code { font-size: 12px; border-color: var(--hairline); }
 
 dialog#admin-dialog { width: min(40rem, calc(100vw - 2rem)); border-color: var(--hairline); border-radius: 8px; box-shadow: 0 12px 40px rgb(0 0 0 / 0.22); }
 dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
@@ -690,7 +694,7 @@ dialog#admin-dialog::backdrop { background: rgb(0 0 0 / 0.5); }
     #shell.collapsed #sidebar a { justify-content: flex-start; padding: 0.45rem 0.6rem; }
     #shell.collapsed #sidebar a .label, #shell.collapsed #sidebar a .state-dot, #shell.collapsed #sidebar a .external { display: inline; }
     #home-view { padding: 1rem; }
-    #admin-view { padding: 1rem; }
+    :is(#admin-view, #embedded-admin-view) { padding: 1rem; }
     .kv { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
     .kv dd { margin-bottom: 0.4rem; }
 }
@@ -1220,10 +1224,16 @@ function validNext(value) {
 /// Administration pages take one more path segment, the name of the user or role they show
 /// (`/console/admin-users/alice?tab=roles`).
 function parseRoute() {
-    const rest = location.pathname.slice(BASE_PATH.length).replace(/^\/+|\/+$/g, '');
+    return routeOf(location.pathname, location.search);
+}
+
+/// The route of a path of the console. `database` is the database that the Tables and Import data pages start with.
+function routeOf(pathname, search) {
+    const params = new URLSearchParams(search);
+    const rest = pathname.slice(BASE_PATH.length).replace(/^\/+|\/+$/g, '');
     if (rest === '') return {name: 'root'};
-    if (rest === 'login') return {name: 'login', next: validNext(new URLSearchParams(location.search).get('next'))};
-    if (COMPONENTS_BY_ID.has(rest)) return {name: 'component', id: rest, sub: null, tab: new URLSearchParams(location.search).get('tab')};
+    if (rest === 'login') return {name: 'login', next: validNext(params.get('next'))};
+    if (COMPONENTS_BY_ID.has(rest)) return {name: 'component', id: rest, sub: null, tab: params.get('tab'), database: params.get('database')};
     const slash = rest.indexOf('/');
     /// The pages of the Console Guide have paths of their own (`/console/guide/how-to/configure-ldap`).
     if (slash > 0 && rest.slice(0, slash) === 'guide') {
@@ -1238,7 +1248,7 @@ function parseRoute() {
             } catch (e) {
                 return {name: 'not-found', path: rest};
             }
-            return {name: 'component', id: c.id, sub, tab: new URLSearchParams(location.search).get('tab')};
+            return {name: 'component', id: c.id, sub, tab: params.get('tab'), database: params.get('database')};
         }
     }
     return {name: 'not-found', path: rest};
@@ -1822,6 +1832,7 @@ function statusBadge(state) {
 function refreshComponentStates() {
     if (!session) return;
     renderSidebar();
+    refreshSqlConsoleTabs();
     const route = parseRoute();
     if (route.name !== 'component') return;
     const c = COMPONENTS_BY_ID.get(route.id);
@@ -2515,6 +2526,7 @@ function onFrameLoad(entry) {
     entry.loaded = true;
     if (c.integration === 'sql-console') {
         extendSqlConsoleMenus(entry);
+        attachSqlConsoleTabs(entry);
         signInSQLConsole(entry);
         return;
     }
@@ -2595,11 +2607,12 @@ function openConsolePage(target) {
 
 /// The SQL Console (`contrib/sql-console`, a prebuilt application) has a menu on each table and database of its schema
 /// tree (right-click, or the ⋯ button of a table). The console adds its own items to them, which open the Table Editor
-/// and the Import data page: it can, because the SQL Console is a frame of the same origin. This depends on the markup
-/// of the SQL Console: a table is `[data-testid="table-item-<table>"]` inside the section of its database, whose header
-/// is `[data-testid="database-node-<database>"]`; a menu is `[role="menu"]` of `[role="menuitem"]`, with the label in
-/// `[data-testid="ellipsed-icon-wrapper-text"]`. A release that changes it gets no items (nothing breaks); the browser
-/// check `SQL Console: the menus of tables and databases ...` fails then, to say so.
+/// and the Import data page in tabs of the SQL Console (`openSqlConsoleTab`): it can, because the SQL Console is a frame
+/// of the same origin. This depends on the markup of the SQL Console: a table is `[data-testid="table-item-<table>"]`
+/// inside the section of its database, whose header is `[data-testid="database-node-<database>"]`; a menu is
+/// `[role="menu"]` of `[role="menuitem"]`, with the label in `[data-testid="ellipsed-icon-wrapper-text"]`. A release that
+/// changes it, or its tab bar (`sqlConsoleTabBar`), gets no items (nothing breaks); the browser check
+/// `SQL Console and Play UI: the menus of a table and a database ...` fails then, to say so.
 const SQL_CONSOLE_MENU_ITEMS = {
     table: [['Table properties', target => ({...target, tab: 'overview'})], ['Import data into this table', target => ({...target, tab: 'import'})]],
     database: [['Tables of this database', target => ({database: target.database, page: 'tables'})],
@@ -2634,13 +2647,14 @@ function extendSqlConsoleMenus(entry) {
     for (const type of ['contextmenu', 'pointerdown', 'keydown']) doc.addEventListener(type, remember, true);
     new win.MutationObserver(() => {
         const menu = doc.querySelector('[role="menu"][data-state="open"]');
-        if (menu && target && !menu.querySelector('[data-console-item]')) addSqlConsoleMenuItems(win, menu, target);
+        if (menu && target && !menu.querySelector('[data-console-item]') && sqlConsoleTabBar(doc)) addSqlConsoleMenuItems(entry, menu, target);
     }).observe(doc.body, {childList: true, subtree: true});
 }
 
 /// Adds the items to an open menu: copies of its first item, so that they look like the others, without its behavior.
 /// The arrow keys move between them and the items of the SQL Console; Enter and Space activate them.
-function addSqlConsoleMenuItems(win, menu, target) {
+function addSqlConsoleMenuItems(entry, menu, target) {
+    const win = entry.iframe.contentWindow;
     const doc = win.document;
     const template = menu.querySelector('[role="menuitem"]');
     if (!template || !template.querySelector('[data-testid="ellipsed-icon-wrapper-text"]')) return;
@@ -2663,7 +2677,7 @@ function addSqlConsoleMenuItems(win, menu, target) {
             e.preventDefault();
             e.stopPropagation();
             close();
-            openConsolePage(page(target));
+            openSqlConsoleTab(entry, page(target));
         };
         item.addEventListener('click', activate);
         item.addEventListener('pointerenter', () => { item.setAttribute('data-highlighted', ''); item.focus(); });
@@ -2691,6 +2705,414 @@ function addSqlConsoleMenuItems(win, menu, target) {
             next.focus();
         }
     }, true);
+}
+
+/// --- Integration: tabs of the SQL Console ---
+
+/// The items that the console adds to the menus of the SQL Console open a tab of the SQL Console, next to its own
+/// tabs, instead of leaving it: the page of a table in the Table Editor (`{database, table, tab}`), or Tables or Import
+/// data (`{database, page}`). The tab belongs to the console:
+/// - Its element in the tab bar of the SQL Console is a copy of a tab of the SQL Console, so that it looks the same
+///   (before the SQL Console has a tab, one with the colors of its tab bar).
+/// - Its page is an administration page that the console renders in `#embedded-admin-view`, laid over the content area
+///   of the SQL Console, below the tab bar. The page runs as in the main view (`page.host`), with the same dialogs and
+///   privileges; its links to tables, Tables, and Import data open in tabs too.
+/// - Selecting a tab of the SQL Console, its home button, or a new tab, or a tab that the SQL Console opens by itself,
+///   shows the content of the SQL Console again. The tabs of the console keep their state until they are closed (the
+///   close button, the middle button, or Delete), or until the SQL Console is reloaded.
+/// The tabs of the console are in a tablist of their own, after the one of the SQL Console, whose width the SQL Console
+/// sets for its own tabs (`--file-tabs-count-width`).
+/// The markup it depends on: the tab bar is `[data-testid="consoleTabs"]`, with `[role="tablist"]` of `[role="tab"]`;
+/// the selected tab contains `[data-testid="tab-selected"]`; its title is `[data-testid="tabTitle"]`, of the class
+/// `tab_active__*` or `tab_inactive__*`, with the text in its `span`; the close button is `button[data-type="close"]`;
+/// the content area is the rest of `[data-testid="standalone-main-pane-fill"]`.
+
+function sqlConsoleTabBar(doc) {
+    const bar = doc.querySelector('[data-testid="consoleTabs"]');
+    const list = bar && bar.querySelector('[role="tablist"]:not([data-console-tabs])');
+    const fill = doc.querySelector('[data-testid="standalone-main-pane-fill"]');
+    return list && fill && fill.contains(bar) ? {bar, list, fill} : null;
+}
+
+/// The target of a path of the console that a tab can show, or null.
+function sqlTabTargetOfPath(path) {
+    const url = new URL(path, location.origin);
+    if (url.origin !== location.origin) return null;
+    const route = routeOf(url.pathname, url.search);
+    if (route.name !== 'component') return null;
+    if (route.id === 'tables' && route.sub) {
+        const target = parseTableSub(route.sub);
+        return target && {database: target.database, table: target.table, tab: route.tab};
+    }
+    return route.id === 'tables' || route.id === 'import' ? {database: route.database || null, page: route.id} : null;
+}
+
+function sqlTabKey(target) {
+    return target.table ? `table\u0000${target.database}\u0000${target.table}` : `${target.page}\u0000${target.database || ''}`;
+}
+
+function sqlTabRoute(target) {
+    return target.table
+        ? {name: 'component', id: 'tables', sub: tableSub(target.database, target.table), tab: target.tab, database: null}
+        : {name: 'component', id: target.page, sub: null, tab: null, database: target.database};
+}
+
+function sqlTabTitle(target) {
+    if (target.table) return [target.table, `${target.database}.${target.table}`];
+    const title = target.page === 'tables' ? 'Tables' : 'Import data';
+    return target.database ? [`${title} · ${target.database}`, `${title} of ${target.database}`] : [title, title];
+}
+
+function sqlConsoleTabs(entry) {
+    if (entry.console_tabs) return entry.console_tabs;
+    const view = h('div', {id: 'embedded-admin-view', hidden: true});
+    /// Links to tables, Tables, and Import data open in tabs; other links (the Console Guide) leave the SQL Console.
+    view.addEventListener('click', e => {
+        const a = e.target.closest('a[data-route]');
+        if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        const tab = entry.console_tabs.active;
+        if (!tab || !sqlTabTargetOfPath(a.getAttribute('href'))) return;
+        e.preventDefault();
+        tab.page.host.open(a.getAttribute('href'), false);
+    });
+    entry.host.append(view);
+    entry.console_tabs = {list: [], active: null, view, template: null, classes: {active: null, inactive: null}, selection: null, observed: null};
+    return entry.console_tabs;
+}
+
+function openSqlConsoleTab(entry, target) {
+    const tabs = sqlConsoleTabs(entry);
+    if (target.table) target = {...target, tab: TABLE_TABS.some(([key]) => key === target.tab) ? target.tab : 'overview'};
+    let tab = tabs.list.find(t => t.key === sqlTabKey(target));
+    if (!tab) {
+        tab = {key: sqlTabKey(target), target, page: null, root: null, element: null, from_template: false};
+        tabs.list.push(tab);
+        renderSqlConsoleTab(entry, tab);
+    } else if (target.table && tab.target.tab !== target.tab) {
+        tab.target = target;
+        renderSqlConsoleTab(entry, tab);
+    }
+    activateSqlConsoleTab(entry, tab);
+}
+
+function renderSqlConsoleTab(entry, tab) {
+    const tabs = sqlConsoleTabs(entry);
+    const route = sqlTabRoute(tab.target);
+    const c = COMPONENTS_BY_ID.get(route.id);
+    const page = {component: c, route, waiting: false, token: Symbol(c.id), host: {
+        isCurrent: p => !entry.destroyed && tab.page === p && tabs.list.includes(tab),
+        reload: () => renderSqlConsoleTab(entry, tab),
+        open: (path, replace) => {
+            const target = sqlTabTargetOfPath(path);
+            if (!target) {
+                navigate(path);
+            } else if (replace || sqlTabKey(target) === tab.key) {
+                /// In the same tab: another tab of the table, or the table under its new name.
+                const other = tabs.list.find(t => t !== tab && t.key === sqlTabKey(target));
+                if (other) closeSqlConsoleTab(entry, other);
+                tab.key = sqlTabKey(target);
+                tab.target = target.table ? {...target, tab: TABLE_TABS.some(([key]) => key === target.tab) ? target.tab : 'overview'} : target;
+                renderSqlConsoleTab(entry, tab);
+                activateSqlConsoleTab(entry, tab);
+            } else {
+                openSqlConsoleTab(entry, target);
+            }
+        },
+        close: () => closeSqlConsoleTab(entry, tab),
+    }};
+    tab.page = page;
+    renderAdminPage(c, route, page, root => {
+        if (tab.root) tab.root.replaceWith(root);
+        else tabs.view.append(root);
+        tab.root = root;
+        root.hidden = tabs.active !== tab;
+    });
+    if (tabs.active === tab) focusHeading(tab.root.querySelector('h1'));
+    if (tab.element) updateSqlConsoleTabElement(entry, tab);
+}
+
+function activateSqlConsoleTab(entry, tab) {
+    const tabs = sqlConsoleTabs(entry);
+    tabs.active = tab;
+    for (const t of tabs.list) t.root.hidden = t !== tab;
+    syncSqlConsoleTabs(entry);
+    if (tabs.active === tab) focusHeading(tab.root.querySelector('h1'));
+}
+
+function deactivateSqlConsoleTabs(entry) {
+    const tabs = sqlConsoleTabs(entry);
+    if (!tabs.active) return;
+    tabs.active = null;
+    syncSqlConsoleTabs(entry);
+}
+
+function closeSqlConsoleTab(entry, tab) {
+    const tabs = sqlConsoleTabs(entry);
+    const index = tabs.list.indexOf(tab);
+    if (index < 0) return;
+    tabs.list.splice(index, 1);
+    tab.root.remove();
+    if (tab.element) tab.element.remove();
+    if (tabs.active !== tab) return;
+    const next = tabs.list[index] || tabs.list[index - 1];
+    if (next) {
+        activateSqlConsoleTab(entry, next);
+        if (next.element) next.element.focus();
+    } else {
+        deactivateSqlConsoleTabs(entry);
+        entry.iframe.focus();
+    }
+}
+
+/// Renders the pages that waited for the privileges of the user (`renderAdminPage`).
+function refreshSqlConsoleTabs() {
+    const entry = frames.get('sql');
+    if (!entry || !entry.console_tabs || session.admin.state === 'checking') return;
+    for (const tab of entry.console_tabs.list) {
+        if (tab.page.waiting) renderSqlConsoleTab(entry, tab);
+    }
+}
+
+/// Watches the document of the SQL Console, after each load: its tab bar is rendered again, and its tabs change.
+function attachSqlConsoleTabs(entry) {
+    const win = entry.iframe.contentWindow;
+    const doc = win.document;
+    const tabs = sqlConsoleTabs(entry);
+    for (const tab of tabs.list) tab.element = null;
+    tabs.container = null;
+    tabs.template = null;
+    tabs.selection = null;
+    tabs.observed = null;
+    const style = doc.createElement('style');
+    /// While a tab of the console is selected, the selected tab of the SQL Console looks like the others.
+    style.textContent = 'html[data-console-tab-active] [data-testid="consoleTabs"] [role="tab"]:not([data-console-tab]) '
+        + '[data-testid="tab-selected"] [data-testid="tabTitle"] { background: var(--console-tab-background) !important; '
+        + 'color: var(--console-tab-color) !important; }';
+    doc.head.append(style);
+    let scheduled = false;
+    const schedule = () => {
+        if (scheduled) return;
+        scheduled = true;
+        win.requestAnimationFrame(() => {
+            scheduled = false;
+            syncSqlConsoleTabs(entry);
+        });
+    };
+    tabs.schedule = schedule;
+    tabs.resize = new win.ResizeObserver(schedule);
+    new win.MutationObserver(schedule).observe(doc.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['data-testid']});
+    /// Any other control of the tab bar (a tab, the home button, a new tab) shows the content of the SQL Console.
+    doc.addEventListener('pointerdown', e => {
+        const bar = e.target.closest && e.target.closest('[data-testid="consoleTabs"]');
+        if (bar && !e.target.closest('[data-console-tab]')) deactivateSqlConsoleTabs(entry);
+    }, true);
+    doc.addEventListener('keydown', e => {
+        if ((e.key === 'Enter' || e.key === ' ') && e.target.closest && e.target.closest('[data-testid="consoleTabs"]') && !e.target.closest('[data-console-tab]')) {
+            deactivateSqlConsoleTabs(entry);
+        }
+    }, true);
+}
+
+/// Brings the tab bar and the view up to date: the elements of the tabs, which one looks selected, and where the view is.
+function syncSqlConsoleTabs(entry) {
+    const tabs = entry.console_tabs;
+    if (!tabs || entry.destroyed || !entry.loaded) return;
+    const doc = entry.iframe.contentDocument;
+    const parts = doc && sqlConsoleTabBar(doc);
+    if (!parts) {
+        /// The SQL Console shows no tab bar (its sign-in form): neither do the tabs of the console.
+        tabs.active = null;
+        tabs.view.hidden = true;
+        return;
+    }
+    const native_tabs = [...parts.list.querySelectorAll('[role="tab"]:not([data-console-tab])')];
+    for (const native of native_tabs) {
+        const title = native.querySelector('[data-testid="tabTitle"]');
+        for (const name of title ? title.classList : []) {
+            if (name.startsWith('tab_active__')) tabs.classes.active = name;
+            if (name.startsWith('tab_inactive__')) tabs.classes.inactive = name;
+        }
+    }
+    if (!tabs.template && native_tabs.length && native_tabs[0].querySelector('[data-testid="tabTitle"] span')) tabs.template = native_tabs[0].cloneNode(true);
+    /// The SQL Console selected or opened a tab of its own.
+    const selected = native_tabs.find(t => t.querySelector('[data-testid="tab-selected"]'));
+    const selection = `${selected ? selected.getAttribute('data-id') : ''}|${native_tabs.length}`;
+    if (tabs.selection !== null && selection !== tabs.selection) tabs.active = null;
+    tabs.selection = selection;
+
+    const home = parts.bar.firstElementChild;
+    const home_style = entry.iframe.contentWindow.getComputedStyle(home);
+    doc.documentElement.style.setProperty('--console-tab-background', home_style.backgroundColor);
+    doc.documentElement.style.setProperty('--console-tab-color', home_style.color);
+    doc.documentElement.toggleAttribute('data-console-tab-active', !!tabs.active);
+    /// The page in a tab has the theme of the SQL Console (which has its own setting): dark on a dark background.
+    const background = entry.iframe.contentWindow.getComputedStyle(doc.body).backgroundColor.match(/^rgba?\((\d+), (\d+), (\d+)(, ([\d.]+))?\)$/);
+    if (background && (background[5] === undefined || Number(background[5]) > 0)) {
+        const luminance = 0.2126 * background[1] + 0.7152 * background[2] + 0.0722 * background[3];
+        tabs.view.setAttribute('data-theme', luminance < 128 ? 'dark' : 'light');
+    } else {
+        tabs.view.removeAttribute('data-theme');
+    }
+    if (!tabs.container) {
+        tabs.container = doc.createElement('div');
+        tabs.container.setAttribute('role', 'tablist');
+        tabs.container.setAttribute('aria-label', 'Tabs of the console');
+        tabs.container.setAttribute('data-console-tabs', '');
+        tabs.container.style.cssText = 'flex: none; min-width: 0;';
+        /// Left and Right move between the tabs of the console.
+        tabs.container.addEventListener('keydown', e => {
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+            const elements = tabs.list.map(t => t.element).filter(Boolean);
+            const index = elements.indexOf(doc.activeElement);
+            if (index < 0) return;
+            e.preventDefault();
+            elements[(index + (e.key === 'ArrowRight' ? 1 : elements.length - 1)) % elements.length].focus();
+        }, true);
+    }
+    if (tabs.container.previousElementSibling !== parts.list) parts.list.after(tabs.container);
+    tabs.container.style.display = tabs.list.length ? 'flex' : 'none';
+    for (const tab of tabs.list) {
+        if (!tab.element || tab.element.ownerDocument !== doc || (tabs.template && !tab.from_template)) {
+            if (tab.element) tab.element.remove();
+            tab.element = buildSqlConsoleTabElement(entry, tab, parts);
+        }
+        if (tab.element.parentElement !== tabs.container) tabs.container.append(tab.element);
+        updateSqlConsoleTabElement(entry, tab);
+    }
+    tabs.view.hidden = !tabs.active;
+    if (!tabs.active) return;
+    if (!tabs.observed || tabs.observed.fill !== parts.fill || tabs.observed.bar !== parts.bar) {
+        tabs.resize.disconnect();
+        tabs.resize.observe(parts.fill);
+        tabs.resize.observe(parts.bar);
+        tabs.observed = parts;
+    }
+    /// The frame fills its host, so that the coordinates in the frame are those in the host.
+    const fill = parts.fill.getBoundingClientRect();
+    const top = parts.bar.getBoundingClientRect().bottom;
+    const width = fill.width;
+    const height = Math.max(0, fill.bottom - top);
+    Object.assign(tabs.view.style, {left: `${fill.left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`});
+    /// The popups of the SQL Console (its menus, lists, tooltips, notifications, and dialogs: portals after its `#root`)
+    /// show over the view, which has holes where they are. While there is one, the next frame looks again, because
+    /// popups move into place and animate.
+    const holes = [];
+    for (const child of doc.body.children) {
+        if (child.id === 'root' || ['SCRIPT', 'STYLE', 'LINK', 'TEMPLATE'].includes(child.tagName)) continue;
+        const shown = [child, ...child.children].map(e => e.getBoundingClientRect()).find(r => r.width && r.height);
+        if (!shown) continue;
+        const x1 = Math.max(0, shown.left - fill.left);
+        const y1 = Math.max(0, shown.top - top);
+        const x2 = Math.min(width, shown.right - fill.left);
+        const y2 = Math.min(height, shown.bottom - top);
+        if (x2 > x1 && y2 > y1) holes.push(`M${x1} ${y1}H${x2}V${y2}H${x1}Z`);
+    }
+    tabs.view.style.clipPath = holes.length ? `path(evenodd, "M0 0H${width}V${height}H0Z ${holes.join(' ')}")` : '';
+    if (holes.length) tabs.schedule();
+}
+
+/// The element of a tab in the tab bar of the SQL Console.
+function buildSqlConsoleTabElement(entry, tab, parts) {
+    const tabs = entry.console_tabs;
+    const doc = parts.list.ownerDocument;
+    let element;
+    if (tabs.template) {
+        element = tabs.template.cloneNode(true);
+        for (const e of [element, ...element.querySelectorAll('*')]) {
+            e.removeAttribute('id');
+            e.removeAttribute('data-id');
+            e.removeAttribute('data-state');
+            if ((e.getAttribute('data-testid') || '').match(/^tab-(selected|inactive)$/)) e.setAttribute('data-testid', 'console-tab');
+        }
+        /// The italics of a tab of the SQL Console that is not saved yet.
+        const title = element.querySelector('[data-testid="tabTitle"]');
+        for (const name of [...title.classList]) {
+            if (name.startsWith('tab_preview__')) title.classList.remove(name);
+        }
+        /// The icon of a table, from the tab bar or the schema tree of the SQL Console.
+        const icon = element.querySelector('[data-testid="tabTitle"] svg');
+        const table_icon = doc.querySelector('[data-testid="consoleTabs"] svg[aria-label="table"], svg[aria-label="table"]');
+        if (icon && table_icon && icon.getAttribute('aria-label') !== 'table') icon.replaceWith(table_icon.cloneNode(true));
+        tab.from_template = true;
+    } else {
+        /// Before the SQL Console has a tab of its own: a tab with the look of the home button of its tab bar.
+        const style = entry.iframe.contentWindow.getComputedStyle(parts.bar.firstElementChild);
+        element = doc.createElement('div');
+        const title = doc.createElement('div');
+        title.setAttribute('data-testid', 'tabTitle');
+        title.style.cssText = `display: flex; align-items: center; gap: 8px; height: 100%; box-sizing: border-box; padding: ${style.padding}; `
+            + `border-right: ${style.borderRight}; font: ${style.font}; white-space: nowrap; cursor: pointer;`;
+        const text = doc.createElement('span');
+        const close = doc.createElement('button');
+        close.type = 'button';
+        close.setAttribute('data-type', 'close');
+        close.textContent = '×';
+        close.style.cssText = 'border: 0; background: none; color: inherit; font: inherit; cursor: pointer; padding: 0 2px;';
+        title.append(text, close);
+        element.append(title);
+        tab.from_template = false;
+    }
+    element.setAttribute('role', 'tab');
+    element.setAttribute('data-console-tab', '');
+    element.tabIndex = 0;
+    const close = element.querySelector('button[data-type="close"]');
+    if (close) {
+        close.setAttribute('aria-label', 'Close tab');
+        close.tabIndex = -1;
+    }
+    /// The tab bar of the SQL Console handles the events of its tabs (selection, drag and drop): not of these.
+    for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'keyup', 'dragstart', 'contextmenu']) element.addEventListener(type, e => e.stopPropagation());
+    element.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.target.closest('button[data-type="close"]')) closeSqlConsoleTab(entry, tab);
+        else activateSqlConsoleTab(entry, tab);
+    });
+    element.addEventListener('auxclick', e => {
+        e.stopPropagation();
+        if (e.button !== 1) return;
+        e.preventDefault();
+        closeSqlConsoleTab(entry, tab);
+    });
+    element.addEventListener('keydown', e => {
+        e.stopPropagation();
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            activateSqlConsoleTab(entry, tab);
+        } else if (e.key === 'Delete') {
+            e.preventDefault();
+            closeSqlConsoleTab(entry, tab);
+        }
+    });
+    return element;
+}
+
+function updateSqlConsoleTabElement(entry, tab) {
+    const tabs = entry.console_tabs;
+    const element = tab.element;
+    const [text, tooltip] = sqlTabTitle(tab.target);
+    const active = tabs.active === tab;
+    element.title = tooltip;
+    element.setAttribute('aria-label', tooltip);
+    element.setAttribute('aria-selected', String(active));
+    const title = element.querySelector('[data-testid="tabTitle"]');
+    const span = title.querySelector('span');
+    if (span.textContent !== text) span.textContent = text;
+    if (tab.from_template) {
+        if (tabs.classes.active) title.classList.toggle(tabs.classes.active, active);
+        if (tabs.classes.inactive) title.classList.toggle(tabs.classes.inactive, !active);
+        if (tabs.classes.active && tabs.classes.inactive) {
+            title.style.background = '';
+            title.style.color = '';
+            return;
+        }
+    }
+    /// The look of a selected tab is not known yet: the colors of the tab bar, a little lighter when selected.
+    const doc = element.ownerDocument;
+    const background = doc.documentElement.style.getPropertyValue('--console-tab-background');
+    const bar = doc.querySelector('[data-testid="consoleTabs"]');
+    title.style.background = active ? `color-mix(in srgb, ${background}, ${entry.iframe.contentWindow.getComputedStyle(bar).color} 7%)` : background;
+    title.style.color = active ? entry.iframe.contentWindow.getComputedStyle(bar).color : doc.documentElement.style.getPropertyValue('--console-tab-color');
 }
 
 /// --- Integration: Web Terminal ---
@@ -4111,28 +4533,35 @@ const ADMIN_PAGES = {};
 
 function showAdmin(c, route) {
     const view = $('admin-view');
-    const page = {component: c, route, waiting: false, token: Symbol(c.id)};
+    const page = {component: c, route, waiting: false, token: Symbol(c.id), host: null};
     admin_page = page;
+    if (renderAdminPage(c, route, page, root => {
+        view.replaceChildren(root);
+        view.scrollTop = 0;
+    })) focusHeading(view.querySelector('h1'));
+}
+
+/// Renders an administration page: `place` puts its root (`.admin-page`) where it is shown, before the page renders
+/// into it. Returns false while the privileges of the user are being checked: the page renders again after that.
+function renderAdminPage(c, route, page, place) {
     if (session.admin.state === 'checking') {
         page.waiting = true;
-        view.replaceChildren(h('div', {className: 'admin-page'}, pageHeader(c, c.title), loadingBox('Checking your privileges…')));
-        return;
+        place(h('div', {className: 'admin-page'}, pageHeader(c, c.title), loadingBox('Checking your privileges…')));
+        return false;
     }
     const state = adminComponentState(c);
     if (state.status !== 'available') {
-        view.replaceChildren(h('div', {className: 'admin-page'}, pageHeader(c, c.title),
+        place(h('div', {className: 'admin-page'}, pageHeader(c, c.title),
             h('div', {className: 'box'}, h('h2', {}, `${c.title} is not available for your user`),
                 paragraph(`${state.reason} The administration pages show what the server lets your user read and change; `
                     + 'ask an administrator for the privileges, or sign in as another user.'),
                 h('div', {className: 'actions-row'}, routeLink('Back to Home', componentPath('home'))))));
-        focusHeading(view.querySelector('h1'));
-        return;
+        return true;
     }
     const root = h('div', {className: 'admin-page'});
-    view.replaceChildren(root);
-    view.scrollTop = 0;
+    place(root);
     ADMIN_PAGES[c.page](root, route, page);
-    focusHeading(view.querySelector('h1'));
+    return true;
 }
 
 /// Renders the current administration page again, for example after a change.
@@ -4141,8 +4570,30 @@ function reloadAdmin() {
     if (route.name === 'component' && COMPONENTS_BY_ID.get(route.id).kind === 'admin') showAdmin(COMPONENTS_BY_ID.get(route.id), route);
 }
 
+/// An administration page is shown in the main view of the console (`page.host` is null), or in a tab of the SQL
+/// Console (`page.host`, see `openSqlConsoleTab`). The host decides whether the page is still shown, and where its
+/// links, a reload, and the closing of the page (after its table is dropped) go.
 function isCurrent(page) {
-    return admin_page === page && session;
+    if (!session) return false;
+    return page.host ? page.host.isCurrent(page) : admin_page === page;
+}
+
+function reloadPage(page) {
+    if (page.host) page.host.reload();
+    else reloadAdmin();
+}
+
+/// Opens a path of the console from a page: in the main view, it navigates; in a tab of the SQL Console, a page of a
+/// table, Tables, or Import data opens in a tab (`replace`: in the same tab, as after a rename).
+function openFromPage(page, path, replace = false) {
+    if (page.host) page.host.open(path, replace);
+    else navigate(path);
+}
+
+/// The page shows something that no longer exists (a dropped table): the main view goes to `path`, a tab closes.
+function closePage(page, path) {
+    if (page.host) page.host.close();
+    else navigate(path);
 }
 
 /// Runs `load` and renders its result into `container` while the page is still shown; errors are shown
@@ -7632,7 +8083,7 @@ async function parseStatements(steps) {
 
 function tablePlan(ctx, action, summary, steps, extra = {}) {
     return {action, target_type: 'table', target_name: `${ctx.database}.${ctx.table}`, local_only: true, summary, steps,
-        onclose: () => reloadAdmin(), ...extra};
+        onclose: () => reloadPage(ctx.page), ...extra};
 }
 
 /// A form dialog whose plan is parsed by the server before the review (`parseStatements`).
@@ -7711,7 +8162,7 @@ function renderTableList(root, page) {
         try {
             rows = await loadTableList(with_system.input.checked);
             if (!isCurrent(page)) return;
-            const chosen = database.value || new URLSearchParams(location.search).get('database') || '';
+            const chosen = database.value || page.route.database || '';
             database.replaceChildren(...[['', 'All databases'], ...[...new Set(rows.map(row => row.database))].map(db => [db, db])]
                 .map(([value, label]) => h('option', {value, selected: value === chosen}, label)));
             render();
@@ -7723,7 +8174,7 @@ function renderTableList(root, page) {
     q.addEventListener('input', render);
     database.addEventListener('change', render);
     with_system.input.addEventListener('change', load);
-    put(root, pageHeader(c, 'Tables', null, [button('New table', () => createTableDialog()), button('Refresh', load)]),
+    put(root, pageHeader(c, 'Tables', null, [button('New table', () => createTableDialog(page)), button('Refresh', load)]),
         h('p', {className: 'note'}, `The tables of ${session.hostname}. Select a table to see and change its columns, data, indexes, partitions, `
             + 'mutations, settings, and DDL. Every change is reviewed before it runs, with your privileges.'),
         h('div', {className: 'toolbar'}, adminField('Search', q), adminField('Database', database), with_system.element),
@@ -7774,7 +8225,7 @@ function columnDefinition(column) {
         + (column.comment ? ` COMMENT ${quoteString(column.comment)}` : '');
 }
 
-async function createTableDialog() {
+async function createTableDialog(page) {
     let known;
     try {
         known = (await adminRows('SELECT name FROM system.databases ORDER BY name', {})).map(row => row.name).filter(db => !SYSTEM_DATABASES.includes(db));
@@ -7826,7 +8277,7 @@ async function createTableDialog() {
         return {action: 'create_table', target_type: 'table', target_name: `${database.value}.${table}`, local_only: true,
             summary: `Create the table ${database.value}.${table}`,
             steps: [{description: `Create the table ${database.value}.${table} with ${defined.length} columns (${engine.value})`, sql: statement()}],
-            onclose: () => navigate(adminPath('tables', tableSub(database.value, table), 'overview'))};
+            onclose: () => openFromPage(page, adminPath('tables', tableSub(database.value, table), 'overview'))};
     });
 }
 
@@ -7850,7 +8301,7 @@ function renderTablePage(root, route, page) {
     }
     const tab = TABLE_TABS.some(([key]) => key === route.tab) ? route.tab : 'overview';
     const body = h('div', {}, loadingBox('Loading the table…'));
-    put(root, pageHeader(c, `${target.database}.${target.table}`, crumbs, [button('Refresh', () => reloadAdmin())]),
+    put(root, pageHeader(c, `${target.database}.${target.table}`, crumbs, [button('Refresh', () => reloadPage(page))]),
         tabList(c, route.sub, TABLE_TABS, tab), body);
     (async () => {
         try {
@@ -7980,7 +8431,7 @@ function renameTableDialog(ctx) {
         return tablePlan(ctx, 'rename_table', `Rename ${ctx.database}.${ctx.table} to ${new_name}`,
             [{description: `Rename the ${ctx.dictionary ? 'dictionary' : 'table'} to ${new_name}`,
                 sql: `RENAME ${ctx.dictionary ? 'DICTIONARY' : 'TABLE'} ${tableRef(ctx.database, ctx.table)} TO ${tableRef(ctx.database, new_name)}`}],
-            {onclose: () => navigate(adminPath(ctx.c.id, tableSub(ctx.database, new_name), 'overview'))});
+            {onclose: () => openFromPage(ctx.page, adminPath(ctx.c.id, tableSub(ctx.database, new_name), 'overview'), true)});
     });
 }
 
@@ -8012,7 +8463,7 @@ function dropTableDialog(ctx) {
         return tablePlan(ctx, ctx.dictionary ? 'drop_dictionary' : 'drop_table', `Drop ${ctx.database}.${ctx.table}`,
             [{description: `Drop the ${ctx.dictionary ? 'dictionary' : 'table'}`,
                 sql: `DROP ${ctx.dictionary ? 'DICTIONARY' : 'TABLE'} ${tableRef(ctx.database, ctx.table)}`}],
-            {danger: true, confirm_text: 'Drop', onclose: () => navigate(adminPath(ctx.c.id))});
+            {danger: true, confirm_text: 'Drop', onclose: () => closePage(ctx.page, adminPath(ctx.c.id))});
     });
 }
 
@@ -9074,7 +9525,7 @@ function renderImportForm(root, page, options = {}) {
         });
 }
 
-ADMIN_PAGES.import = (root, route, page) => renderImportForm(root, page, {database: new URLSearchParams(location.search).get('database')});
+ADMIN_PAGES.import = (root, route, page) => renderImportForm(root, page, {database: route.database});
 
 /// --- Diagnostics: Running queries ---
 

@@ -87,11 +87,30 @@ Right-click a database:
 - **Import data into this database** opens [Import data](/products/web-console/guides/import-data) with the database
   chosen.
 
+### In the SQL Console {#in-the-sql-console}
+
+The SQL Console has these items inside the console, which adds them to its menus after the SQL Console's own. They
+open a tab of the SQL Console, next to its query tabs, like its own **Create table** tab, so you do not leave it:
+
+- The page shows in the content area of the SQL Console, under its tab bar, in the theme of the SQL Console. It works
+  as the page of the console does, with the same dialogs, reviews, and privileges.
+- A table has one tab: opening its properties again selects it. A rename keeps the tab, under the new name; dropping
+  the table closes it.
+- Links to a table, **Tables**, and **Import data** open tabs too. Other links, such as **Guide**, open the page of
+  the console.
+- A tab of the SQL Console, its home button, a new query, or a tab that the SQL Console opens shows the SQL Console's
+  content again. The tabs of the console keep their state (the tab of the table, a form being filled) until you close
+  them: with their close button, the middle mouse button, or `Delete`. The left and right arrow keys move between them.
+- The tabs last until the SQL Console is reloaded (**Reload panel**, or reloading the console).
+
+### In the Play UI {#in-the-play-ui}
+
 In the Play UI, the menu also opens with `Shift+F10` or the menu key on a table, follows the keyboard of a menu (the
 arrow keys, `Home`, `End`, `Enter`, and `Escape`), and also has **Select the first 100 rows**, **Show the CREATE
-statement**, and **Copy the name**. Inside the console, the page opens in place; the Play UI opened on its own opens
-it in a new tab, which asks you to sign in. The SQL Console has these items only inside the console: the console adds
-them to its menus, after the items of the SQL Console.
+statement**, and **Copy the name**. Inside the console, the page of the console opens; the Play UI opened on its own
+opens it in a new tab, which asks you to sign in.
+
+### The address of a tab {#the-address-of-a-tab}
 
 The address of a tab is `/console/tables/<database>%2F<table>?tab=<tab>`, with the database and the table each
 URL-encoded, and the tab one of `overview`, `columns`, `data`, `import`, `indexes`, `partitions`, `mutations`,
