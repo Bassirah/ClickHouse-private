@@ -205,6 +205,7 @@ window.parent.clickhouseConsole.getConnection(window)
 |---|---|
 | `version` | `1` |
 | `getConnection(panel_window)` | The connection, or `null`. |
+| `openPage(panel_window, target)` | Opens a page of the console about a table or a database, and returns `true`; otherwise `false`. |
 
 `getConnection` returns a frozen object only when someone is signed in, and `panel_window` is the window of a frame that
 the console created for a panel of this kind in the current session. Otherwise it returns `null`.
@@ -214,6 +215,18 @@ the console created for a panel of this kind in the current session. Otherwise i
 | `url` | URL of the ClickHouse server the console is connected to. |
 | `user` | User name of the session. |
 | `password` | Password of the session, or the current access token after single sign-on. |
+
+`openPage` acts under the same conditions as `getConnection`: someone is signed in, and `panel_window` is the window
+of a native panel of the current session. `target` is one of:
+
+| `target` | Page |
+|---|---|
+| `{database, table, tab}` | The table in the Table Editor, on the tab `tab`, such as `overview` or `import` (`overview` when `tab` is not one of its tabs). |
+| `{database, page: 'tables'}` | The list of tables, with the database chosen. |
+| `{database, page: 'import'}` | Import data, with the database chosen. |
+
+The console opens the page itself, so the panel cannot open any other address of the console. The Play UI uses it for
+the menus of its schema panel.
 
 A page that is not embedded (`window.parent === window`), or whose parent is of another origin (reading
 `window.parent.clickhouseConsole` throws), does not use the contract and behaves as when it is opened on its own. When

@@ -1152,6 +1152,78 @@
         .table
         {
             background-repeat: no-repeat;
+            position: relative;
+        }
+
+        /* The ⋯ button of a table row, which opens its menu (`openSchemaMenu`): shown on hover and focus, and always on a
+           touch screen, which has no hover. */
+        .table > button:first-child
+        {
+            padding-right: 1.75rem;
+        }
+
+        .table > button.table-menu-button
+        {
+            display: inline-block;
+            position: absolute;
+            right: 0.15rem;
+            top: 50%;
+            transform: translateY(-50%);
+            width: auto;
+            padding: 0 0.35rem;
+            line-height: 1.2;
+            opacity: 0;
+        }
+
+        .table:hover > button.table-menu-button, .table:focus-within > button.table-menu-button, .table > button.table-menu-button[aria-expanded="true"]
+        {
+            opacity: 1;
+        }
+
+        @media (pointer: coarse)
+        {
+            .table > button.table-menu-button
+            {
+                opacity: 1;
+            }
+        }
+
+        #schema-menu
+        {
+            position: fixed;
+            z-index: 1000;
+            min-width: 15rem;
+            padding: 0.25rem 0;
+            color: var(--text-color);
+            background: var(--background-color);
+            border: 1px solid var(--border-color);
+            box-shadow: 0 0.25rem 1rem var(--shadow-color, rgba(0, 0, 0, 0.3));
+        }
+
+        #schema-menu [role="menuitem"]
+        {
+            display: block;
+            width: 100%;
+            padding: 0.35rem 1rem;
+            text-align: left;
+            font: inherit;
+            color: inherit;
+            background: none;
+            border: none;
+            cursor: pointer;
+        }
+
+        #schema-menu [role="menuitem"]:hover, #schema-menu [role="menuitem"]:focus
+        {
+            outline: none;
+            background: var(--element-background-color);
+        }
+
+        #schema-menu [role="separator"]
+        {
+            height: 1px;
+            margin: 0.25rem 0;
+            background: var(--border-color);
         }
 
         .table button
@@ -2751,7 +2823,7 @@
                 <button class="tabs-dialog-close" type="submit" title="Close" aria-label="Close">&times;</button>
             </form>
             <p class="tabs-dialog-hint" id="ai-privacy"></p>
-            <textarea id="ai-question" class="monospace" rows="3" aria-label="Question" placeholder="For example: the 10 cities with the most events last month"></textarea>
+            <textarea id="ai-question" class="monospace" rows="3" spellcheck="false" autocorrect="false" autocomplete="false" data-gramm="false" aria-label="Question" placeholder="For example: the 10 cities with the most events last month"></textarea>
             <div class="tabs-dialog-buttons">
                 <button id="ai-fix" type="button">Fix the last error</button>
                 <button id="ai-write" type="button">Write a query</button>
@@ -9030,6 +9102,9 @@ if (pass_from_url) {
 /// embedded by the console, the console owns the connection: it returns the server URL and the credentials of the
 /// signed-in user, so that they never appear in the address bar or in storage. Returns `null` when the page is opened on
 /// its own, or by a parent of another origin (reading its `clickhouseConsole` throws).
+/// The API of the console (`window.clickhouseConsole` of the parent), when the page is embedded by it.
+let console_api = null;
+
 function getConsoleConnection() {
     if (window.parent === window) return null;
     let api = null;
@@ -9038,7 +9113,9 @@ function getConsoleConnection() {
     } catch (e) {
         /// A parent of another origin is not the console.
     }
-    return api ? api.getConnection(window) : null;
+    const connection = api ? api.getConnection(window) : null;
+    if (connection) console_api = api;
+    return connection;
 }
 
 /// The console's connection takes precedence over the one from the address, and its fields are hidden: switching the
@@ -9348,6 +9425,7 @@ async function loadDatabases(server_address, user, password) {
         database_link.dataset.database = elem.database;
         database_link.append(elem.database);
         database.appendChild(database_link);
+        attachSchemaMenu(database_link, database_link, `Actions for ${elem.database}`, () => databaseMenuItems(elem.database));
         let tables = document.createElement('div');
         tables.className = 'tables';
         database.appendChild(tables);
@@ -9694,6 +9772,125 @@ function getTableIcon(engine)
 /// a second click, or open it in a new Web UI tab on a new-tab gesture), then scroll the editor
 /// into view. Shared by the table rows and the column rows. Stops the click so it does not
 /// bubble to an enclosing row's handler.
+/// ----- The menu of a table or a database of the schema panel -----------------------------------
+
+/// The pages of the web console about a table or a database: the page of a table (`{database, table, tab}`), or the
+/// Tables or Import data page of a database (`{database, page}`). Inside the console, it opens them (`openPage` of the
+/// embedding contract); otherwise, the console of the server the page queries opens in a new tab, which asks to sign in.
+function openInConsole(target) {
+    if (console_api && console_api.openPage && console_api.openPage(window, target)) return;
+    const origin = new URL(url_elem.value, location.href).origin;
+    const path = target.table
+        ? `/console/tables/${encodeURIComponent(`${encodeURIComponent(target.database)}/${encodeURIComponent(target.table)}`)}?tab=${target.tab}`
+        : `/console/${target.page}?database=${encodeURIComponent(target.database)}`;
+    window.open(origin + path, '_blank', 'noopener');
+}
+
+let schemaMenuEl = null;
+let schemaMenuReturnFocus = null;
+
+function closeSchemaMenu(return_focus = true) {
+    if (!schemaMenuEl) return;
+    schemaMenuEl.remove();
+    schemaMenuEl = null;
+    for (const button of document.querySelectorAll('.table-menu-button[aria-expanded="true"]')) button.setAttribute('aria-expanded', 'false');
+    if (return_focus && schemaMenuReturnFocus) schemaMenuReturnFocus.focus();
+    schemaMenuReturnFocus = null;
+}
+
+/// Opens a menu (`items`: `[label, action(event)]`, or null for a separator) at a point, or under an element, as the
+/// WAI-ARIA menu pattern: the first item has the focus; the arrow keys, Home, and End move it; Enter and Space activate
+/// an item; Escape and Tab close the menu, and the focus returns to where it was.
+function openSchemaMenu(at, items, label, return_focus) {
+    closeSchemaMenu(false);
+    const menu = document.createElement('div');
+    menu.id = 'schema-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', label);
+    for (const item of items) {
+        if (!item) {
+            const separator = document.createElement('div');
+            separator.setAttribute('role', 'separator');
+            menu.append(separator);
+            continue;
+        }
+        const [text, action] = item;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.setAttribute('role', 'menuitem');
+        button.tabIndex = -1;
+        button.textContent = text;
+        button.addEventListener('click', e => {
+            closeSchemaMenu(false);
+            action(e);
+        });
+        menu.append(button);
+    }
+    document.body.append(menu);
+    const rect = at instanceof Element ? at.getBoundingClientRect() : null;
+    const x = rect ? rect.left : at.x;
+    const y = rect ? rect.bottom : at.y;
+    menu.style.left = `${Math.max(0, Math.min(x, window.innerWidth - menu.offsetWidth - 4))}px`;
+    menu.style.top = `${Math.max(0, Math.min(y, window.innerHeight - menu.offsetHeight - 4))}px`;
+    const entries = [...menu.querySelectorAll('[role="menuitem"]')];
+    menu.addEventListener('keydown', e => {
+        const index = entries.indexOf(document.activeElement);
+        const move = {ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: entries.length - 1}[e.key];
+        if (move !== undefined) {
+            e.preventDefault();
+            entries[(move + entries.length) % entries.length].focus();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            closeSchemaMenu();
+        } else if (e.key === 'Tab') {
+            closeSchemaMenu(false);
+        }
+    });
+    schemaMenuEl = menu;
+    schemaMenuReturnFocus = return_focus;
+    entries[0].focus();
+}
+
+/// Closes the menu on a click outside it.
+document.addEventListener('pointerdown', e => {
+    if (schemaMenuEl && !schemaMenuEl.contains(e.target) && !(e.target.closest && e.target.closest('.table-menu-button'))) closeSchemaMenu(false);
+}, true);
+
+function tableMenuItems(database, table) {
+    const name = `${quoteIdentifier(database)}.${quoteIdentifier(table)}`;
+    return [
+        ['Table properties', () => openInConsole({database, table, tab: 'overview'})],
+        ['Import data into this table', () => openInConsole({database, table, tab: 'import'})],
+        null,
+        ['Select the first 100 rows', e => setQueryOrRun(e, `SELECT * FROM ${name} LIMIT 100`)],
+        ['Show the CREATE statement', e => setQueryOrRun(e, `SHOW TABLE ${name}`)],
+        ['Copy the name', () => navigator.clipboard.writeText(name)],
+    ];
+}
+
+function databaseMenuItems(database) {
+    return [
+        ['Tables of this database', () => openInConsole({database, page: 'tables'})],
+        ['Import data into this database', () => openInConsole({database, page: 'import'})],
+        null,
+        ['Copy the name', () => navigator.clipboard.writeText(quoteIdentifier(database))],
+    ];
+}
+
+/// The ways to open the menu of a row: right-click, and Shift+F10 or the Menu key when the row has the focus.
+function attachSchemaMenu(row, focus_target, label, items) {
+    row.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        openSchemaMenu({x: e.clientX, y: e.clientY}, items(), label, focus_target);
+    });
+    focus_target.addEventListener('keydown', e => {
+        if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+            e.preventDefault();
+            openSchemaMenu(focus_target, items(), label, focus_target);
+        }
+    });
+}
+
 function setQueryOrRun(e, value) {
     if (isMac && e.button !== 1 && e.ctrlKey) {
         /// On macOS `Ctrl+Click` is the secondary (context-menu) click, not a query
@@ -10172,6 +10369,30 @@ async function loadTables(server_address, user, password, database, container, s
         table_link.appendChild(table_addendum);
         table.appendChild(table_link);
         onTableActivate(table, e => set_query_or_run(e, `SELECT * FROM ${quoteIdentifier(database)}.${quoteIdentifier(elem.table)} LIMIT 100`));
+
+        /// The menu of the table: the ⋯ button, right-click, or Shift+F10 / the Menu key on the row.
+        const menu_label = `Actions for ${elem.table}`;
+        const menu_button = document.createElement('button');
+        menu_button.type = 'button';
+        menu_button.className = 'table-menu-button';
+        menu_button.textContent = '⋯';
+        menu_button.title = menu_label;
+        menu_button.setAttribute('aria-label', menu_label);
+        menu_button.setAttribute('aria-haspopup', 'menu');
+        menu_button.setAttribute('aria-expanded', 'false');
+        menu_button.tabIndex = -1;
+        menu_button.addEventListener('click', e => {
+            e.stopPropagation();
+            if (menu_button.getAttribute('aria-expanded') === 'true') {
+                closeSchemaMenu();
+                return;
+            }
+            openSchemaMenu(menu_button, tableMenuItems(database, elem.table), menu_label, table_link);
+            menu_button.setAttribute('aria-expanded', 'true');
+        });
+        menu_button.addEventListener('auxclick', e => e.stopPropagation());
+        table.appendChild(menu_button);
+        attachSchemaMenu(table, table_link, menu_label, () => tableMenuItems(database, elem.table));
         tables_elem.appendChild(table);
     }
 
@@ -10362,7 +10583,8 @@ function hideTableBalloons() {
 }
 
 /// Anchor a table's balloon to the end of its name (clamped to the button when the
-/// name is truncated), so it sits next to the text rather than the far-right edge.
+/// name is truncated), so it sits next to the text rather than the far-right edge -
+/// but past the row's ⋯ button, which it would otherwise cover.
 /// Used on hover, on keyboard focus, and to keep it glued to the row across scrolls.
 function positionTableBalloon(table) {
     const table_name = table.querySelector('.table-name');
@@ -10371,7 +10593,9 @@ function positionTableBalloon(table) {
     if (!table_name || !table_addendum) return;
     const rect = table_name.getBoundingClientRect();
     const btn = table_link.getBoundingClientRect();
-    table_addendum.style.left = Math.min(rect.right, btn.right) + 'px';
+    const menu_button = table.querySelector(':scope > .table-menu-button');
+    const left = Math.min(rect.right, btn.right);
+    table_addendum.style.left = (menu_button ? Math.max(left, menu_button.getBoundingClientRect().right) : left) + 'px';
     table_addendum.style.top = (rect.top + rect.height / 2) + 'px';
     table_addendum.style.visibility = '';
     visible_balloon = table_addendum;

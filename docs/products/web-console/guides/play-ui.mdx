@@ -19,6 +19,7 @@ console it uses the console's connection and hides its own connection fields. It
 | Slow queries | Server logs and metrics per query, the graph of `EXPLAIN ... graph = 1`, and a flame graph in **Profile** mode. |
 | Help with SQL | An AI assistant, with a model that the server configures. |
 | Large results | The page shows the first 1,000 rows and then disconnects, which stops the query on the server. |
+| A table's properties | The menu of a table or a database in the schema panel opens the [Table Editor](/products/web-console/guides/table-editor#from-the-sql-console-and-the-play-ui) and Import data. |
 
 ## Confirmation and read-only mode {#confirmation-and-read-only-mode}
 
@@ -72,8 +73,26 @@ When the server configures an AI model ([`ai_endpoint`](/products/web-console/re
 
 No rows are sent to the model. The model answers from the names it is given and can be wrong.
 
+## The menu of a table or a database {#the-menu-of-a-table-or-a-database}
+
+In the schema panel, right-click a table, select its **⋯** button (shown when the pointer is over the row, and always
+on a touch screen), or press `Shift+F10` or the menu key while the table has the focus:
+
+| Item | Effect |
+|---|---|
+| **Table properties** | Opens the table in the [Table Editor](/products/web-console/guides/table-editor), on **Overview**. |
+| **Import data into this table** | Opens the **Import data** tab of the table. |
+| **Select the first 100 rows** | `SELECT * FROM <table> LIMIT 100`, as selecting the table does. |
+| **Show the CREATE statement** | `SHOW TABLE <table>`. |
+| **Copy the name** | Copies the quoted name, such as `` `db`.`table` ``. |
+
+The menu of a database (right-click, `Shift+F10`, or the menu key) has **Tables of this database**, **Import data into
+this database**, and **Copy the name**. Inside the console, the pages open in place. When the Play UI is opened on its
+own, they open in a new tab, at the `/console` of the server the page queries, which asks you to sign in.
+
 ## Accessibility {#accessibility}
 
 The page has a **Skip to the query editor** link as its first stop, every control works with the keyboard (Enter and
 Space on the icons), the progress and the errors are announced to screen readers, and on a narrow screen the database
-panel opens over the page.
+panel opens over the page. The menu of a table or a database is a WAI-ARIA menu: the arrow keys, `Home`, and `End` move
+between its items, `Enter` selects one, and `Escape` closes it and returns the focus to the row.

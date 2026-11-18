@@ -6,7 +6,8 @@ CUR_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # Every textarea in the Web UI (`programs/server/play.html`) holds text a writing assistant has no
 # business touching: SQL in the query editor, and a saved workspace - SQL again, plus Markdown and
-# JSON - in the Save and Load dialogs. Grammarly in particular injects its own overlay into a
+# JSON - in the Save and Load dialogs, and a question to the AI assistant, which names tables and
+# columns that a spell checker would flag and autocorrect would change. Grammarly in particular injects its own overlay into a
 # textarea it has adopted, which both litters the monospace text with underlines and moves the
 # caret around under the editor's own handlers.
 #
