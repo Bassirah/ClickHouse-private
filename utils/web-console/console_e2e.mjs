@@ -1163,6 +1163,142 @@ async function setConfigValues(context, values) {
     });
 }
 
+/// The labels of the items of the open menu of the SQL Console.
+const sqlConsoleMenu = sql => sql.$$eval('[role="menu"][data-state="open"] [role="menuitem"]', items => items.map(i => i.textContent.trim()));
+
+await test('SQL Console and Play UI: the menus of a table and a database open its properties and Import data', async () => {
+    const database = `e2e_menu_${Date.now()}`;
+    await adminQuery(`CREATE DATABASE ${database}`);
+    await adminQuery(`CREATE TABLE ${database}.events (id UInt32, name String) ENGINE = MergeTree ORDER BY id`);
+    const table_path = `${BASE}/console/tables/${encodeURIComponent(`${database}/events`)}`;
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+
+    /// The SQL Console: right-click on the table. Its own items stay, and the console adds its own after them.
+    await clickConsole(page, '#sidebar a[data-component="sql"]');
+    await waitForSQLConsole(page);
+    let sql = frameOf(page, '/ui');
+    await sql.click(`[data-testid="database-node-${database}"]`);
+    await sql.waitForSelector('[data-testid="table-item-events"]');
+    await sql.click('[data-testid="table-item-events"]', {button: 'right'});
+    await sql.waitForSelector('[role="menu"] [role="menuitem"][data-console-item]', {timeout: 10000});
+    const table_items = await sqlConsoleMenu(sql);
+    check(table_items.includes('Show table schema') && table_items.slice(-2).join() === 'Table properties,Import data into this table',
+        `menu of the table: ${table_items}`);
+    /// The keyboard moves from the items of the SQL Console to the added ones.
+    await sql.focus('[role="menu"][data-state="open"] [role="menuitem"]:not([data-console-item]) >> nth=-1');
+    await page.keyboard.press('ArrowDown');
+    check(await sql.evaluate(() => document.activeElement.textContent.trim()) === 'Table properties', 'ArrowDown does not reach the added items');
+    await page.keyboard.press('Enter');
+    await page.waitForURL(`${table_path}?tab=overview`);
+    await waitUntil(page, () => {
+        const current = document.querySelector('#admin-view nav.tablist a[aria-current="page"]');
+        return current && current.textContent === 'Overview' && [...document.querySelectorAll('#admin-view nav.tablist a')].some(a => a.textContent === 'Import data');
+    });
+    await screenshot(page, '09-sql-console-table-properties');
+
+    /// The ⋯ button of the table: Import data opens the tab of the table.
+    await page.goBack();
+    await page.waitForURL(`${BASE}/console/sql`);
+    sql = frameOf(page, '/ui');
+    await sql.hover('[data-testid="table-item-events"]');
+    await sql.click('[data-testid="table-item-events"] button[aria-label="dots-vertical"]');
+    await sql.locator('[role="menu"] [role="menuitem"][data-console-item]', {hasText: 'Import data into this table'}).click();
+    await page.waitForURL(`${table_path}?tab=import`);
+    await page.waitForSelector('#admin-view input[type="file"]');
+
+    /// The menu of the database: its Import data page, with the database chosen.
+    await page.goBack();
+    await page.waitForURL(`${BASE}/console/sql`);
+    sql = frameOf(page, '/ui');
+    await sql.click(`[data-testid="database-node-${database}"]`, {button: 'right'});
+    await sql.waitForSelector('[role="menu"] [role="menuitem"][data-console-item]', {timeout: 10000});
+    check((await sqlConsoleMenu(sql)).slice(-2).join() === 'Tables of this database,Import data into this database', `menu of the database: ${await sqlConsoleMenu(sql)}`);
+    await sql.locator('[role="menu"] [role="menuitem"][data-console-item]', {hasText: 'Import data into this database'}).click();
+    await page.waitForURL(`${BASE}/console/import?database=${database}`);
+    await waitUntil(page, name => [...document.querySelectorAll('#admin-view select')].some(s => s.value === name), database);
+
+    /// The Play UI: right-click, the ⋯ button, and Shift+F10 on a table; the menu is a WAI-ARIA menu.
+    await clickConsole(page, '#sidebar a[data-component="play"]');
+    await page.waitForURL(`${BASE}/console/play`);
+    await page.waitForSelector('.frame-host[data-component="play"] iframe');
+    await waitUntil(page, () => {
+        const doc = document.querySelector('.frame-host[data-component="play"] iframe').contentDocument;
+        return doc && doc.getElementById('databases');
+    });
+    let play = frameOf(page, '/play');
+    if (!await play.isVisible(`button[data-database="${database}"]`)) await play.click('#databases-icon');
+    await play.click(`button[data-database="${database}"]`);
+    const row = play.locator('.table', {hasText: 'events'}).first();
+    await row.click({button: 'right'});
+    const play_items = await play.$$eval('#schema-menu [role="menuitem"]', items => items.map(i => i.textContent));
+    check(play_items.slice(0, 2).join() === 'Table properties,Import data into this table', `menu of the Play UI: ${play_items}`);
+    check(await play.evaluate(() => document.activeElement.textContent) === 'Table properties', 'the first item has no focus');
+    await page.keyboard.press('End');
+    check(await play.evaluate(() => document.activeElement.textContent) === 'Copy the name', 'End');
+    await page.keyboard.press('Escape');
+    check(await play.$('#schema-menu') === null && await play.evaluate(() => !!document.activeElement.closest('.table')), 'Escape does not return the focus to the row');
+    await page.keyboard.press('Shift+F10');
+    await play.waitForSelector('#schema-menu');
+    await page.keyboard.press('Escape');
+    await row.hover();
+    await row.locator('.table-menu-button').click();
+    check(await row.locator('.table-menu-button').getAttribute('aria-expanded') === 'true', 'aria-expanded of the ⋯ button');
+    await play.locator('#schema-menu [role="menuitem"]', {hasText: 'Import data into this table'}).click();
+    await page.waitForURL(`${table_path}?tab=import`);
+
+    /// The menu of a database in the Play UI.
+    await page.goBack();
+    await page.waitForURL(`${BASE}/console/play`);
+    play = frameOf(page, '/play');
+    await play.click(`button[data-database="${database}"]`, {button: 'right'});
+    await play.locator('#schema-menu [role="menuitem"]', {hasText: 'Tables of this database'}).click();
+    await page.waitForURL(`${BASE}/console/tables?database=${database}`);
+    await waitUntil(page, () => document.querySelector('#admin-view table[aria-label="Tables"]'));
+    check((await page.textContent('#admin-view table[aria-label="Tables"]')).includes('events'), 'the table is not listed');
+    await context.close();
+    await adminQuery(`DROP DATABASE ${database}`);
+});
+
+await test('Table Editor: the Import data tab loads a file into its table, survives the sign-in, and a view has none', async () => {
+    const database = `e2e_te_import_${Date.now()}`;
+    await adminQuery(`CREATE DATABASE ${database}`);
+    await adminQuery(`CREATE TABLE ${database}.people (id UInt32, name String, city String DEFAULT 'unknown') ENGINE = MergeTree ORDER BY id`);
+    await adminQuery(`CREATE VIEW ${database}.people_view AS SELECT * FROM ${database}.people`);
+    const {context, page} = await newContext();
+
+    /// A deep link to the tab: the sign-in returns to it.
+    const deep_link = `${BASE}/console/tables/${encodeURIComponent(`${database}/people`)}?tab=import`;
+    await page.goto(deep_link);
+    await page.waitForSelector('#login-view:not([hidden])');
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await page.waitForURL(deep_link);
+    await page.waitForSelector('#admin-view input[type="file"]');
+    check((await page.textContent('#admin-view')).includes(`Into the table ${database}.people`), 'the destination is not the table');
+
+    const csv = ['id,name', ...Array.from({length: 500}, (_, i) => `${i},"Name ${i}, ü"`)].join('\n') + '\n';
+    await page.setInputFiles('#admin-view input[type="file"]', {name: 'people.csv', mimeType: 'text/csv', buffer: Buffer.from(csv)});
+    await waitUntil(page, () => document.querySelector('#admin-view table[aria-label="First rows of the file"]'));
+    await page.click('#admin-view button:text("Review import")');
+    await page.waitForSelector('#admin-dialog[open]');
+    const review = await page.textContent('#admin-dialog');
+    check(review.includes(`INSERT INTO \`${database}\`.\`people\``) && !review.includes('CREATE TABLE'), `review: ${review}`);
+    await page.click('#admin-dialog .dialog-actions button.primary');
+    await page.waitForSelector('#admin-dialog .message.info');
+    await screenshot(page, '10-table-import-tab');
+    await page.click('#admin-dialog .dialog-actions button');
+    check(await adminQuery(`SELECT count(), anyIf(name, id = 7), any(city) FROM ${database}.people FORMAT CSV`) === '500,"Name 7, ü","unknown"', 'imported rows');
+
+    /// A view has no data of its own.
+    await openTableTab(page, database, 'people_view', 'import');
+    check((await page.textContent('#admin-view')).includes('A view has no data of its own'), 'the tab of a view');
+    check(await page.$('#admin-view input[type="file"]') === null, 'a view offers a file');
+    await context.close();
+    await adminQuery(`DROP DATABASE ${database}`);
+});
+
 /// Serves `/console/config.json` with `sql_console_clear_on_sign_out` set to `value`.
 async function setClearOnSignOut(context, value) {
     await context.route(`${BASE}/console/config.json`, async route => {

@@ -24,7 +24,7 @@ needs:
 | Actions | Privilege on the table |
 |---|---|
 | See the rows | `SELECT` |
-| Insert a row | `INSERT` |
+| Insert a row, import a file | `INSERT` |
 | Add, change, rename, or drop a column | `ALTER ADD COLUMN`, `ALTER MODIFY COLUMN`, `ALTER RENAME COLUMN`, `ALTER DROP COLUMN`, `ALTER COMMENT COLUMN` |
 | Edit rows | `ALTER UPDATE` |
 | Delete rows, drop or detach a partition, delete a detached part | `ALTER DELETE` |
@@ -39,7 +39,8 @@ The server checks every statement anyway: a disabled button only saves you from 
 
 The list shows each table with its engine, rows, size on disk, compression ratio, last change, and comment, from
 `system.tables`. **Search** filters by database, table, or engine; **Database** shows one database; **Show system
-databases** adds `system` and `information_schema`. Select a table to open it.
+databases** adds `system` and `information_schema`. Select a table to open it. The address
+`/console/tables?database=<database>` opens the list with one database chosen.
 
 **New table** creates a table: the database, the name, the engine (`MergeTree` and its variants, `Memory`, or `Log`),
 the columns (name, type, default, and comment), and for a `MergeTree` table its sorting key, partition key, and TTL,
@@ -55,13 +56,15 @@ The tabs of a table:
 | **Overview** | Engine, rows, size, compression, parts, keys, storage policy, the query of a view, and the views and materialized views that read the table. For a `Replicated` table: its replicas, delay, and queue. | Comment, rename, optimize (with `FINAL` or `DEDUPLICATE`), truncate, drop. |
 | **Columns** | Each column with its keys, type, default, codec, size on disk, compression, and comment, from `system.columns`. | Add a column (with its position), change its type, default, codec, or comment, rename it, drop it. A column of a key cannot be renamed or dropped. |
 | **Data** | The rows, a page at a time, with a filter (a `WHERE` condition) and an order. | Insert a row, edit or delete one row, update or delete the rows that match a condition. |
+| **Import data** | A form to load a file from your computer into this table: [Import data](/products/web-console/guides/import-data) with the table already chosen as the destination. | Insert the rows of the file (`INSERT ... FORMAT`), columns matched by name. |
 | **Indexes & projections** | Data skipping indexes (`system.data_skipping_indices`) and projections (`system.projections`), with their size on disk. | Add, build for the existing parts (`MATERIALIZE`), drop. |
 | **Partitions & parts** | Partitions with their parts, rows, and size; detached parts with the reason; the last 200 active parts. | Optimize, freeze, detach, or drop a partition; attach or delete a detached part. |
 | **Mutations** | The mutations of the table (`system.mutations`) with their state and last error, and the merges in progress. | Kill a mutation. |
 | **Settings & TTL** | The TTL, the settings set on the table, the constraints, and the comment. | Change or remove the TTL, apply it now, change or reset a setting, add or drop a constraint. |
 | **DDL** | The `CREATE` statement (`SHOW CREATE TABLE`), with a **Copy** button. | |
 
-Views, materialized views, and tables of other engines show what applies to them: a view has no data of its own, and
+Views, materialized views, and tables of other engines show what applies to them: a view has no data of its own (and
+no **Import data** tab content: import into the table it reads), and
 indexes, partitions, mutations, and row changes exist only for `MergeTree` tables.
 
 A dictionary (engine `Dictionary`) shows, on **Overview**, its state from `system.dictionaries`: status, layout, key,
@@ -69,6 +72,31 @@ source, elements, memory, queries and hit rate, lifetime, last update, and last 
 DICTIONARY` (the `SYSTEM RELOAD DICTIONARY` privilege). Its rows are in **Data** and its definition in **DDL**; rename and
 drop use `RENAME DICTIONARY` and `DROP DICTIONARY` (the `DROP DICTIONARY` privilege). A dictionary is not changed with
 `ALTER`: create it again to change its attributes or source.
+
+## From the SQL Console and the Play UI {#from-the-sql-console-and-the-play-ui}
+
+The schema trees of the [SQL Console](/products/web-console/guides/console) and of the
+[Play UI](/products/web-console/guides/play-ui) open these pages. Right-click a table, or select its **⋯** button:
+
+- **Table properties** opens the table on **Overview**.
+- **Import data into this table** opens the table on **Import data**.
+
+Right-click a database:
+
+- **Tables of this database** opens the list of tables with the database chosen.
+- **Import data into this database** opens [Import data](/products/web-console/guides/import-data) with the database
+  chosen.
+
+In the Play UI, the menu also opens with `Shift+F10` or the menu key on a table, follows the keyboard of a menu (the
+arrow keys, `Home`, `End`, `Enter`, and `Escape`), and also has **Select the first 100 rows**, **Show the CREATE
+statement**, and **Copy the name**. Inside the console, the page opens in place; the Play UI opened on its own opens
+it in a new tab, which asks you to sign in. The SQL Console has these items only inside the console: the console adds
+them to its menus, after the items of the SQL Console.
+
+The address of a tab is `/console/tables/<database>%2F<table>?tab=<tab>`, with the database and the table each
+URL-encoded, and the tab one of `overview`, `columns`, `data`, `import`, `indexes`, `partitions`, `mutations`,
+`settings`, and `ddl`. It can be bookmarked or shared: when nobody is signed in, the console asks to sign in, then
+opens the tab.
 
 ## Editing data {#editing-data}
 

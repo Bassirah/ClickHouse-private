@@ -1204,12 +1204,17 @@ function loginPath(next) {
     return `${BASE_PATH}/login` + (next ? `?next=${encodeURIComponent(next)}` : '');
 }
 
-/// Only an id of the registry, or a page of the Console Guide (`guide/<page>`), is accepted as the destination
-/// after login, so it can never point outside of the console.
+/// Only an id of the registry, a page of the Console Guide (`guide/<page>`), or a page of an administration page with
+/// its tab (`tables/<database>%2F<table>?tab=import`, how the Play UI opens a table in a new tab) is accepted as the
+/// destination after login, so it can never point outside of the console.
 const GUIDE_PAGE_PATH = /^guide\/[a-z0-9-]+(\/[a-z0-9-]+)*$/;
+const ADMIN_SUB_PAGE_PATH = /^([a-z-]+)\/([^/?#]+)(\?tab=[a-z-]+)?$/;
 
 function validNext(value) {
-    return value && value !== 'home' && (COMPONENTS_BY_ID.has(value) || GUIDE_PAGE_PATH.test(value)) ? value : null;
+    if (!value || value === 'home') return null;
+    if (COMPONENTS_BY_ID.has(value) || GUIDE_PAGE_PATH.test(value)) return value;
+    const sub = value.match(ADMIN_SUB_PAGE_PATH);
+    return sub && COMPONENTS_BY_ID.has(sub[1]) && COMPONENTS_BY_ID.get(sub[1]).kind === 'admin' ? value : null;
 }
 
 /// Administration pages take one more path segment, the name of the user or role they show
@@ -1253,7 +1258,9 @@ function render() {
     let route = parseRoute();
     if (!session) {
         const next = route.name === 'login' ? route.next
-            : (route.name === 'component' ? validNext(route.id === 'guide' && route.sub ? `guide/${route.sub}` : route.id) : null);
+            : (route.name === 'component' ? validNext(route.id === 'guide' && route.sub ? `guide/${route.sub}`
+                : route.sub && COMPONENTS_BY_ID.get(route.id).kind === 'admin'
+                    ? `${route.id}/${encodeURIComponent(route.sub)}${route.tab ? `?tab=${encodeURIComponent(route.tab)}` : ''}` : route.id) : null);
         if (route.name !== 'login') history.replaceState(null, '', loginPath(next));
         showLogin();
         return;
@@ -2507,6 +2514,7 @@ function onFrameLoad(entry) {
     }
     entry.loaded = true;
     if (c.integration === 'sql-console') {
+        extendSqlConsoleMenus(entry);
         signInSQLConsole(entry);
         return;
     }
@@ -2552,8 +2560,138 @@ Object.defineProperty(window, 'clickhouseConsole', {
             }
             return null;
         },
+        /// Opens a page of the console for a native panel of the session (the schema panel of the Play UI): the page of a
+        /// table (`{database, table, tab}`), or the Tables or Import data page of a database (`{database, page}`).
+        /// Returns whether it was opened.
+        openPage(panel_window, target) {
+            if (!session || !target || typeof target.database !== 'string') return false;
+            for (const entry of frames.values()) {
+                if (entry.component.integration === 'native' && entry.session === session && entry.iframe.contentWindow === panel_window) {
+                    return openConsolePage(target);
+                }
+            }
+            return false;
+        },
     }),
 });
+
+/// Opens the page of a table (`{database, table, tab}`), or the Tables or Import data page with a database selected
+/// (`{database, page: 'tables' | 'import'}`). Only those pages: what a panel asks for is not a path. Returns whether it
+/// was opened.
+function openConsolePage(target) {
+    const tabs = TABLE_TABS.map(([key]) => key);
+    if (typeof target.table === 'string' && target.table) {
+        navigate(adminPath('tables', tableSub(target.database, target.table), tabs.includes(target.tab) ? target.tab : 'overview'));
+        return true;
+    }
+    if (target.page === 'tables' || target.page === 'import') {
+        navigate(`${componentPath(target.page)}?database=${encodeURIComponent(target.database)}`);
+        return true;
+    }
+    return false;
+}
+
+/// --- Integration: the menus of the SQL Console ---
+
+/// The SQL Console (`contrib/sql-console`, a prebuilt application) has a menu on each table and database of its schema
+/// tree (right-click, or the ⋯ button of a table). The console adds its own items to them, which open the Table Editor
+/// and the Import data page: it can, because the SQL Console is a frame of the same origin. This depends on the markup
+/// of the SQL Console: a table is `[data-testid="table-item-<table>"]` inside the section of its database, whose header
+/// is `[data-testid="database-node-<database>"]`; a menu is `[role="menu"]` of `[role="menuitem"]`, with the label in
+/// `[data-testid="ellipsed-icon-wrapper-text"]`. A release that changes it gets no items (nothing breaks); the browser
+/// check `SQL Console: the menus of tables and databases ...` fails then, to say so.
+const SQL_CONSOLE_MENU_ITEMS = {
+    table: [['Table properties', target => ({...target, tab: 'overview'})], ['Import data into this table', target => ({...target, tab: 'import'})]],
+    database: [['Tables of this database', target => ({database: target.database, page: 'tables'})],
+        ['Import data into this database', target => ({database: target.database, page: 'import'})]],
+};
+
+/// The table or database of a node of the schema tree of the SQL Console.
+function sqlConsoleTarget(node) {
+    const id = node.getAttribute('data-testid');
+    if (id.startsWith('database-node-')) return {database: id.slice('database-node-'.length), table: null};
+    /// The database of a table: the header of the nearest section that contains the table.
+    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+        const header = parent.querySelector('[data-testid^="database-node-"]');
+        if (header) return {database: header.getAttribute('data-testid').slice('database-node-'.length), table: id.slice('table-item-'.length)};
+    }
+    return null;
+}
+
+function extendSqlConsoleMenus(entry) {
+    const win = entry.iframe.contentWindow;
+    const doc = win.document;
+    /// The node the user opened a menu on: by right-click, by the ⋯ button inside it, or by the keyboard on it. Anything
+    /// else outside a menu forgets it, so that the other menus of the SQL Console (tabs, results) get no items.
+    let target = null;
+    const remember = e => {
+        const element = e.target && e.target.closest ? e.target : null;
+        if (!element) return;
+        const node = element.closest('[data-testid^="table-item-"], [data-testid^="database-node-"]');
+        if (node) target = sqlConsoleTarget(node);
+        else if (!element.closest('[role="menu"]')) target = null;
+    };
+    for (const type of ['contextmenu', 'pointerdown', 'keydown']) doc.addEventListener(type, remember, true);
+    new win.MutationObserver(() => {
+        const menu = doc.querySelector('[role="menu"][data-state="open"]');
+        if (menu && target && !menu.querySelector('[data-console-item]')) addSqlConsoleMenuItems(win, menu, target);
+    }).observe(doc.body, {childList: true, subtree: true});
+}
+
+/// Adds the items to an open menu: copies of its first item, so that they look like the others, without its behavior.
+/// The arrow keys move between them and the items of the SQL Console; Enter and Space activate them.
+function addSqlConsoleMenuItems(win, menu, target) {
+    const doc = win.document;
+    const template = menu.querySelector('[role="menuitem"]');
+    if (!template || !template.querySelector('[data-testid="ellipsed-icon-wrapper-text"]')) return;
+    const separator = doc.createElement('div');
+    separator.setAttribute('role', 'separator');
+    separator.setAttribute('data-console-item', '');
+    separator.style.cssText = 'height: 1px; margin: 4px 0; background: currentColor; opacity: 0.15;';
+    menu.append(separator);
+    const added = [];
+    const close = () => menu.dispatchEvent(new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    for (const [label, page] of SQL_CONSOLE_MENU_ITEMS[target.table ? 'table' : 'database']) {
+        const item = template.cloneNode(true);
+        item.removeAttribute('data-radix-collection-item');
+        item.removeAttribute('data-highlighted');
+        item.removeAttribute('id');
+        item.setAttribute('data-console-item', '');
+        item.setAttribute('tabindex', '-1');
+        item.querySelector('[data-testid="ellipsed-icon-wrapper-text"]').textContent = label;
+        const activate = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            close();
+            openConsolePage(page(target));
+        };
+        item.addEventListener('click', activate);
+        item.addEventListener('pointerenter', () => { item.setAttribute('data-highlighted', ''); item.focus(); });
+        item.addEventListener('pointerleave', () => item.removeAttribute('data-highlighted'));
+        item.addEventListener('focus', () => item.setAttribute('data-highlighted', ''));
+        item.addEventListener('blur', () => item.removeAttribute('data-highlighted'));
+        item.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') activate(e);
+        });
+        menu.append(item);
+        added.push(item);
+    }
+    /// Arrow keys: from the last item of the SQL Console to the first added one and back, and between the added ones.
+    menu.addEventListener('keydown', e => {
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        const native = [...menu.querySelectorAll('[role="menuitem"]:not([data-console-item])')];
+        const index = added.indexOf(doc.activeElement);
+        let next = null;
+        if (index >= 0) next = e.key === 'ArrowDown' ? (added[index + 1] || native[0]) : (added[index - 1] || native[native.length - 1]);
+        else if (e.key === 'ArrowDown' && doc.activeElement === native[native.length - 1]) next = added[0];
+        else if (e.key === 'ArrowUp' && doc.activeElement === native[0]) next = added[added.length - 1];
+        if (next) {
+            e.preventDefault();
+            e.stopPropagation();
+            next.focus();
+        }
+    }, true);
+}
 
 /// --- Integration: Web Terminal ---
 
@@ -7430,7 +7568,7 @@ ADMIN_PAGES.audit = (root, route, page) => {
 /// form is shown in the form.
 
 const TABLE_TABS = [
-    ['overview', 'Overview'], ['columns', 'Columns'], ['data', 'Data'], ['indexes', 'Indexes & projections'],
+    ['overview', 'Overview'], ['columns', 'Columns'], ['data', 'Data'], ['import', 'Import data'], ['indexes', 'Indexes & projections'],
     ['partitions', 'Partitions & parts'], ['mutations', 'Mutations'], ['settings', 'Settings & TTL'], ['ddl', 'DDL'],
 ];
 
@@ -7573,7 +7711,7 @@ function renderTableList(root, page) {
         try {
             rows = await loadTableList(with_system.input.checked);
             if (!isCurrent(page)) return;
-            const chosen = database.value;
+            const chosen = database.value || new URLSearchParams(location.search).get('database') || '';
             database.replaceChildren(...[['', 'All databases'], ...[...new Set(rows.map(row => row.database))].map(db => [db, db])]
                 .map(([value, label]) => h('option', {value, selected: value === chosen}, label)));
             render();
@@ -8549,8 +8687,23 @@ async function renderTableDDL(container, ctx) {
         })), pre, h('p', {className: 'note'}, 'The statement as the server stores it (SHOW CREATE TABLE).')));
 }
 
+/// The Import data tab: the form of the Import data page, with this table as the destination.
+async function renderTableImport(container, ctx) {
+    if (ctx.view || ctx.dictionary) {
+        container.append(h('div', {className: 'box'}, paragraph(ctx.dictionary
+            ? 'A dictionary has no data of its own: load its source instead, then reload it (Overview).'
+            : 'A view has no data of its own: import into the table it reads.')));
+        return;
+    }
+    if (!ctx.grants.insert) {
+        container.append(h('div', {className: 'box'}, paragraph(`Importing needs ${TABLE_GRANTS.insert} on this table.`)));
+        return;
+    }
+    renderImportForm(container, ctx.page, {fixed: {database: ctx.database, table: ctx.table}});
+}
+
 const TABLE_TAB_RENDERERS = {
-    overview: renderTableOverview, columns: renderTableColumns, data: renderTableData, indexes: renderTableIndexes,
+    overview: renderTableOverview, columns: renderTableColumns, data: renderTableData, import: renderTableImport, indexes: renderTableIndexes,
     partitions: renderTablePartitions, mutations: renderTableMutations, settings: renderTableSettings, ddl: renderTableDDL,
 };
 
@@ -8712,8 +8865,12 @@ function uploadInsert(current, sql, file, settings, report) {
     });
 }
 
-ADMIN_PAGES.import = (root, route, page) => {
+/// The form of the import: on the Import data page, or on the Import data tab of a table (`options.fixed`, `{database,
+/// table}`), where the destination is that table. `options.database` selects a database at the start (the database
+/// menu of the SQL Console links here with `?database=`).
+function renderImportForm(root, page, options = {}) {
     const c = page.component;
+    const fixed = options.fixed || null;
     const state = {file: null, sample: null, columns: [], databases: [], tables: []};
     const file_input = h('input', {type: 'file', accept: '.csv,.tsv,.tab,.json,.jsonl,.ndjson,.txt,.parquet,.avro,.arrow,.feather,.arrows,text/csv,text/tab-separated-values,application/json'});
     const format = select(IMPORT_FORMATS, 'CSVWithNames');
@@ -8823,6 +8980,13 @@ ADMIN_PAGES.import = (root, route, page) => {
     };
 
     const renderTarget = () => {
+        if (fixed) {
+            target_box.replaceChildren(h('p', {}, 'Into the table ', h('code', {}, `${fixed.database}.${fixed.table}`), '. ',
+                format.value.endsWith('WithNames') || format.value === 'JSONEachRow' || importSampleKind(format.value) !== 'text'
+                    ? 'Columns are matched by name; columns of the table missing from the file get their defaults.'
+                    : 'Without a header row, the columns of the file must be in the order of the table.'));
+            return;
+        }
         const fields = mode.value === 'new'
             ? [adminField('Table name', table_name), adminField('Sorting key', order_by, 'ORDER BY of the new MergeTree table.')]
             : [adminField('Table', existing, format.value.endsWith('WithNames') || format.value === 'JSONEachRow' || importSampleKind(format.value) !== 'text'
@@ -8878,25 +9042,39 @@ ADMIN_PAGES.import = (root, route, page) => {
     mode.addEventListener('change', () => { renderTarget(); if (mode.value === 'existing') loadTables(); });
     database.addEventListener('change', () => { if (mode.value === 'existing') loadTables(); });
 
-    put(root, pageHeader(c, 'Import data'),
-        h('p', {className: 'note'}, `Load a file from this computer into a table of ${session.hostname}. The server infers the columns `
-            + 'from the beginning of the file; review them, then the console creates the table if needed and sends the file as the data of '
-            + 'an INSERT statement, with your privileges. Formats: CSV, TSV, JSON with one object per line, Parquet, Avro, and Arrow.'),
+    put(root, fixed ? null : pageHeader(c, 'Import data'),
+        h('p', {className: 'note'}, fixed
+            ? `Load a file from this computer into ${fixed.database}.${fixed.table}. The server infers the columns of the file from its beginning; `
+                + 'review them, then the console sends the file as the data of an INSERT statement, with your privileges. Formats: CSV, TSV, '
+                + 'JSON with one object per line, Parquet, Avro, and Arrow.'
+            : `Load a file from this computer into a table of ${session.hostname}. The server infers the columns `
+                + 'from the beginning of the file; review them, then the console creates the table if needed and sends the file as the data of '
+                + 'an INSERT statement, with your privileges. Formats: CSV, TSV, JSON with one object per line, Parquet, Avro, and Arrow.'),
         h('div', {className: 'box'}, h('div', {className: 'toolbar'}, adminField('File', file_input), adminField('Format', format), nullable.element),
             sample_info, columns_box, preview_box),
         h('div', {className: 'box'}, h('h2', {}, 'Destination'), target_box, message,
             h('div', {className: 'actions-row'}, button('Review import', review, {className: 'primary'}))));
+    if (fixed) {
+        mode.value = 'existing';
+        database.replaceChildren(h('option', {value: fixed.database, selected: true}, fixed.database));
+        existing.replaceChildren(h('option', {value: fixed.table, selected: true}, fixed.table));
+        renderTarget();
+        return;
+    }
     renderTarget();
     adminRows(`SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') ORDER BY name`, {})
         .then(rows => {
             if (!isCurrent(page)) return;
-            database.replaceChildren(...rows.map(row => h('option', {value: row.name, selected: row.name === 'default'}, row.name)));
+            const chosen = rows.some(row => row.name === options.database) ? options.database : 'default';
+            database.replaceChildren(...rows.map(row => h('option', {value: row.name, selected: row.name === chosen}, row.name)));
         })
         .catch(e => {
             if (e instanceof AdminSessionChanged || !isCurrent(page)) return;
             message.replaceChildren(errorBox(e, 'The databases cannot be listed:'));
         });
-};
+}
+
+ADMIN_PAGES.import = (root, route, page) => renderImportForm(root, page, {database: new URLSearchParams(location.search).get('database')});
 
 /// --- Diagnostics: Running queries ---
 

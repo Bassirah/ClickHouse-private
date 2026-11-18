@@ -67,6 +67,11 @@ each statement:
 4. **Review import** shows the statements: `CREATE TABLE` for a new table, and `INSERT INTO <table> FORMAT <format>`
    with the file as its data. Select **Import**. The dialog shows the progress of the upload, then the result.
 
+The page also opens from the menu of a database in the SQL Console or the Play UI, with the database chosen
+(`/console/import?database=<database>`). To import into one table, use the **Import data** tab of the table in the
+[Table Editor](/products/web-console/guides/table-editor#from-the-sql-console-and-the-play-ui): it is this form with the
+table already chosen, opened from **Import data into this table** in the menu of the table.
+
 The console records the import as `import_data` in the [audit log](/products/web-console/guides/audit-activity), with
 the file name, its size, and the format.
 
