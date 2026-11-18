@@ -2823,7 +2823,7 @@
                 <button class="tabs-dialog-close" type="submit" title="Close" aria-label="Close">&times;</button>
             </form>
             <p class="tabs-dialog-hint" id="ai-privacy"></p>
-            <textarea id="ai-question" class="monospace" rows="3" aria-label="Question" placeholder="For example: the 10 cities with the most events last month"></textarea>
+            <textarea id="ai-question" class="monospace" rows="3" spellcheck="false" autocorrect="false" autocomplete="false" data-gramm="false" aria-label="Question" placeholder="For example: the 10 cities with the most events last month"></textarea>
             <div class="tabs-dialog-buttons">
                 <button id="ai-fix" type="button">Fix the last error</button>
                 <button id="ai-write" type="button">Write a query</button>
@@ -9102,6 +9102,9 @@ if (pass_from_url) {
 /// embedded by the console, the console owns the connection: it returns the server URL and the credentials of the
 /// signed-in user, so that they never appear in the address bar or in storage. Returns `null` when the page is opened on
 /// its own, or by a parent of another origin (reading its `clickhouseConsole` throws).
+/// The API of the console (`window.clickhouseConsole` of the parent), when the page is embedded by it.
+let console_api = null;
+
 function getConsoleConnection() {
     if (window.parent === window) return null;
     let api = null;
@@ -9110,7 +9113,9 @@ function getConsoleConnection() {
     } catch (e) {
         /// A parent of another origin is not the console.
     }
-    return api ? api.getConnection(window) : null;
+    const connection = api ? api.getConnection(window) : null;
+    if (connection) console_api = api;
+    return connection;
 }
 
 /// The console's connection takes precedence over the one from the address, and its fields are hidden: switching the
@@ -9773,7 +9778,7 @@ function getTableIcon(engine)
 /// Tables or Import data page of a database (`{database, page}`). Inside the console, it opens them (`openPage` of the
 /// embedding contract); otherwise, the console of the server the page queries opens in a new tab, which asks to sign in.
 function openInConsole(target) {
-    if (console_connection && window.parent.clickhouseConsole.openPage && window.parent.clickhouseConsole.openPage(window, target)) return;
+    if (console_api && console_api.openPage && console_api.openPage(window, target)) return;
     const origin = new URL(url_elem.value, location.href).origin;
     const path = target.table
         ? `/console/tables/${encodeURIComponent(`${encodeURIComponent(target.database)}/${encodeURIComponent(target.table)}`)}?tab=${target.tab}`
