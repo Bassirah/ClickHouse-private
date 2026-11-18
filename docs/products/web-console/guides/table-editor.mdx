@@ -64,6 +64,12 @@ The tabs of a table:
 Views, materialized views, and tables of other engines show what applies to them: a view has no data of its own, and
 indexes, partitions, mutations, and row changes exist only for `MergeTree` tables.
 
+A dictionary (engine `Dictionary`) shows, on **Overview**, its state from `system.dictionaries`: status, layout, key,
+source, elements, memory, queries and hit rate, lifetime, last update, and last error. **Reload** runs `SYSTEM RELOAD
+DICTIONARY` (the `SYSTEM RELOAD DICTIONARY` privilege). Its rows are in **Data** and its definition in **DDL**; rename and
+drop use `RENAME DICTIONARY` and `DROP DICTIONARY` (the `DROP DICTIONARY` privilege). A dictionary is not changed with
+`ALTER`: create it again to change its attributes or source.
+
 ## Editing data {#editing-data}
 
 ClickHouse has no row identifier. To change one row, the Data tab reads, with each row of a `MergeTree` table, the

@@ -416,6 +416,10 @@ constexpr ConsoleDestination console_destinations[] =
     /// What signing out of the console deletes of the data that the SQL Console (`/ui`) stored in the browser: `results`
     /// (the stored result rows and the session data of the tab) or `all` (also the saved queries, the history, and the tabs).
     {"sql_console_clear_on_sign_out", "results"},
+    /// The AI assistant of the Play UI: an OpenAI-compatible chat completions endpoint that needs no secret (a model on
+    /// the local network, or a gateway that authenticates by network), because these values are public. Empty: off.
+    {"ai_endpoint", ""},
+    {"ai_model", ""},
 };
 
 String getConsoleConfigJSON(const Poco::Util::AbstractConfiguration & config)

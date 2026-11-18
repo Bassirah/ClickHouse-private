@@ -7475,11 +7475,14 @@ const TABLE_GRANTS = {
     update: 'ALTER UPDATE', delete: 'ALTER DELETE', index: 'ALTER INDEX', projection: 'ALTER PROJECTION',
     constraint: 'ALTER CONSTRAINT', settings: 'ALTER SETTINGS', ttl: 'ALTER TTL', comment: 'ALTER MODIFY COMMENT',
     optimize: 'OPTIMIZE', truncate: 'TRUNCATE', drop: 'DROP TABLE', freeze: 'ALTER FREEZE PARTITION',
+    drop_dictionary: 'DROP DICTIONARY', reload_dictionary: 'SYSTEM RELOAD DICTIONARY',
 };
 
 async function tableGrants(database, table) {
     const entries = Object.entries(TABLE_GRANTS);
-    const results = await Promise.all(entries.map(([, privilege]) => checkGrant(`${privilege} ON ${tableRef(database, table)}`)));
+    /// SYSTEM privileges are global: they are granted and checked ON *.*.
+    const results = await Promise.all(entries.map(([, privilege]) =>
+        checkGrant(`${privilege} ON ${privilege.startsWith('SYSTEM ') ? '*.*' : tableRef(database, table)}`)));
     return Object.fromEntries(entries.map(([key], i) => [key, results[i]]));
 }
 
@@ -7721,7 +7724,7 @@ function renderTablePage(root, route, page) {
                 return;
             }
             const ctx = {database: target.database, table: target.table, info, grants, page, c, sub: route.sub,
-                merge_tree: isMergeTreeEngine(info.engine), view: VIEW_ENGINES.has(info.engine)};
+                merge_tree: isMergeTreeEngine(info.engine), view: VIEW_ENGINES.has(info.engine), dictionary: info.engine === 'Dictionary'};
             body.replaceChildren();
             await TABLE_TAB_RENDERERS[tab](body, ctx);
         } catch (e) {
@@ -7776,6 +7779,30 @@ async function renderTableOverview(container, ctx) {
         ['Comment', info.comment || '—'],
         ['Used by', dependents.length ? h('span', {className: 'chips'}, dependents) : 'No view or materialized view reads it.'],
     ])));
+    if (ctx.dictionary) {
+        await tableSection(container, 'Dictionary', grantButton(ctx, 'reload_dictionary', 'Reload', () => reviewPlan(tablePlan(ctx, 'reload_dictionary',
+            `Reload the dictionary ${ctx.database}.${ctx.table}`, [{description: 'Load the dictionary again from its source',
+                sql: `SYSTEM RELOAD DICTIONARY ${tableRef(ctx.database, ctx.table)}`}]))),
+        () => adminRows(`SELECT status, type, origin, source, element_count, bytes_allocated, query_count, hit_rate, lifetime_min, lifetime_max,
+            loading_start_time, last_successful_update_time, loading_duration, error_count, last_exception, \`key.names\` AS keys
+            FROM system.dictionaries WHERE database = {database:String} AND name = {table:String}`, {database: ctx.database, table: ctx.table}),
+        rows => {
+            if (!rows.length) return paragraph('The dictionary is not loaded yet: select Reload, or query it to load it.');
+            const d = rows[0];
+            return kvList([
+                ['Status', badge(d.status, d.status === 'LOADED' ? 'ok' : d.status === 'FAILED' || d.status === 'FAILED_AND_RELOADING' ? 'bad' : 'warn')],
+                ['Layout', d.type],
+                ['Key', (d.keys || []).join(', ')],
+                ['Source', h('code', {}, d.source)],
+                ['Elements', Number(d.element_count).toLocaleString('en-US')],
+                ['Memory', formatBytes(d.bytes_allocated)],
+                ['Queries', `${Number(d.query_count).toLocaleString('en-US')}${Number(d.hit_rate) ? `, hit rate ${Math.round(Number(d.hit_rate) * 100)} %` : ''}`],
+                ['Lifetime', Number(d.lifetime_max) ? `reloaded every ${d.lifetime_min}–${d.lifetime_max} s` : 'not reloaded automatically'],
+                ['Last update', `${d.last_successful_update_time} (took ${Number(d.loading_duration).toFixed(2)} s)`],
+                d.last_exception ? ['Last error', h('span', {className: 'bad'}, `${d.last_exception} (${d.error_count} errors)`)] : null,
+            ]);
+        });
+    }
     if (/^Replicated/.test(info.engine)) {
         await tableSection(container, 'Replication', null,
             () => adminRows(`SELECT is_readonly, is_session_expired, absolute_delay, queue_size, inserts_in_queue, merges_in_queue,
@@ -7790,12 +7817,13 @@ async function renderTableOverview(container, ctx) {
                 ['Keeper path', h('code', {}, rows[0].zookeeper_path)],
             ]) : paragraph('No replica information.')));
     }
+    const drop_key = ctx.dictionary ? 'drop_dictionary' : 'drop';
     container.append(h('div', {className: 'box'}, h('h2', {}, 'Actions'), h('div', {className: 'actions-row'},
-        grantButton(ctx, 'comment', 'Edit comment', () => tableCommentDialog(ctx), {disabled: ctx.view}),
-        grantButton(ctx, 'drop', 'Rename', () => renameTableDialog(ctx)),
+        ctx.dictionary ? null : grantButton(ctx, 'comment', 'Edit comment', () => tableCommentDialog(ctx), {disabled: ctx.view}),
+        grantButton(ctx, drop_key, 'Rename', () => renameTableDialog(ctx)),
         ctx.merge_tree ? grantButton(ctx, 'optimize', 'Optimize', () => optimizeDialog(ctx)) : null,
-        ctx.view ? null : grantButton(ctx, 'truncate', 'Truncate', () => truncateDialog(ctx), {className: 'danger'}),
-        grantButton(ctx, 'drop', 'Drop', () => dropTableDialog(ctx), {className: 'danger'}))));
+        ctx.view || ctx.dictionary ? null : grantButton(ctx, 'truncate', 'Truncate', () => truncateDialog(ctx), {className: 'danger'}),
+        grantButton(ctx, drop_key, 'Drop', () => dropTableDialog(ctx), {className: 'danger'}))));
 }
 
 function tableCommentDialog(ctx) {
@@ -7812,7 +7840,8 @@ function renameTableDialog(ctx) {
         const new_name = name.value.trim();
         if (!new_name || new_name === ctx.table) return 'Enter a new name.';
         return tablePlan(ctx, 'rename_table', `Rename ${ctx.database}.${ctx.table} to ${new_name}`,
-            [{description: `Rename the table to ${new_name}`, sql: `RENAME TABLE ${tableRef(ctx.database, ctx.table)} TO ${tableRef(ctx.database, new_name)}`}],
+            [{description: `Rename the ${ctx.dictionary ? 'dictionary' : 'table'} to ${new_name}`,
+                sql: `RENAME ${ctx.dictionary ? 'DICTIONARY' : 'TABLE'} ${tableRef(ctx.database, ctx.table)} TO ${tableRef(ctx.database, new_name)}`}],
             {onclose: () => navigate(adminPath(ctx.c.id, tableSub(ctx.database, new_name), 'overview'))});
     });
 }
@@ -7842,8 +7871,9 @@ function dropTableDialog(ctx) {
         + 'In an Atomic database, UNDROP TABLE can bring it back for 8 minutes (database_atomic_delay_before_drop_table_sec).'),
     confirm.element], 'Review', () => {
         if (!confirm.ok()) return `Type ${ctx.table} to confirm.`;
-        return tablePlan(ctx, 'drop_table', `Drop ${ctx.database}.${ctx.table}`,
-            [{description: 'Drop the table', sql: `DROP TABLE ${tableRef(ctx.database, ctx.table)}`}],
+        return tablePlan(ctx, ctx.dictionary ? 'drop_dictionary' : 'drop_table', `Drop ${ctx.database}.${ctx.table}`,
+            [{description: `Drop the ${ctx.dictionary ? 'dictionary' : 'table'}`,
+                sql: `DROP ${ctx.dictionary ? 'DICTIONARY' : 'TABLE'} ${tableRef(ctx.database, ctx.table)}`}],
             {danger: true, confirm_text: 'Drop', onclose: () => navigate(adminPath(ctx.c.id))});
     });
 }
@@ -7868,7 +7898,7 @@ function isKeyColumn(column) {
 }
 
 async function renderTableColumns(container, ctx) {
-    const editable = !ctx.view;
+    const editable = !ctx.view && !ctx.dictionary;
     await tableSection(container, 'Columns', editable ? grantButton(ctx, 'add_column', 'Add column', () => columnDialog(ctx, null, ctx.columns)) : null,
         async () => (ctx.columns = await loadTableColumns(ctx)),
         columns => [dataTable([
@@ -7886,7 +7916,8 @@ async function renderTableColumns(container, ctx) {
                 grantButton(ctx, 'drop_column', 'Drop', () => dropColumnDialog(ctx, column), {className: 'small danger',
                     disabled: isKeyColumn(column), title: isKeyColumn(column) ? 'A column of a key cannot be dropped.' : null}))} : null,
         ].filter(Boolean), columns, 'No columns.', 'Columns'),
-        ctx.view ? paragraph('The columns of a view come from its query: change the query to change them.') : null]);
+        ctx.view ? paragraph('The columns of a view come from its query: change the query to change them.') : null,
+        ctx.dictionary ? paragraph('The attributes of a dictionary are part of its definition (DDL tab): to change them, create it again.') : null]);
 }
 
 const DEFAULT_KINDS = [['', 'No default'], ['DEFAULT', 'DEFAULT: used when a row does not give a value'],
@@ -8055,10 +8086,11 @@ async function renderTableData(container, ctx) {
     container.append(h('div', {className: 'box'},
         h('div', {className: 'toolbar'}, adminField('Filter', filter), button('Apply', apply), adminField('Order by', order), desc.element, adminField('Page', size)),
         h('div', {className: 'actions-row'},
-            ctx.view ? null : grantButton(ctx, 'insert', 'Insert row', () => insertRowDialog(ctx)),
+            ctx.view || ctx.dictionary ? null : grantButton(ctx, 'insert', 'Insert row', () => insertRowDialog(ctx)),
             editable ? grantButton(ctx, 'update', 'Update matching rows', () => updateMatchingDialog(ctx, state.filter)) : null,
             editable ? grantButton(ctx, 'delete', 'Delete matching rows', () => deleteMatchingDialog(ctx, state.filter), {className: 'danger'}) : null),
         ctx.view ? h('p', {className: 'note'}, 'A view has no data of its own: the rows are the result of its query.')
+            : ctx.dictionary ? h('p', {className: 'note'}, 'The rows of a dictionary come from its source: change them there, then reload it (Overview).')
             : editable ? null : h('p', {className: 'note'}, 'Rows of this engine cannot be changed one by one: only MergeTree tables support UPDATE and DELETE.'),
         grid, pager));
     load();
@@ -8437,7 +8469,7 @@ async function renderTableSettings(container, ctx) {
                     [{description: `Reset ${setting.name} to its default`, sql: `ALTER TABLE ${ref} RESET SETTING ${setting.name}`}])), {className: 'small'}))},
         ], settings, 'Every setting has its default (system.merge_tree_settings).', 'Settings')));
     }
-    if (!ctx.view) {
+    if (!ctx.view && !ctx.dictionary) {
         const constraints = constraintsOf(query);
         container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, 'Constraints'), h('span', {className: 'spacer'}),
             grantButton(ctx, 'constraint', 'Add constraint', () => constraintDialog(ctx))),
@@ -8450,7 +8482,7 @@ async function renderTableSettings(container, ctx) {
         ], constraints, 'No constraint.', 'Constraints'), h('p', {className: 'note'}, 'The expressions are in the DDL tab.')));
     }
     container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, 'Comment'), h('span', {className: 'spacer'}),
-        grantButton(ctx, 'comment', 'Edit comment', () => tableCommentDialog(ctx), {disabled: ctx.view})), paragraph(ctx.info.comment || 'No comment.')));
+        grantButton(ctx, 'comment', 'Edit comment', () => tableCommentDialog(ctx), {disabled: ctx.view || ctx.dictionary})), paragraph(ctx.info.comment || 'No comment.')));
 }
 
 function ttlDialog(ctx, current) {
@@ -8504,7 +8536,7 @@ function constraintDialog(ctx) {
 /// --- Tables: DDL ---
 
 async function renderTableDDL(container, ctx) {
-    const ddl = await adminText(`SHOW CREATE TABLE ${tableRef(ctx.database, ctx.table)} FORMAT TSVRaw`);
+    const ddl = await adminText(`SHOW CREATE ${ctx.dictionary ? 'DICTIONARY' : 'TABLE'} ${tableRef(ctx.database, ctx.table)} FORMAT TSVRaw`);
     const pre = h('pre', {className: 'code'}, ddl.trim());
     container.append(h('div', {className: 'box'}, h('div', {className: 'section-head'}, h('h2', {}, 'CREATE statement'), h('span', {className: 'spacer'}),
         button('Copy', async e => {

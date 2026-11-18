@@ -34,6 +34,8 @@ public: the page reads them before anyone signs in, so no key may hold a secret.
 | `sso_scopes` | `openid profile email` | Scopes the console requests. |
 | `sso_username_claim` | `preferred_username` | Claim of the ID token that is the ClickHouse user name. |
 | `sql_console_clear_on_sign_out` | `results` | What signing out of the console deletes of the data that the SQL Console stored in the browser: `results` or `all`. See [`sql_console_clear_on_sign_out`](#sql-console-clear-on-sign-out). |
+| `ai_endpoint` | Empty | The AI model of the Play UI: an OpenAI-compatible chat completions URL. Empty: no assistant. See [AI keys](#ai-keys). |
+| `ai_model` | Empty | The model name sent to `ai_endpoint`. |
 
 ### Destinations {#destinations}
 
@@ -145,6 +147,27 @@ data is deleted.
 <clickhouse>
     <web_console>
         <sql_console_clear_on_sign_out>all</sql_console_clear_on_sign_out>
+    </web_console>
+</clickhouse>
+```
+
+### AI keys {#ai-keys}
+
+The [AI assistant of the Play UI](/products/web-console/guides/play-ui#ai-assistant) sends its requests from the
+browser to `ai_endpoint`, an OpenAI-compatible chat completions URL (`POST` with `model`, `messages`, and
+`temperature`; the answer in `choices[0].message.content`), with `ai_model` as the model.
+
+The values of the `web_console` section are public: the page reads them before anyone signs in. So the endpoint must not
+need a secret: use a model on your network, such as Ollama (`http://ollama:11434/v1/chat/completions`), or a gateway
+that authenticates by network address. The endpoint must answer the CORS preflight of the page's origin (for Ollama,
+`OLLAMA_ORIGINS`). The question, the statement under the cursor, the last error, and the names and types of the columns
+of a database are sent to it; rows are not.
+
+```xml
+<clickhouse>
+    <web_console>
+        <ai_endpoint>http://ollama.internal:11434/v1/chat/completions</ai_endpoint>
+        <ai_model>qwen2.5-coder:7b</ai_model>
     </web_console>
 </clickhouse>
 ```
