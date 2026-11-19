@@ -44,6 +44,15 @@ data:
             <backup_s3_endpoints></backup_s3_endpoints>
         </web_console>
     </clickhouse>
+  # The first administrator, `default`: named collections, for the Backup Administrator template and S3 destinations.
+  web-console-admin.xml: |
+    <clickhouse>
+        <users>
+            <default>
+                <named_collection_control>1</named_collection_control>
+            </default>
+        </users>
+    </clickhouse>
   # Single sign-on: the token authenticator of kubernetes.sso.yaml, and what the sign-in page offers. The values come
   # from the ConfigMap web-console-sso; without it, the issuer is empty and single sign-on is off.
   sso.xml: |
@@ -103,6 +112,7 @@ spec:
             - {name: data, mountPath: /var/lib/clickhouse}
             - {name: config, mountPath: /etc/clickhouse-server/config.d/web-console.xml, subPath: web-console.xml}
             - {name: config, mountPath: /etc/clickhouse-server/config.d/sso.xml, subPath: sso.xml}
+            - {name: config, mountPath: /etc/clickhouse-server/users.d/web-console-admin.xml, subPath: web-console-admin.xml}
       volumes:
         - name: config
           configMap: {name: web-console-config}

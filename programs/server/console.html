@@ -1012,9 +1012,30 @@ function validateServerURL(value) {
     const normalized = url.origin + url.pathname.replace(/\/+$/, '');
     let warning = null;
     if (url.protocol === 'http:' && !isLocalHost(url.hostname)) {
-        warning = 'This connection is not encrypted (HTTP): the password is sent to the server in clear text.';
+        warning = 'This connection is not encrypted (HTTP): the password is sent to the server in clear text.'
+            + (window.isSecureContext ? '' : ' The browser also keeps single sign-on, encrypting the password of a cluster administrator, '
+                + 'the Copy buttons, and deleting the SQL Console\'s data of a closed session to HTTPS pages. Serve the console over HTTPS.');
     }
     return {url: normalized, origin: url.origin, warning};
+}
+
+/// A random identifier (a version 4 UUID) for the records of the console. `crypto.randomUUID` exists only in a secure
+/// context (HTTPS, or localhost), but the console is also opened over plain HTTP; `crypto.getRandomValues` exists in every
+/// context.
+function newId() {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/// The browser provides `crypto.subtle` only in a secure context: what needs it says so, instead of failing on undefined.
+function requireSecureContext(what) {
+    if (!window.isSecureContext) {
+        throw new Error(`${what} needs the console to be served over HTTPS (or opened on localhost): `
+            + 'the browser provides its cryptography only on secure pages.');
+    }
 }
 
 function isLocalHost(hostname) {
@@ -3986,7 +4007,7 @@ function reviewPlan(plan) {
 
 async function executePlan(plan) {
     const current = session;
-    const correlation_id = plan.correlation_id || crypto.randomUUID();
+    const correlation_id = plan.correlation_id || newId();
     const scope = plan.local_only ? '' : current.admin.scope;
     const items = plan.steps.map(step => h('li', {}, h('span', {className: 'state skipped'}, 'Pending'), ` ${step.description}`));
     const status = h('div', {role: 'status'}, h('span', {className: 'spinner'}), ' Applying…');
@@ -5250,7 +5271,7 @@ function testDirectorySignIn() {
         if (session.admin.can.write_audit) {
             await writeAudit(session, {action: 'test_directory_sign_in', target_type: 'user', target_name: user.value,
                 summary: `Test the sign-in of ${user.value}: ${outcome.ok ? 'accepted' : 'refused'}`},
-            {correlation_id: crypto.randomUUID(), scope: 'local', result: outcome.ok ? 'success' : 'failure', steps: []}, outcome.ok ? '' : outcome.error).catch(() => {});
+            {correlation_id: newId(), scope: 'local', result: outcome.ok ? 'success' : 'failure', steps: []}, outcome.ok ? '' : outcome.error).catch(() => {});
         }
         result.replaceChildren(outcome.ok
             ? h('div', {className: 'message info'}, kvList([['Signed in as', outcome.user], ['Through', storage || 'unknown'],
@@ -5404,7 +5425,7 @@ function ldapUsersBox(page) {
     if (!directories.length || !session.admin.can.read_users) return null;
     const content = h('div', {}, h('span', {className: 'spinner'}));
     adminRows('SELECT name, storage, arraySort(default_roles_list) AS roles FROM system.users WHERE storage IN {s:Array(String)} ORDER BY storage, name',
-        {s: directories.map(d => d.name)}).then(rows => {
+        {s: arrayParam(directories.map(d => d.name))}).then(rows => {
         if (!isCurrent(page)) return;
         content.replaceChildren(rows.length ? dataTable([
             {title: 'User', render: r => adminLink(r.name, 'admin-users', r.name)},
@@ -5615,7 +5636,7 @@ function idpDialog(existing) {
         if (v.groups_claim && !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(v.groups_claim)) return 'Enter the name of the group claim, or leave it empty.';
         const default_roles = v.default_roles.split(',').map(r => r.trim()).filter(Boolean);
         if (default_roles.some(r => !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(r))) return 'Role names are letters, digits, _ and -.';
-        const row = {id: existing ? existing.id : crypto.randomUUID(), kind: 'keycloak', name: v.name, enabled: enabled.input.checked,
+        const row = {id: existing ? existing.id : newId(), kind: 'keycloak', name: v.name, enabled: enabled.input.checked,
             base_url: v.base_url.replace(/\/+$/, ''), realm: v.realm, client_id: v.client_id, scopes: v.scopes.split(/\s+/).join(' '),
             username_claim: v.username_claim, groups_claim: v.groups_claim, role_prefix: v.role_prefix, default_roles,
             /// A test describes the settings it ran with: changed settings need a new one.
@@ -5720,7 +5741,7 @@ async function runIdpConnectionTest(p, container) {
     const test = await idpConnectionTest(p);
     const stored = {ok: test.ok, checks: test.checks, issuer: test.issuer};
     container.replaceChildren(idpTestReport(stored, test.ok ? 'The provider is reachable and set up for the console' : 'The connection test found problems'));
-    const correlation_id = crypto.randomUUID();
+    const correlation_id = newId();
     if (session.admin.can.write_idp) {
         await adminText(idpRowStep({...p, test_result: JSON.stringify(stored), tested_at: test.at.replace('T', ' ').replace('Z', '')}, '').sql).catch(e => {
             container.append(errorBox(e, 'The result could not be stored:'));
@@ -5761,6 +5782,7 @@ async function verifyJwt(token, jwks) {
         ES256: [{name: 'ECDSA', namedCurve: 'P-256'}, {name: 'ECDSA', hash: 'SHA-256'}],
     };
     if (!algorithms[header.alg]) throw new Error(`The token is signed with ${header.alg}, which the console does not accept.`);
+    requireSecureContext('Checking the signature of a token');
     const jwk = (jwks.keys || []).find(k => k.kid === header.kid && (k.use || 'sig') === 'sig');
     if (!jwk) throw new Error(`No signing key ${header.kid} among the provider's keys.`);
     const [import_params, verify_params] = algorithms[header.alg];
@@ -5777,6 +5799,7 @@ function oidcAuthorize(discovery, settings, popup) {
     const nonce = randomToken();
     const verifier = randomToken();
     return (async () => {
+        requireSecureContext('Single sign-on');
         const challenge = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
         const url = new URL(discovery.authorization_endpoint);
         for (const [k, v] of Object.entries({client_id: settings.client_id, response_type: 'code', redirect_uri: oidcRedirectUri(), scope: settings.scopes, state, nonce,
@@ -5883,7 +5906,7 @@ function idpTestSignInDialog(p) {
             const who = outcome.ok ? String(outcome.id[p.username_claim] || '') : '';
             await writeAudit(session, {action: 'test_identity_provider_sign_in', target_type: 'identity_provider', target_name: p.name,
                 summary: `Test a sign-in with ${p.name}: ${outcome.ok ? `accepted, as ${who}` : 'refused'}`, audit_details: {issuer: idpIssuer(p), user: who}},
-            {correlation_id: crypto.randomUUID(), scope: 'local', result: outcome.ok ? 'success' : 'failure', steps: []}, outcome.ok ? '' : outcome.error).catch(() => {});
+            {correlation_id: newId(), scope: 'local', result: outcome.ok ? 'success' : 'failure', steps: []}, outcome.ok ? '' : outcome.error).catch(() => {});
         }
     };
     openDialog(`Test a sign-in with ${p.name}`, [
@@ -7268,7 +7291,7 @@ async function setupDialog() {
         const days = Number(retention.value);
         if (!Number.isInteger(days) || days < 1 || days > 36500) return 'Enter a number of days between 1 and 36500.';
         const quoted = quoteIdentifier(db);
-        const correlation_id = crypto.randomUUID();
+        const correlation_id = newId();
         const seed = POLICY_COMPONENTS.map(component => JSON.stringify({subject_type: 'all', subject: '', component: component.id,
             open: true, view_data: component.kind === 'panel', run_queries: component.kind === 'panel', administer: false}));
         const steps = [
@@ -9539,7 +9562,7 @@ const RUNNING_QUERIES_REFRESH_MS = 5000;
 /// servers}`: with a cluster, `answered` is the number of servers that answered (each one lists its part of the query
 /// that reads the list, which is then left out) and `servers` the number of servers of the cluster.
 async function loadRunningQueries(cluster) {
-    const self = crypto.randomUUID();
+    const self = newId();
     const source = cluster ? `clusterAllReplicas(${quoteIdentifier(cluster)}, system.processes)` : 'system.processes';
     const [result, servers] = await Promise.all([
         runQuery(session, `SELECT hostName() AS host, initial_query_id, query_id, user, initial_user, is_initial_query, elapsed, read_rows,
@@ -9890,12 +9913,28 @@ function dapSelectUsers(spec, users, index) {
     return {matched, excluded};
 }
 
+/// The users no role can be granted to with SQL: those of a read-only user directory (an LDAP server, a configuration
+/// file). Their roles come from the directory (the groups of the role mapping) or from the file. `users`: rows of
+/// `system.users` with `name` and `storage`.
+function dapFixedUsers(users) {
+    return users.filter(u => !['local_directory', 'replicated', 'memory'].includes(u.storage)).map(u => u.name);
+}
+
 /// The entities a rule needs: `{key, kind, ...}` keyed for the ownership table. `owned` (keys this rule already
-/// owns) lets `on_stale: keep` hold what was provisioned for users whose attributes are stale.
-function dapRuleEntities(rule, users, index, classifications, owned) {
+/// owns) lets `on_stale: keep` hold what was provisioned for users whose attributes are stale. `fixed`: the users
+/// of `dapFixedUsers`, which rules that grant a role leave out (a row filter still applies to them).
+function dapRuleEntities(rule, users, index, classifications, owned, fixed = new Set()) {
     const spec = rule.spec;
     const short = dapRuleShort(rule.rule_id);
-    const {matched, excluded} = dapSelectUsers(spec, users, index);
+    let {matched, excluded} = dapSelectUsers(spec, users, index);
+    if (spec.kind !== 'row_filter') {
+        for (const m of matched.filter(m => fixed.has(m.user))) {
+            excluded.push({user: m.user, reason: 'In a read-only user directory (LDAP or a configuration file): no role can be granted to this user with SQL. '
+                + 'Give the role with a group of the directory instead.', hold: false});
+        }
+        matched = matched.filter(m => !fixed.has(m.user));
+        excluded = excluded.map(e => e.hold && fixed.has(e.user) ? {...e, hold: false} : e);
+    }
     const held_entries = excluded.filter(e => e.hold);
     const held = held_entries.map(e => e.user);
     const entities = [];
@@ -10043,8 +10082,9 @@ function dapPlan(desired, observed, owned, scope, restore = false) {
 
 /// The desired entities of every enabled rule. Rules that native controls cannot represent are returned in
 /// `rejected` and contribute nothing.
-function dapDesired(rules, definitions, values, classifications, users, owned, now) {
+function dapDesired(rules, definitions, values, classifications, users, owned, now, fixed = []) {
     const index = dapAttributeIndex(values, definitions, now);
+    const fixed_users = new Set(fixed);
     const desired = [];
     const rejected = [];
     for (const rule of rules.filter(r => r.enabled && !r.deleted)) {
@@ -10054,7 +10094,7 @@ function dapDesired(rules, definitions, values, classifications, users, owned, n
             continue;
         }
         const owned_keys = new Set(owned.filter(o => o.rule_id === rule.rule_id).map(o => o.key));
-        desired.push({rule, ...dapRuleEntities(rule, users, index, classifications, owned_keys)});
+        desired.push({rule, ...dapRuleEntities(rule, users, index, classifications, owned_keys, fixed_users)});
     }
     return {desired, rejected, index};
 }
@@ -10914,7 +10954,7 @@ async function runAccessTest(test) {
         outcome = 'error';
     }
     await adminText(`INSERT INTO ${dapTable('dap_test_runs')} (run_id, test_id, user_name, outcome, observed, path) FORMAT JSONEachRow\n`
-        + JSON.stringify({run_id: crypto.randomUUID(), test_id: test.test_id, user_name: test.user_name, outcome, observed, path: 'execute_as'}));
+        + JSON.stringify({run_id: newId(), test_id: test.test_id, user_name: test.user_name, outcome, observed, path: 'execute_as'}));
     return {outcome, observed};
 }
 
@@ -10945,7 +10985,7 @@ async function accessTestDialog() {
         for (const column of list) if (nameError(column, 'column')) return nameError(column, 'column');
         const expected_rows = rows.value === '' ? null : Number(rows.value);
         if (expected_rows !== null && (!Number.isInteger(expected_rows) || expected_rows < 0)) return 'Enter a whole number of rows, or leave it empty.';
-        const row = {test_id: crypto.randomUUID(), name: name.value.trim(), user_name: user.value, database: state.database, table: state.table, columns: list,
+        const row = {test_id: newId(), name: name.value.trim(), user_name: user.value, database: state.database, table: state.table, columns: list,
             expect: expect.value, expected_rows: expect.value === 'allowed' ? expected_rows : null};
         return {action: 'dap_add_test', target_type: 'access_test', target_name: row.name, summary: `Add the access test ${row.name}`,
             steps: [{description: `Add the test: ${row.user_name} reads ${list.join(', ') || 'count()'} from ${row.database}.${row.table}, expected ${row.expect}`,
@@ -11135,7 +11175,8 @@ async function dapLoadPlanState() {
         adminRows(`SELECT deployment_id, toString(kind) AS kind, scope, rules, steps, toString(result) AS result, verification, created_by,
             formatDateTime(created_at, '%Y-%m-%d %H:%i:%S', 'UTC') AS created_at FROM ${dapTable('dap_deployments')} ORDER BY created_at DESC LIMIT 50`)]);
     const users = access.users.map(u => u.name);
-    const {desired, rejected, index} = dapDesired(rules, attrs.definitions, attrs.values, attrs.classifications, users, owned, Date.now() / 1000);
+    const {desired, rejected, index} = dapDesired(rules, attrs.definitions, attrs.values, attrs.classifications, users, owned, Date.now() / 1000,
+        dapFixedUsers(access.users));
     return {rules, attrs, owned, access, deployments, desired, rejected, index};
 }
 
@@ -11281,11 +11322,11 @@ async function ruleDialog(existing) {
         if (kind.value === 'column_clearance') Object.assign(next, {label: label.value, attribute: clearance.value, values: values.value.split(',').map(v => v.trim()).filter(Boolean)});
         const problem = dapRuleProblem(next, state.attrs.definitions);
         if (problem) return `This rule cannot be represented with native controls: ${problem}`;
-        const rule_id = existing ? existing.rule_id : crypto.randomUUID();
+        const rule_id = existing ? existing.rule_id : newId();
         const row = {rule_id, revision: existing ? existing.revision + 1 : 1, name: name.value.trim(), spec: JSON.stringify(next), enabled: enabled.input.checked, deleted: false,
             note: existing ? 'edited' : 'created'};
         const preview = dapRuleEntities({rule_id, spec: next}, state.access.users.map(u => u.name), state.index, state.attrs.classifications,
-            new Set(state.owned.filter(o => o.rule_id === rule_id).map(o => o.key)));
+            new Set(state.owned.filter(o => o.rule_id === rule_id).map(o => o.key)), new Set(dapFixedUsers(state.access.users)));
         return {action: 'dap_rule_revision', target_type: 'policy_rule', target_name: row.name, summary: `${existing ? 'Change' : 'Create'} the rule ${row.name} (revision ${row.revision})`,
             local_only: true, steps: [{description: `Save revision ${row.revision}: ${ruleSummary(next)}`,
                 sql: `INSERT INTO ${dapTable('dap_rules')} (rule_id, revision, name, spec, enabled, deleted, note) FORMAT JSONEachRow\n${JSON.stringify(row)}`}],
@@ -11366,7 +11407,7 @@ function deploymentsView(state, page) {
 /// A deployment plan: the statements, then the ownership and deployment records, written after the statements
 /// from the outcome of each step, so that only applied changes become owned.
 function deployPlan(state, plan) {
-    const deployment_id = crypto.randomUUID();
+    const deployment_id = newId();
     const scope = session.admin.scope;
     const rules = state.desired.map(d => ({rule_id: d.rule.rule_id, revision: d.rule.revision, name: d.rule.name}));
     const steps = plan.steps.filter(s => s.sql).map(s => ({description: s.description, sql: s.sql, plan_step: s}));
@@ -11444,7 +11485,7 @@ async function verifyDeployment(state) {
         const verification = {checked_at: access.observed_at, host: session.hostname, scope: session.admin.scope || 'local', results,
             coverage: session.admin.scope ? `Checked on ${session.hostname} only; other servers of ${session.admin.scope} are covered by the per-server results of the deployment.` : 'This server.'};
         await adminText(`INSERT INTO ${dapTable('dap_deployments')} (deployment_id, kind, scope, rules, steps, result, verification) FORMAT JSONEachRow\n`
-            + JSON.stringify({deployment_id: crypto.randomUUID(), kind: 'verify', scope: session.admin.scope, rules: JSON.stringify(state.desired.map(d => ({rule_id: d.rule.rule_id, revision: d.rule.revision, name: d.rule.name}))),
+            + JSON.stringify({deployment_id: newId(), kind: 'verify', scope: session.admin.scope, rules: JSON.stringify(state.desired.map(d => ({rule_id: d.rule.rule_id, revision: d.rule.revision, name: d.rule.name}))),
                 steps: '[]', result: ok ? 'success' : 'partial', verification: JSON.stringify(verification)}));
         body.replaceChildren(h('div', {className: `message ${ok ? 'info' : 'warning'}`}, ok ? 'Every generated control is present, and no excluded user keeps the access elsewhere.'
             : 'Some controls are missing, or excluded users keep the access through other grants: revocation is not complete.'),
@@ -12175,7 +12216,7 @@ function bundleDialog(state) {
         adminField('Destination', destination),
         paragraph('The worker makes the bundle when it next runs, and records the outcome here. The destination receives only ciphertext.'),
     ], [button('Cancel', closeDialog), button('Request the bundle', () => {
-        const op_id = crypto.randomUUID();
+        const op_id = newId();
         requestBundleOperation({op_id, kind: 'bundle', destination_id: destination.value,
             artifact: `server/${utcNowCompact().replace(/[^0-9]/g, '').slice(0, 14)}-${op_id.slice(0, 8)}`, parameters: {}},
         'request_server_bundle', `Request a server bundle to ${state.destinations_by_id.get(destination.value).name}`);
@@ -12202,7 +12243,7 @@ function bundleRestoreDialog(state, bundle, mode) {
             error.hidden = false;
             return;
         }
-        requestBundleOperation({op_id: crypto.randomUUID(), kind: 'bundle_restore', base_op_id: bundle.op_id, destination_id: bundle.destination_id, artifact: bundle.artifact,
+        requestBundleOperation({op_id: newId(), kind: 'bundle_restore', base_op_id: bundle.op_id, destination_id: bundle.destination_id, artifact: bundle.artifact,
             parameters: {mode}}, stage ? 'request_server_bundle_staging' : 'request_server_bundle_comparison',
         `${stage ? 'Stage' : 'Compare'} the server bundle ${shortId(bundle.op_id)}`);
     }, {className: stage ? 'primary danger' : 'primary'})]);
@@ -12737,7 +12778,7 @@ async function destinationDialog(state, existing) {
         if (prefix_error) return `Prefix: ${prefix_error}`;
         const databases = allowed.value.split(',').map(s => s.trim()).filter(Boolean);
         for (const db of databases) if (nameError(db, 'database')) return nameError(db, 'database');
-        const id = existing ? existing.id : crypto.randomUUID();
+        const id = existing ? existing.id : newId();
         const row = {id, name: name.value.trim(), description: description.value.trim(), type: type.value, disk: '', named_collection: '', endpoint: '', bucket: '',
             prefix: prefix.value.trim(), credential_ref: '', allow_http: false, enabled: existing ? existing.enabled : false, allowed_databases: databases,
             test_result: existing ? existing.test_result : '', tested_at: existing && existing.tested_at ? existing.tested_at : null};
@@ -12814,7 +12855,7 @@ function removeDestination(state, destination) {
 /// reports them, and removes this test artifact, when it next runs. The result is stored with the destination.
 async function testDestination(state, destination) {
     const admin = session.admin;
-    const test_id = crypto.randomUUID();
+    const test_id = newId();
     const artifact = `_console_test/${test_id}`;
     const results = {write: null, read: null, list: null, delete: null};
     openDialog(`Test ${destination.name}`, [loadingBox('Writing a test backup from the server…')], null);
@@ -12840,7 +12881,7 @@ async function testDestination(state, destination) {
     if (write.ok && admin.can.write_backup_ops) {
         record_steps.push({description: 'Request deletion of the test artifact by the backup worker',
             sql: `INSERT INTO ${quoteIdentifier(admin.db)}.backup_operations (op_id, kind, server, destination_id, artifact, scope, strategy, base_op_id, schedule_id, target, parameters, expected) FORMAT JSONEachRow\n`
-                + JSON.stringify({op_id: crypto.randomUUID(), kind: 'test', server: session.hostname, destination_id: destination.id, artifact, scope: JSON.stringify(op.scope),
+                + JSON.stringify({op_id: newId(), kind: 'test', server: session.hostname, destination_id: destination.id, artifact, scope: JSON.stringify(op.scope),
                     strategy: '', base_op_id: '', schedule_id: '', target: '{}', parameters: JSON.stringify({test_id}), expected: ''})});
     }
     openDialog(`Test ${destination.name}`, [...body, failed ? h('div', {className: 'message error'}, 'The test failed: the destination stays disabled.') : null],
@@ -13017,7 +13058,7 @@ async function scheduleDialog(state, existing) {
             if (!Number.isInteger(v) || v < min || v > max) return `Enter a whole number between ${min} and ${max}.`;
         }
         if (notify.value && !/^[A-Z][A-Z0-9_]{0,63}$/.test(notify.value)) return 'The notification reference is an environment variable name.';
-        const row = {id: existing ? existing.id : crypto.randomUUID(), name: name.value.trim(), enabled: existing ? existing.enabled : true, destination_id: dest.id,
+        const row = {id: existing ? existing.id : newId(), name: name.value.trim(), enabled: existing ? existing.enabled : true, destination_id: dest.id,
             databases: chosen, tables: [], structure_only: structure_only.input.checked, strategy: strategy.value, full_every: Number(full_every.value),
             frequency: frequency.value, minute: Number(minute.value), hour: Number(hour.value), weekday: Number(weekday.value), timezone: timezone.value,
             keep_chains: Number(keep.value), on_missing_base: on_missing.value, verify: verify.input.checked, notify_ref: notify.value,
@@ -13408,7 +13449,7 @@ async function backupWizard(state) {
 
 async function startBackup(state, w, review) {
     const destination = review.destination;
-    const op = {op_id: crypto.randomUUID(), kind: 'backup', destination_id: destination.id, scope: review.scope, strategy: w.strategy, base_op_id: w.base_op_id,
+    const op = {op_id: newId(), kind: 'backup', destination_id: destination.id, scope: review.scope, strategy: w.strategy, base_op_id: w.base_op_id,
         parameters: {server_version: session.version, objects: review.objects, structure_only: review.scope.structure_only}};
     const db_label = scopeDatabases(review.scope).join('_').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40);
     op.artifact = `${db_label}/${utcNowCompact()}-${op.op_id.slice(0, 8)}`;
@@ -13489,7 +13530,7 @@ async function verifyDialog(state, backup) {
 
 async function runVerification(state, backup, mapping) {
     const destination = state.destinations_by_id.get(backup.destination_id);
-    const op = {op_id: crypto.randomUUID(), kind: 'verify', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: false, sql_objects: false},
+    const op = {op_id: newId(), kind: 'verify', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: false, sql_objects: false},
         base_op_id: backup.op_id, target: mapping, parameters: {target_version: session.version, target_host: session.hostname}};
     try {
         await recordOperation(op);
@@ -13555,7 +13596,7 @@ async function deleteBackupDialog(state, backup) {
             error.hidden = false;
             return;
         }
-        const op = {op_id: crypto.randomUUID(), kind: 'delete', destination_id: backup.destination_id, artifact: backup.artifact, scope: backup.scope, base_op_id: backup.op_id};
+        const op = {op_id: newId(), kind: 'delete', destination_id: backup.destination_id, artifact: backup.artifact, scope: backup.scope, base_op_id: backup.op_id};
         try {
             await recordOperation(op);
             await recordBackupEvent(op.op_id, {state: 'queued'});
@@ -13741,7 +13782,7 @@ function dropTargetDialog(db, backup) {
 }
 
 async function startRestore(state, backup, destination, w) {
-    const op = {op_id: crypto.randomUUID(), kind: 'restore', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: w.access_entities, sql_objects: w.sql_objects},
+    const op = {op_id: newId(), kind: 'restore', destination_id: backup.destination_id, artifact: backup.artifact, scope: {...backup.scope, access_entities: w.access_entities, sql_objects: w.sql_objects},
         base_op_id: backup.op_id, target: w.mapping,
         parameters: {target_version: session.version, structure_only: w.structure_only, access_entities: w.access_entities, sql_objects: w.sql_objects}};
     openDialog('Starting the restore', [loadingBox('Submitting…')], null);
@@ -13927,7 +13968,7 @@ function insertStep(table, row, description) {
 
 /// The statements that submit an operation: the operation, its queued state, and optionally a new revision.
 function operationSteps(cluster, kind, parameters, spec, note) {
-    const op_id = crypto.randomUUID();
+    const op_id = newId();
     const steps = [];
     let revision = cluster.revision;
     if (spec) {
@@ -14437,6 +14478,7 @@ async function createClusterWizard(state) {
 
 /// Encrypts a password for the cluster agent with its public key (RSA-OAEP, SHA-256).
 async function encryptForAgent(agent, text) {
+    requireSecureContext('Encrypting a password for the cluster agent');
     const der = Uint8Array.from(atob(agent.data.public_key), c => c.charCodeAt(0));
     const key = await crypto.subtle.importKey('spki', der, {name: 'RSA-OAEP', hash: 'SHA-256'}, false, ['encrypt']);
     const ciphertext = new Uint8Array(await crypto.subtle.encrypt({name: 'RSA-OAEP'}, key, new TextEncoder().encode(text)));
@@ -14451,11 +14493,11 @@ async function submitClusterCreation(state, w) {
     w.admin_password = '';
     w.admin_password_confirm = '';
     {
-        const cluster_id = crypto.randomUUID();
-        const op_id = crypto.randomUUID();
+        const cluster_id = newId();
+        const op_id = newId();
         const spec = {schema: 1, cluster_name: w.provider === 'kubernetes' ? 'default' : w.cluster_name, image: w.image,
-            keeper: {image: w.provider === 'kubernetes' ? w.keeper_image : w.image, members: Array.from({length: w.keepers}, (_, i) => ({node_id: crypto.randomUUID(), name: `keeper${i + 1}`, server_id: i + 1}))},
-            shards: Array.from({length: w.shards}, (_, i) => ({index: i + 1, replicas: Array.from({length: w.replicas}, (_, r) => ({node_id: crypto.randomUUID(), name: `s${i + 1}r${r + 1}`, state: 'active'}))})),
+            keeper: {image: w.provider === 'kubernetes' ? w.keeper_image : w.image, members: Array.from({length: w.keepers}, (_, i) => ({node_id: newId(), name: `keeper${i + 1}`, server_id: i + 1}))},
+            shards: Array.from({length: w.shards}, (_, i) => ({index: i + 1, replicas: Array.from({length: w.replicas}, (_, r) => ({node_id: newId(), name: `s${i + 1}r${r + 1}`, state: 'active'}))})),
             resources: {cpus: w.cpus, memory_mb: w.memory_mb}, storage: {kind: w.provider === 'kubernetes' ? 'kubernetes-volume' : 'local-volume'}, settings: {server: {}, profile: {}},
             security: {admin_user: w.admin_user, service_user: 'console_service', tls: false, network: w.provider === 'kubernetes' ? 'kubernetes' : 'loopback'},
             ...(w.provider === 'kubernetes' ? {kubernetes: {namespace: w.k8s_namespace || `chc-${w.name}`, namespace_mode: w.k8s_namespace_mode, storage_class: w.k8s_storage_class,
@@ -14513,8 +14555,8 @@ function registerClusterDialog(state) {
             if (parsed.error) return `${e}: ${parsed.error}`;
         }
         if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(credential_ref.value)) return 'The credential reference is an environment variable prefix of uppercase letters, digits, and underscores.';
-        const cluster_id = crypto.randomUUID();
-        const op_id = crypto.randomUUID();
+        const cluster_id = newId();
+        const op_id = newId();
         const origins = list.map(e => parseEndpoint(e).origin);
         return {action: 'cluster_register_request', target_type: 'cluster', target_name: name.value, summary: `Register ${name.value}`, local_only: true, correlation_id: op_id,
             steps: [insertStep('clusters', {cluster_id, name: name.value, environment: environment.value, owner: owner.value, description: description.value, provider: 'external',
@@ -14901,7 +14943,7 @@ function k8sReplicasDialog(cluster, delta) {
             const name = `s${sh.index}r${active.length + 1}`;
             const existing = sh.replicas.find(r => r.name === name);
             if (existing) existing.state = 'active';
-            else sh.replicas.push({node_id: crypto.randomUUID(), name, state: 'active'});
+            else sh.replicas.push({node_id: newId(), name, state: 'active'});
             names.push(name);
         } else {
             names.push(active[active.length - 1].name);
@@ -14973,7 +15015,7 @@ function addReplicaDialog(cluster) {
         let n = 1;
         while (used.has(`s${target.index}r${n}`)) n++;
         const name = `s${target.index}r${n}`;
-        target.replicas.push({node_id: crypto.randomUUID(), name, state: 'active'});
+        target.replicas.push({node_id: newId(), name, state: 'active'});
         return operationPlan(cluster, 'add_replica', {spec, parameters: {nodes: [name]}, capability: 'scale', note: `replica ${name} added to shard ${target.index}`,
             summary: `Add replica ${name} to shard ${target.index} of ${cluster.name}`, warning: 'The replica is declared ready only after its replicated tables have caught up and their row counts match a peer.'});
     });
@@ -14994,7 +15036,7 @@ function addShardDialog(cluster) {
         const spec = JSON.parse(JSON.stringify(cluster.spec));
         const index = Math.max(...spec.shards.map(sh => sh.index)) + 1;
         const names = Array.from({length: count}, (_, r) => `s${index}r${r + 1}`);
-        spec.shards.push({index, replicas: names.map(name => ({node_id: crypto.randomUUID(), name, state: 'active'}))});
+        spec.shards.push({index, replicas: names.map(name => ({node_id: newId(), name, state: 'active'}))});
         return operationPlan(cluster, 'add_shard', {spec, parameters: {nodes: names}, capability: 'scale', note: `shard ${index} added`, summary: `Add shard ${index} to ${cluster.name}`,
             warning: 'Existing rows are not moved. The new shard receives new rows routed to it by Distributed tables.'});
     });

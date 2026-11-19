@@ -1,0 +1,20 @@
+<!--
+    Single sign-on of the demo: config.d/sso.xml with the token authenticator at keycloak:29700, because in the demo it
+    shares the network of the Keycloak container (demo/compose.demo.yaml).
+-->
+<clickhouse>
+    <http_authentication_servers>
+        <sso>
+            <uri>http://keycloak:29700/</uri>
+            <connection_timeout_ms>1000</connection_timeout_ms>
+            <receive_timeout_ms>2000</receive_timeout_ms>
+            <send_timeout_ms>1000</send_timeout_ms>
+            <max_tries>2</max_tries>
+        </sso>
+    </http_authentication_servers>
+    <web_console>
+        <sso_name from_env="SSO_NAME"/>
+        <sso_issuer from_env="SSO_ISSUER"/>
+        <sso_client_id from_env="SSO_CLIENT_ID"/>
+    </web_console>
+</clickhouse>

@@ -78,7 +78,7 @@ function log(message, fields = {}) {
 // The access model of the console
 
 /// The functions the worker shares with the console. They are pure: no DOM, no queries.
-const MODEL_FUNCTIONS = ['quoteIdentifier', 'quoteString', 'roleClosure', 'dapGrantLevel', 'dapGrantCovers', 'dapGrantees', 'dapColumnAccess',
+const MODEL_FUNCTIONS = ['dapFixedUsers', 'quoteIdentifier', 'quoteString', 'roleClosure', 'dapGrantLevel', 'dapGrantCovers', 'dapGrantees', 'dapColumnAccess',
     'dapPolicyApplies', 'dapRowFilter', 'dapRuleShort', 'dapValueKey', 'dapAttributeIndex', 'dapRuleProblem', 'dapSelectUsers', 'dapRuleEntities',
     'dapObservedKeys', 'dapCluster', 'dapPlan', 'dapDesired'];
 const MODEL_CONSTANTS = ['DAP_PREFIX', 'DAP_DISABLED_STATUSES'];
@@ -224,7 +224,7 @@ async function loadState() {
         query(`SELECT user_name, attribute, value, source, toUnixTimestamp(observed_at) AS observed_at, updated_by FROM ${table('dap_user_attributes')} FINAL WHERE NOT deleted`),
         query(`SELECT database, table, column, label FROM ${table('dap_classifications')} FINAL WHERE NOT deleted`),
         query(`SELECT key, rule_id, revision FROM ${table('dap_owned')} FINAL WHERE NOT deleted`),
-        query('SELECT name FROM system.users'),
+        query('SELECT name, storage FROM system.users'),
         query('SELECT name FROM system.roles'),
         query('SELECT user_name, role_name, granted_role_name, granted_role_is_default FROM system.role_grants'),
         query('SELECT user_name, role_name, access_type, database, table, column, is_partial_revoke, grant_option FROM system.grants'),
@@ -232,7 +232,7 @@ async function loadState() {
     ]);
     return {rules: rules.map(r => ({rule_id: r.rule_id, revision: r.last_revision, name: r.last_name, spec: JSON.parse(r.last_spec), enabled: r.last_enabled,
         deleted: r.last_deleted, created_by: r.last_created_by})), definitions, values, classifications, owned,
-        users: users.map(u => u.name), observed: {roles, role_grants, grants, policies}};
+        users: users.map(u => u.name), fixed: model.dapFixedUsers(users), observed: {roles, role_grants, grants, policies}};
 }
 
 async function cycle() {
@@ -245,7 +245,8 @@ async function cycle() {
         }
     }
     const state = await loadState();
-    const {desired, rejected} = model.dapDesired(state.rules, state.definitions, state.values, state.classifications, state.users, state.owned, Date.now() / 1000);
+    const {desired, rejected} = model.dapDesired(state.rules, state.definitions, state.values, state.classifications, state.users, state.owned, Date.now() / 1000,
+        state.fixed);
     for (const r of rejected) log('rule not representable', {rule: r.rule.name, problem: r.problem});
     const plan = model.dapPlan(desired, state.observed, state.owned, CLUSTER, false);
     for (const c of plan.conflicts) log('left alone', {key: c.key, reason: c.message});

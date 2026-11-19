@@ -1,0 +1,27 @@
+# The demo on the public address of the host, over HTTPS (demo/setup.sh --public <address>): Caddy obtains and renews
+# a Let's Encrypt certificate for the address (an IP address or a DNS name), and serves
+#
+#   https://<address>/          the web console (/console) and the HTTP interface of ClickHouse
+#   https://<address>:8443/     Keycloak, the issuer of single sign-on
+#   https://<address>:8444/     phpLDAPadmin
+#
+# Ports 80 and 443 must be reachable from the Internet for the certificate (HTTP-01 and TLS-ALPN-01 challenges), and
+# 8443 and 8444 for Keycloak and phpLDAPadmin. demo/state/Caddyfile is written by setup.sh.
+services:
+  caddy:
+    image: caddy:${DEMO_CADDY_VERSION:-2.10.2}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8443:8443"
+      - "8444:8444"
+    volumes:
+      - ./demo/state/Caddyfile:/etc/caddy/Caddyfile:ro
+      # The certificates and the ACME account: keep them, or every restart asks Let's Encrypt again.
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

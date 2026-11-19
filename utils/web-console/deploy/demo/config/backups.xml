@@ -1,0 +1,15 @@
+<!-- A local disk for the backup destinations of the demo (Backup & Restore → Destinations → a disk destination on
+     `backups`). It is in the server's data volume, which the backup worker also mounts, so that it can delete backups. -->
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <backups>
+                <type>local</type>
+                <path>/var/lib/clickhouse/backups/</path>
+            </backups>
+        </disks>
+    </storage_configuration>
+    <backups>
+        <allowed_disk>backups</allowed_disk>
+    </backups>
+</clickhouse>

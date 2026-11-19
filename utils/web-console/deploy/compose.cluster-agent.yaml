@@ -17,7 +17,9 @@ services:
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID in .env: the group ID of /var/run/docker.sock}"
     environment:
-      CLICKHOUSE_URL: http://127.0.0.1:${CONSOLE_HTTP_PORT:-8123}
+      # The server's published address (CONSOLE_BIND of compose.yaml): on the host network, 127.0.0.1 reaches the server
+      # only when it is published there. On Linux, 0.0.0.0 reaches this host as well.
+      CLICKHOUSE_URL: http://${CONSOLE_BIND:-127.0.0.1}:${CONSOLE_HTTP_PORT:-8123}
       CLICKHOUSE_USER: cluster_agent
       CLICKHOUSE_PASSWORD: ${CLUSTER_AGENT_PASSWORD:?set CLUSTER_AGENT_PASSWORD in .env}
       CLUSTER_AGENT_STATE_DIR: ${CLUSTER_AGENT_STATE_DIR:?set CLUSTER_AGENT_STATE_DIR in .env}

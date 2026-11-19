@@ -287,6 +287,41 @@ await test('The worker refuses plain LDAP, an untrusted certificate, and a searc
     check((await departments()).eli === 'marketing', 'a refused import changed the values');
 });
 
+await test('A rule that grants a role leaves directory users out, and its deployment succeeds for the others', async () => {
+    /// eli is a directory user with the department marketing (the previous checks); e2e_marketer is a user created
+    /// with SQL with the same department. ClickHouse cannot grant a role to a user of the read-only LDAP directory.
+    check(await sql('SELECT 1', 'eli', 'Eli-Ldap-Pw-2') === '1', 'eli cannot sign in');   /// the password of the cooldown check
+    for (const statement of ["CREATE USER IF NOT EXISTS e2e_marketer IDENTIFIED BY 'E2e-Marketer-Pw-1'", 'CREATE ROLE IF NOT EXISTS e2e_marketing',
+        `INSERT INTO console_admin.dap_user_attributes (user_name, attribute, value, source, observed_at) VALUES ('e2e_marketer', 'department', 'marketing', 'ldap', now())`,
+        `INSERT INTO console_admin.dap_rules (rule_id, revision, name, spec, enabled, deleted, note) VALUES ('e2e00000-0000-4000-8000-00000000d1d1', 1, 'e2e marketing role',
+            '{"kind":"role_membership","selector":[{"attribute":"department","values":["marketing"]}],"role":"e2e_marketing"}', true, false, 'created')`]) {
+        const result = await sql(statement);
+        check(!code(result), `${statement}: ${result}`);
+    }
+    await page.evaluate(() => { history.pushState(null, '', '/console/admin-data-access?tab=deployments'); dispatchEvent(new PopStateEvent('popstate')); });
+    await until(() => page.evaluate(() => !document.querySelector('#admin-view .spinner')), 30000, 'the page');
+    await view().locator('button', {hasText: 'Deploy'}).first().click();
+    await dialog().locator('.dialog-actions button.primary').last().waitFor();
+    const plan = await dialog().innerText();
+    check(plan.includes('e2e_marketer') && !/e2e_marketing[^\n]*\beli\b/.test(plan), `plan: ${plan.slice(0, 800)}`);
+    await dialog().locator('.dialog-actions button.primary').last().click();
+    await dialog().locator('.dialog-actions button', {hasText: 'Close'}).waitFor({timeout: 60000});
+    const result = await dialog().innerText();
+    await page.evaluate(() => document.getElementById('admin-dialog').close());
+    check(result.includes('Applied.'), `deployment: ${result.slice(0, 800)}`);
+    check(await sql("SELECT groupArray(user_name) FROM system.role_grants WHERE granted_role_name = 'e2e_marketing'") === "['e2e_marketer']", 'the role went to the wrong users');
+    await page.evaluate(() => { history.pushState(null, '', '/console/admin-data-access?tab=rules'); dispatchEvent(new PopStateEvent('popstate')); });
+    await until(() => page.evaluate(() => !document.querySelector('#admin-view .spinner')), 30000, 'the page');
+    const worker = await policyWorker(ldaps);
+    check(!/ACCESS_STORAGE_READONLY|"result":"(partial|failure)"/.test(worker.output), `worker: ${worker.output.slice(-600)}`);
+    /// Cleanup: the rule is deleted, and its role grant removed by the next deployment.
+    await sql(`INSERT INTO console_admin.dap_rules (rule_id, revision, name, spec, enabled, deleted, note) VALUES ('e2e00000-0000-4000-8000-00000000d1d1', 2, 'e2e marketing role',
+        '{"kind":"role_membership","selector":[{"attribute":"department","values":["marketing"]}],"role":"e2e_marketing"}', false, true, 'deleted')`);
+    await policyWorker(ldaps);
+    await sql('DROP USER IF EXISTS e2e_marketer');
+    await sql('DROP ROLE IF EXISTS e2e_marketing');
+});
+
 await test('Users managed here keep working, and a local user of the same name comes first', async () => {
     check(!(await sql("CREATE USER e2e_local IDENTIFIED BY 'E2e-Local-Pw-1'")), 'local user not created');
     check(await sql('SELECT 1', 'e2e_local', 'E2e-Local-Pw-1') === '1', 'a local user cannot sign in');

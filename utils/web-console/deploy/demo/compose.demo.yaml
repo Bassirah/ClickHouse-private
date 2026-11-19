@@ -1,0 +1,83 @@
+# Demo identity services of the web console, next to compose.yaml, compose.sso.yaml, and compose.ldap-attributes.yaml:
+#
+#   keycloak       single sign-on (realm `acme`)
+#   openldap       the directory of directory sign-in and of the user attributes (LDAPS inside the Compose network)
+#   phpldapadmin   a web interface to add and change directory users
+#
+# With one of the two ways to reach them:
+#
+#   compose.demo-public.yaml   HTTPS on the public address of the host, with a Let's Encrypt certificate (Caddy)
+#   compose.demo-local.yaml    on 127.0.0.1 of the host, through an SSH tunnel
+#
+# demo/setup.sh writes the files these services read (under demo/state), and sets COMPOSE_FILE in .env, so that a plain
+# `docker compose` uses every file. See demo/README.md.
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:${DEMO_KEYCLOAK_VERSION:-26.7}
+    restart: unless-stopped
+    # Development mode (an embedded database in the volume): a demo, not a production Keycloak. The realm is imported
+    # when it does not exist yet; later changes in the admin console stay in the volume.
+    command: ["start-dev", "--import-realm", "--http-port=8180"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${DEMO_KEYCLOAK_ADMIN_PASSWORD:?run demo/setup.sh}
+      # The public address of Keycloak, and so the issuer in the tokens.
+      KC_HOSTNAME: ${DEMO_KEYCLOAK_URL:?run demo/setup.sh}
+      # Behind the HTTPS proxy of compose.demo-public.yaml: the scheme and address come from X-Forwarded-*.
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./demo/state/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+      - keycloak-data:/opt/keycloak/data
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  openldap:
+    image: bitnamilegacy/openldap:2.6.8
+    restart: unless-stopped
+    environment:
+      LDAP_ROOT: dc=acme,dc=example
+      LDAP_ADMIN_USERNAME: admin
+      LDAP_ADMIN_PASSWORD: ${DEMO_LDAP_ADMIN_PASSWORD:?run demo/setup.sh}
+      # The tree, the demo users, and the groups: loaded once, into an empty volume.
+      LDAP_CUSTOM_LDIF_DIR: /ldifs
+      LDAP_ENABLE_TLS: "yes"
+      LDAP_TLS_CERT_FILE: /tls/ldap.crt
+      LDAP_TLS_KEY_FILE: /tls/ldap.key
+      LDAP_TLS_CA_FILE: /tls/ca.crt
+    volumes:
+      - ./demo/state/ldap-ldif:/ldifs:ro
+      - ./demo/state/ldap-tls:/tls:ro
+      - openldap-data:/bitnami/openldap
+    healthcheck:
+      test: ["CMD-SHELL", "ldapsearch -x -H ldap://localhost:1389 -D cn=admin,dc=acme,dc=example -w \"$$LDAP_ADMIN_PASSWORD\" -b dc=acme,dc=example -s base > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  phpldapadmin:
+    image: osixia/phpldapadmin:0.9.0
+    restart: unless-stopped
+    environment:
+      # Plain LDAP on the Compose network only; ClickHouse and the access policy worker use LDAPS (port 1636).
+      PHPLDAPADMIN_LDAP_HOSTS: "#PYTHON2BASH:[{'openldap': [{'server': [{'port': 1389}]}, {'login': [{'bind_id': 'cn=admin,dc=acme,dc=example'}]}]}]"
+      PHPLDAPADMIN_HTTPS: "false"
+    depends_on:
+      openldap:
+        condition: service_healthy
+
+  clickhouse:
+    volumes:
+      # Directory sign-in, as generated on Identity Providers → LDAP → Configure LDAP…, with the directory's CA.
+      - ./demo/config/ldap.xml:/etc/clickhouse-server/config.d/ldap.xml:ro
+      - ./demo/state/ldap-tls/ca.crt:/etc/clickhouse-server/ldap/ca.crt:ro
+      # A disk for backup destinations of Backup & Restore.
+      - ./demo/config/backups.xml:/etc/clickhouse-server/config.d/backups.xml:ro
+
+volumes:
+  keycloak-data:
+  openldap-data:

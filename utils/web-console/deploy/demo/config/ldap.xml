@@ -1,0 +1,37 @@
+<clickhouse>
+    <!-- Directory sign-in for the web console: users of the LDAP directory sign in with their directory password.
+         The users of users.xml and those created with SQL keep working.
+         Generated on Identity Providers → LDAP → Configure LDAP… with the server `acme`, the host `openldap`, LDAPS on
+         port 1636, the CA of demo/state/ldap-tls, the default role console_admin_reader, and the groups under
+         ou=groups with the prefix clickhouse- (the group clickhouse-analysts gives the role analysts). -->
+    <ldap_servers>
+        <acme>
+            <host>openldap</host>
+            <port>1636</port>
+            <enable_tls>yes</enable_tls>
+            <tls_minimum_protocol_version>tls1.2</tls_minimum_protocol_version>
+            <tls_require_cert>demand</tls_require_cert>
+            <tls_ca_cert_file>/etc/clickhouse-server/ldap/ca.crt</tls_ca_cert_file>
+            <bind_dn>uid={user_name},ou=users,dc=acme,dc=example</bind_dn>
+            <!-- Reuse a successful password check for this many seconds: the console sends a request for every action,
+                 and without it each one is a bind to the directory. A user disabled in the directory keeps access for at most this long. -->
+            <verification_cooldown>300</verification_cooldown>
+            <operation_timeout>40</operation_timeout>
+            <network_timeout>30</network_timeout>
+            <search_timeout>20</search_timeout>
+        </acme>
+    </ldap_servers>
+    <user_directories>
+        <ldap>
+            <server>acme</server>
+            <roles><console_admin_reader/></roles>
+            <role_mapping>
+                <base_dn>ou=groups,dc=acme,dc=example</base_dn>
+                <scope>subtree</scope>
+                <search_filter>(&amp;(objectClass=groupOfNames)(member={bind_dn}))</search_filter>
+                <attribute>cn</attribute>
+                <prefix>clickhouse-</prefix>
+            </role_mapping>
+        </ldap>
+    </user_directories>
+</clickhouse>
