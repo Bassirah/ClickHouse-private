@@ -25,7 +25,7 @@ how they fit together, see [Architecture](/products/web-console/overview#archite
   | `clickhouse-console-tools-<version>-amd64.tar.gz` | The image `clickhouse-console-tools:<version>`: Node.js with the helper processes. The first argument chooses one of the five processes: `backup-worker`, `cluster-agent`, `access-policy-worker`, `sso-authenticator`, or `recovery-rehearsal`. |
   | `MANIFEST.txt` | The commit, the base image digest, and the image IDs. |
   | `SHA256SUMS` | The checksums of the archives. |
-  | `deploy/` | `compose.yaml` and its override files (`compose.cluster-agent.yaml`, `compose.bundles.yaml`, `compose.rehearsal.yaml`, `compose.ldap-attributes.yaml`, `compose.sso.yaml`), `kubernetes.yaml` and `kubernetes.sso.yaml`, `.env.example`, `config.d/`, `service-accounts.sql`, and `README.md`. |
+  | `deploy/` | `compose.yaml` and its override files (`compose.cluster-agent.yaml`, `compose.bundles.yaml`, `compose.rehearsal.yaml`, `compose.ldap-attributes.yaml`, `compose.sso.yaml`), `kubernetes.yaml` and `kubernetes.sso.yaml`, `.env.example`, `config.d/`, `users.d/`, `service-accounts.sql`, and `README.md`. |
 
   The version is `<ClickHouse release>-console.<commit>`.
 
@@ -105,24 +105,31 @@ The service becomes `healthy` when `/ping` answers. It keeps its data and logs i
    data of a closed session to secure pages: serve the console over HTTPS, or until then open it through an SSH tunnel,
    which the browser treats as local: `ssh -L 8123:<CONSOLE_BIND>:<CONSOLE_HTTP_PORT> <user>@<host>`, then
    `http://localhost:8123/console`.
-2. Under **Administration**, select **Set up** on **Component Access**, **Backup & Restore**, **Clusters**, and the
-   tabs of **Data Access Policies** that you use. This creates the console tables. See
+2. Under **Administration**, select **Set up** on these pages, in this order: **Component Access** first, because
+   the other setups record themselves in its audit log, then **Backup & Restore**, **Clusters**, and **Data Access
+   Policies**. Data Access Policies has one **Set up** for all its tabs. On each page, select **Set up**, then
+   **Review** where a form opens, then **Apply**, and wait for **Applied.** This creates the console tables. See
    [Setting up](/products/web-console/guides/component-access#setting-up).
-3. Create the service accounts of the helpers, as described in
-   [Create the service accounts](/products/web-console/how-to/create-service-accounts):
+3. Create the role of the backup worker: on **Roles & Permissions**, in **Role templates**, select **Create role** on
+   **Backup Administrator**, with the name `backup_admin` and the databases it backs up (on a new server, `default`).
+   Then replace the commented line `-- GRANT <role made with the Backup Administrator template> TO backup_worker;` of
+   `service-accounts.sql` with `GRANT backup_admin TO backup_worker;`.
+4. Create the service accounts of the helpers, as described in
+   [Create the service accounts](/products/web-console/how-to/create-service-accounts). The function `pw` reads a value
+   of `.env`; sourcing `.env` in `sh` fails on values in parentheses:
 
    ```bash
-   set -a; . ./.env; set +a
-   docker compose exec -T clickhouse clickhouse-client --password "$CLICKHOUSE_ADMIN_PASSWORD" \
-       --param_backup_pw="$BACKUP_WORKER_PASSWORD" --param_policy_pw="$ACCESS_POLICY_WORKER_PASSWORD" \
-       --param_agent_pw="$CLUSTER_AGENT_PASSWORD" \
+   pw() { grep "^$1=" .env | cut -d= -f2-; }
+   docker compose exec -T clickhouse clickhouse-client --password "$(pw CLICKHOUSE_ADMIN_PASSWORD)" \
+       --param_backup_pw="$(pw BACKUP_WORKER_PASSWORD)" --param_policy_pw="$(pw ACCESS_POLICY_WORKER_PASSWORD)" \
+       --param_agent_pw="$(pw CLUSTER_AGENT_PASSWORD)" \
        --multiquery < service-accounts.sql
    ```
 
-   Every password in the command must be set in `.env`. For a helper you do not deploy, for example the cluster agent,
-   delete its section of `service-accounts.sql` and its `--param_...` argument instead of passing an empty password.
-   The section of `sso_sync` is commented out: with single sign-on, uncomment it and add
-   `--param_sso_pw="$SSO_SYNC_PASSWORD"`.
+   Every password in the command must be set in `.env`. Leave the `{backup_pw:String}` placeholders in the file: the
+   command fills them in. For a helper you do not deploy, for example the cluster agent, delete its section of
+   `service-accounts.sql` and its `--param_...` argument instead of passing an empty password. The section of
+   `sso_sync` is commented out: with single sign-on, uncomment it and add `--param_sso_pw="$(pw SSO_SYNC_PASSWORD)"`.
 
 ## Start the helpers {#start-the-helpers}
 
@@ -222,3 +229,12 @@ release of the base image when you roll back the console: a version with the sam
 | The helpers do not start | They wait until the server is `healthy`. Check `docker compose logs clickhouse`. |
 | A helper logs an authentication error | Its service account does not exist, or its password differs from `.env`: run `service-accounts.sql` again with the same passwords. |
 | The console cannot be reached from another machine | `CONSOLE_BIND` is `127.0.0.1` by default. Put a TLS-terminating proxy in front, or bind to the host's address behind a firewall. |
+| **Set up** or **Apply** does nothing, and the browser's developer console shows `crypto.randomUUID is not a function` | Images built before 2026-11-19, opened over plain HTTP from another machine. Open the console through the SSH tunnel or over HTTPS. |
+| The backup worker logs `Not enough privileges ... console_admin.backup_events` | `backup_worker` has no role: create `backup_admin` and grant it (step 3 of [Sign in and set up](#sign-in-and-set-up)), then run `service-accounts.sql` again. |
+| The access policy worker logs `Unknown table expression identifier 'console_admin.dap_rules'` | Data Access Policies is not set up. |
+| The Backup Administrator template stops at `Grant NAMED COLLECTION ...` | The server lacks `users.d/web-console-admin.xml`, which gives `default` the control of named collections. |
+| The cluster agent logs `http://127.0.0.1:8123 is unreachable` | The server is published on another address: the agent connects to `CONSOLE_BIND` in packages built from 2026-11-19. |
+
+To remove the deployment and start again, `docker compose -f compose.yaml -f compose.cluster-agent.yaml down -v`
+deletes the containers and the data volumes (every database, user, and console table); `.env` and the files of
+`deploy/` stay.

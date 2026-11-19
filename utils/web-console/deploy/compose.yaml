@@ -28,6 +28,7 @@ services:
       - clickhouse-data:/var/lib/clickhouse
       - clickhouse-logs:/var/log/clickhouse-server
       - ./config.d/web-console.xml:/etc/clickhouse-server/config.d/web-console.xml:ro
+      - ./users.d/web-console-admin.xml:/etc/clickhouse-server/users.d/web-console-admin.xml:ro
     ulimits:
       nofile: {soft: 262144, hard: 262144}
     healthcheck:
