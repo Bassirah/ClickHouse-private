@@ -14,6 +14,7 @@ Contents:
   [Recover a whole server](#recover-a-whole-server), [Directory sign-in (LDAP)](#directory-sign-in-ldap),
   [Single sign-on (Keycloak)](#single-sign-on-keycloak)
 - [Upgrade and rollback](#upgrade-and-rollback)
+- [Demo kit](demo/README.md): Keycloak, an LDAP directory, demo users, and sample data, to demonstrate the console
 
 ## What is in the package
 
