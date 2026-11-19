@@ -1,0 +1,12 @@
+employee_id,name,department,branch,title,salary,email,national_id
+1401,"Müller, Jürgen",finance,berlin,"Manager, Treasury",98000,juergen.mueller@acme.example,NI100401
+1402,"Seán O'Brien",sales,london,"Associate ""Key Accounts""",51000,sean.obrien@acme.example,NI100402
+1403,Ødegaard Åsa,engineering,london,Specialist,73000,asa.odegaard@acme.example,NI100403
+1404,"Zoë Laurent",hr,paris,"Director
+People & Culture",121000,zoe.laurent@acme.example,NI100404
+1405,"François Lefèvre",finance,paris,Senior specialist,88000,francois.lefevre@acme.example,NI100405
+1406,"Nguyễn Thị Lan",engineering,new_york,Specialist,79000,lan.nguyen@acme.example,NI100406
+1407,"Ahmad Al-Rashid",sales,new_york,Manager,93000,ahmad.alrashid@acme.example,NI100407
+1408,"Łukasz Żółć",engineering,berlin,Associate,47000,lukasz.zolc@acme.example,NI100408
+1409,"Søren 🚀 Kierkegaard",hr,london,Specialist,64000,soren.k@acme.example,NI100409
+1410," Leading and trailing spaces ",sales,paris,Associate,45000,spaces@acme.example,NI100410

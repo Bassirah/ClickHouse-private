@@ -15,6 +15,8 @@ Contents:
   [Single sign-on (Keycloak)](#single-sign-on-keycloak)
 - [Upgrade and rollback](#upgrade-and-rollback)
 - [Demo kit](demo/README.md): Keycloak, an LDAP directory, demo users, and sample data, to demonstrate the console
+- [Sample files for Import data](hr-staff-samples/README.md): the demo table `hr.staff` in every import format, and
+  edge cases
 
 ## What is in the package
 

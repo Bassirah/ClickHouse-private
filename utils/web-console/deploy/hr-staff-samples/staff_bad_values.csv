@@ -1,0 +1,4 @@
+employee_id,name,department,branch,title,salary,email,national_id
+1431,Valid Row,finance,london,Associate,50000,valid@acme.example,NI100431
+1432,Salary Is Text,sales,paris,Associate,n/a,text.salary@acme.example,NI100432
+1433,Negative Salary,hr,berlin,Associate,-5,negative@acme.example,NI100433
