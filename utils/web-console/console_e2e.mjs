@@ -1105,6 +1105,87 @@ await test('Play UI: keyboard and narrow screens', async () => {
     await context.close();
 });
 
+await test('Table Editor: the filter of the Data tab, as in the SQL Console, also chooses the rows to update and to delete', async () => {
+    const table = `filter_${Date.now()}`;
+    const ref = `e2e_te.${table}`;
+    await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_te');
+    await adminQuery(`CREATE TABLE ${ref} (id UInt32, city String, country LowCardinality(String), population UInt64, founded Nullable(Date))
+        ENGINE = MergeTree ORDER BY id`);
+    await adminQuery(`INSERT INTO ${ref} VALUES (1, 'Riyadh', 'SA', 7600000, NULL), (2, 'Jeddah', 'SA', 4700000, '2000-01-01'),
+        (3, 'Paris', 'FR', 2100000, NULL), (4, 'Berlin', 'DE', 3600000, '1990-05-01'), (5, 'Dammam', 'SA', 1500000, '1980-01-01')`);
+    const {context, page} = await newContext();
+    await page.goto(`${BASE}/console`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await waitForHome(page);
+    await openTableTab(page, 'e2e_te', table, 'data');
+    await waitUntil(page, () => document.querySelectorAll('#admin-view table[aria-label="Rows"] tbody tr').length === 5);
+    const rows = () => page.evaluate(() => [...document.querySelectorAll('#admin-view table[aria-label="Rows"] tbody tr')].map(tr => tr.cells[1].textContent));
+
+    /// Conditions of a column, a criterion for its type, and a value, combined with AND.
+    await page.click('#admin-view button.filter-toggle');
+    await page.selectOption('#admin-view select[aria-label="Column of filter 1"]', 'country');
+    const criteria = await page.locator('#admin-view select[aria-label="Criteria of filter 1"] option').allInnerTexts();
+    check(criteria.includes('starts with') && criteria.includes('in') && !criteria.includes('is greater than'), `criteria of a string: ${criteria}`);
+    await page.selectOption('#admin-view select[aria-label="Criteria of filter 1"]', 'in');
+    await page.fill('#admin-view input[aria-label="Value of filter 1"]', 'SA, FR');
+    await page.click('#admin-view button:text("Add new filter")');
+    await page.selectOption('#admin-view select[aria-label="Column of filter 2"]', 'population');
+    check((await page.locator('#admin-view select[aria-label="Criteria of filter 2"] option').allInnerTexts()).includes('is greater than'), 'no comparison for a number');
+    await page.selectOption('#admin-view select[aria-label="Criteria of filter 2"]', 'greater');
+    await page.fill('#admin-view input[aria-label="Value of filter 2"]', '2000000');
+    check((await page.textContent('#admin-view .filter-sql')) === "WHERE (`country` IN ('SA', 'FR')) AND (`population` > '2000000')", 'the condition shown');
+    await page.press('#admin-view input[aria-label="Value of filter 2"]', 'Enter');
+    await waitUntil(page, () => document.querySelectorAll('#admin-view table[aria-label="Rows"] tbody tr').length === 3);
+    check(JSON.stringify(await rows()) === '["Riyadh","Jeddah","Paris"]', `filtered rows: ${await rows()}`);
+    check((await page.textContent('#admin-view button.filter-toggle')) === 'Filter (2)', 'the filter button does not show the conditions');
+
+    /// is null takes no value; an incomplete condition is refused.
+    await page.click('#admin-view button:text("Add new filter")');
+    await page.selectOption('#admin-view select[aria-label="Column of filter 3"]', 'founded');
+    await page.selectOption('#admin-view select[aria-label="Criteria of filter 3"]', 'is_null');
+    check(await page.isDisabled('#admin-view input[aria-label="Value of filter 3"]'), 'is null asks for a value');
+    await page.click('#admin-view .row-filter button:text("Apply")');
+    await waitUntil(page, () => document.querySelectorAll('#admin-view table[aria-label="Rows"] tbody tr').length === 2);
+    await page.click('#admin-view button:text("Add new filter")');
+    await page.click('#admin-view .row-filter button:text("Apply")');
+    await page.waitForSelector('#admin-view .message.error:not([hidden])');
+    await page.click('#admin-view button[aria-label="Remove filter 4"]');
+    await page.click('#admin-view button[aria-label="Remove filter 3"]');
+    await page.click('#admin-view .row-filter button:text("Apply")');
+    await waitUntil(page, () => document.querySelectorAll('#admin-view table[aria-label="Rows"] tbody tr').length === 3);
+
+    /// Update matching rows starts from the filter of the Data tab.
+    await page.click('#admin-view button:text("Update matching rows")');
+    await page.waitForSelector('#admin-dialog[open]');
+    check(JSON.stringify(await page.locator('#admin-dialog select[aria-label^="Column of filter"]').evaluateAll(list => list.map(s => s.value))) === '["country","population"]',
+        'the update does not start from the filter');
+    await page.locator('#admin-dialog').getByLabel('Set column').selectOption('city');
+    await page.fill('#admin-dialog input[placeholder^="expression"]', 'upper(city)');
+    await applyTableDialog(page);
+    for (let i = 0; (await adminQuery(`SELECT count() FROM system.mutations WHERE database = 'e2e_te' AND table = '${table}' AND NOT is_done`)) !== '0'; ++i) {
+        if (i > 100) throw new Error('the mutation of the update did not finish');
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    check(await adminQuery(`SELECT groupArray(city) FROM (SELECT city FROM ${ref} ORDER BY id) FORMAT CSV`) === `"['RIYADH','JEDDAH','PARIS','Berlin','Dammam']"`,
+        'the update changed other rows');
+
+    /// Delete matching rows: Clear all shows every row; without a condition, the delete is refused.
+    await page.click('#admin-view .row-filter button:text("Clear all")');
+    await waitUntil(page, () => document.querySelectorAll('#admin-view table[aria-label="Rows"] tbody tr').length === 5);
+    await page.click('#admin-view button:text("Delete matching rows")');
+    await page.waitForSelector('#admin-dialog[open]');
+    await page.click('#admin-dialog button[type="submit"]');
+    await page.waitForSelector('#admin-dialog .message.error:not([hidden])');
+    await page.click('#admin-dialog button:text("Add new filter")');
+    await page.selectOption('#admin-dialog select[aria-label="Column of filter 1"]', 'city');
+    await page.selectOption('#admin-dialog select[aria-label="Criteria of filter 1"]', 'starts_with');
+    await page.fill('#admin-dialog input[aria-label="Value of filter 1"]', 'd');
+    await applyTableDialog(page);
+    check(await adminQuery(`SELECT groupArray(id) FROM (SELECT id FROM ${ref} ORDER BY id) FORMAT CSV`) === '"[1,2,3,4]"', 'the delete removed other rows');
+    await adminQuery(`DROP TABLE ${ref} SYNC`);
+    await context.close();
+});
+
 await test('Table Editor: a dictionary shows its state, reloads, and is dropped with DROP DICTIONARY', async () => {
     const name = `dict_${Date.now()}`;
     await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_te');

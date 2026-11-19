@@ -338,6 +338,21 @@ code { font-family: "Inconsolata", "Cascadia Code", Menlo, Consolas, monospace; 
 .filter-bar :is(input, select) { width: 100%; min-width: 0; }
 .filter-bar .check { flex: none; white-space: nowrap; min-height: 30px; align-items: center; }
 @media (max-width: 900px) { .filter-bar { flex-wrap: wrap; } .filter-bar .field { flex-basis: 10rem; } }
+/* The filter of the Data tab of a table, as the filter of the SQL Console's table view: rows of column, criteria, and
+   value, combined with AND. */
+.row-filter { display: flex; flex-direction: column; gap: 0.5rem; }
+.row-filter .filter-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 0.4rem 0.5rem; align-items: center; }
+.row-filter .filter-grid > .filter-head { font-weight: 600; font-size: 0.85rem; }
+.row-filter .filter-grid :is(input, select) { width: 100%; min-width: 0; }
+.row-filter .filter-grid input:disabled { opacity: 0.55; }
+.row-filter .filter-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+.row-filter .filter-actions .spacer { flex: 1; }
+.row-filter .filter-sql { font-family: var(--mono, monospace); font-size: 0.8rem; color: var(--muted); overflow-wrap: anywhere; }
+/* The filter editor in a dialog: a block of its own, under its label, not in the columns of the fields. */
+.filter-field { display: flex; flex-direction: column; gap: 6px; }
+.filter-field > .label { font-size: 13px; font-weight: 500; }
+.button.filter-toggle[aria-pressed="true"] { border-color: var(--accent, currentColor); }
+@media (max-width: 700px) { .row-filter .filter-grid { grid-template-columns: 1fr 1fr; } .row-filter .filter-grid > .filter-head { display: none; } }
 .field select, .field textarea, .inline-input
 {
     min-height: 2.4rem; padding: 0.4rem 0.65rem; border-radius: 4px; border: 1px solid var(--border);
@@ -8613,6 +8628,175 @@ function dropColumnDialog(ctx, column) {
 
 /// --- Tables: Data ---
 
+/// The criteria of a filter condition, as in the filter of the SQL Console's table view, with the SQL each makes
+/// (`c`: the quoted column, `v`: the value as typed). Values are string literals, which the server converts to the
+/// type of the column. `contains`, `starts with`, and `ends with` match case-insensitively, and the value matches
+/// literally (`%` and `_` are escaped); on a column that is not a string they compare its text (`toString`), which the
+/// SQL Console does not do (`ILIKE` refuses a number or a date).
+const FILTER_CRITERIA = {
+    equals: {label: 'equals', sql: (c, v) => `${c} = ${quoteString(v)}`},
+    not_equals: {label: 'does not equal', sql: (c, v) => `${c} != ${quoteString(v)}`},
+    contains: {label: 'contains', like: v => `%${v}%`},
+    in: {label: 'in', list: true, sql: (c, v) => `${c} IN (${filterList(v).map(quoteString).join(', ')})`},
+    not_in: {label: 'not in', list: true, sql: (c, v) => `${c} NOT IN (${filterList(v).map(quoteString).join(', ')})`},
+    starts_with: {label: 'starts with', like: v => `${v}%`},
+    ends_with: {label: 'ends with', like: v => `%${v}`},
+    greater: {label: 'is greater than', sql: (c, v) => `${c} > ${quoteString(v)}`},
+    less: {label: 'is less than', sql: (c, v) => `${c} < ${quoteString(v)}`},
+    greater_or_equal: {label: 'is greater than or equal to', sql: (c, v) => `${c} >= ${quoteString(v)}`},
+    less_or_equal: {label: 'is less than or equal to', sql: (c, v) => `${c} <= ${quoteString(v)}`},
+    is_null: {label: 'is null', no_value: true, sql: c => `${c} IS NULL`},
+    is_not_null: {label: 'is not null', no_value: true, sql: c => `${c} IS NOT NULL`},
+};
+
+/// The values of `in` and `not in`: separated by commas, as in the SQL Console.
+function filterList(value) {
+    return String(value).split(',').map(item => item.trim()).filter(Boolean);
+}
+
+/// The kind of a column type for its criteria: `string`, `number`, `time`, or `other` (the type without Nullable and
+/// LowCardinality).
+function filterKind(type) {
+    const base = String(type).replace(/^(LowCardinality\()?(Nullable\()?/, '');
+    if (/^(String|FixedString|Enum8|Enum16|Enum)\b/.test(base)) return 'string';
+    if (/^(U?Int\d+|Float\d+|BFloat16|Decimal\d*)\b/.test(base)) return 'number';
+    if (/^(Date|Date32|DateTime|DateTime64|Time|Time64)\b/.test(base)) return 'time';
+    return 'other';
+}
+
+/// The criteria offered for a column type: those of the SQL Console for strings, numbers, and other types, and for
+/// dates and times also the comparisons, to filter a range.
+function filterCriteria(type) {
+    const common = ['equals', 'not_equals', 'contains'];
+    const compare = ['greater', 'less', 'greater_or_equal', 'less_or_equal'];
+    const nulls = ['is_null', 'is_not_null'];
+    return {
+        string: [...common, 'in', 'not_in', 'starts_with', 'ends_with', ...nulls],
+        number: [...common, 'in', 'not_in', ...compare, ...nulls],
+        time: [...common, ...compare, ...nulls],
+        other: [...common, ...nulls],
+    }[filterKind(type)];
+}
+
+/// The WHERE condition of filter conditions `[{column, criterion, value}]` over `columns` (`{name, type}`), each in
+/// parentheses, combined with AND: `(country = 'SA') AND (population > '1000')`. Empty without a condition.
+function filterConditionSQL(columns, conditions) {
+    return conditions.map(condition => {
+        const column = columns.find(c => c.name === condition.column);
+        const criterion = FILTER_CRITERIA[condition.criterion];
+        const quoted = quoteIdentifier(condition.column);
+        if (criterion.like) {
+            const text = filterKind(column ? column.type : '') === 'string' ? quoted : `toString(${quoted})`;
+            return `(${text} ILIKE ${quoteString(criterion.like(String(condition.value).replace(/[\\%_]/g, m => `\\${m}`)))})`;
+        }
+        return `(${criterion.sql(quoted, condition.value)})`;
+    }).join(' AND ');
+}
+
+/// What is wrong with filter conditions, or null: each needs a column of the table, a criterion offered for its type,
+/// and a value unless the criterion takes none.
+function filterProblem(columns, conditions) {
+    for (const [i, condition] of conditions.entries()) {
+        const n = conditions.length > 1 ? ` ${i + 1}` : '';
+        const column = columns.find(c => c.name === condition.column);
+        if (!column) return `Choose the column of filter${n}.`;
+        if (!filterCriteria(column.type).includes(condition.criterion)) return `Choose a criterion of filter${n} for the type ${column.type}.`;
+        const criterion = FILTER_CRITERIA[condition.criterion];
+        if (!criterion.no_value && (criterion.list ? !filterList(condition.value).length : String(condition.value) === '')) {
+            return `Enter the value of filter${n}${criterion.list ? ', separated by commas' : ''}.`;
+        }
+    }
+    return null;
+}
+
+/// The editor of filter conditions: a row per condition with the column (and its type), the criteria of that type, the
+/// value (disabled for is null and is not null), and a button that removes it; then Add new filter and Clear all.
+/// `columns`: `{name, type}`; `initial`: conditions. `options.on_apply` adds Apply, and Enter in a value applies.
+function rowFilterEditor(columns, initial = [], options = {}) {
+    const grid = h('div', {className: 'filter-grid', role: 'group', 'aria-label': 'Filter conditions'});
+    const rows = [];
+    const sql = h('div', {className: 'filter-sql', 'aria-live': 'polite'});
+    const show_sql = () => {
+        const conditions = editor.conditions();
+        sql.textContent = conditions.length && !filterProblem(columns, conditions) ? `WHERE ${filterConditionSQL(columns, conditions)}` : '';
+    };
+    const draw = () => {
+        grid.replaceChildren(...(rows.length ? [h('span', {className: 'filter-head'}, 'Filter by column'), h('span', {className: 'filter-head'}, 'Criteria'),
+            h('span', {className: 'filter-head'}, 'Value'), h('span', {})] : []), ...rows.flatMap((row, i) => {
+            row.column.setAttribute('aria-label', `Column of filter ${i + 1}`);
+            row.criterion.setAttribute('aria-label', `Criteria of filter ${i + 1}`);
+            row.value.setAttribute('aria-label', `Value of filter ${i + 1}`);
+            row.remove.setAttribute('aria-label', `Remove filter ${i + 1}`);
+            return [row.column, row.criterion, row.value, row.remove];
+        }));
+        empty.hidden = rows.length > 0;
+        clear.disabled = !rows.length;
+        show_sql();
+    };
+    const add = (condition = {}) => {
+        const column = select([['', 'Select a column'], ...columns.map(c => [c.name, `${c.name} — ${c.type}`])], condition.column || '');
+        const criterion = h('select', {});
+        const value = textInput(condition.value ?? '');
+        const remove = button('×', () => {
+            rows.splice(rows.indexOf(row), 1);
+            draw();
+        }, {className: 'small'});
+        const row = {column, criterion, value, remove};
+        const fill = wanted => {
+            const type = (columns.find(c => c.name === column.value) || {type: 'String'}).type;
+            const offered = filterCriteria(type);
+            const chosen = offered.includes(wanted) ? wanted : offered[0];
+            criterion.replaceChildren(...offered.map(key => h('option', {value: key, selected: key === chosen}, FILTER_CRITERIA[key].label)));
+            criterion.value = chosen;
+            update();
+        };
+        const update = () => {
+            const spec = FILTER_CRITERIA[criterion.value] || {};
+            value.disabled = !!spec.no_value;
+            if (spec.no_value) value.value = '';
+            value.placeholder = spec.no_value ? '' : spec.list ? 'a, b, c' : 'value';
+            show_sql();
+        };
+        column.addEventListener('change', () => fill(criterion.value));
+        criterion.addEventListener('change', update);
+        value.addEventListener('input', show_sql);
+        if (options.on_apply) value.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); options.on_apply(); } });
+        rows.push(row);
+        fill(condition.criterion || 'equals');
+        return row;
+    };
+    const empty = h('p', {className: 'note'}, 'No filter: every row.');
+    const clear = button('Clear all', () => {
+        rows.splice(0);
+        draw();
+        if (options.on_clear) options.on_clear();
+    }, {className: 'small'});
+    const element = h('div', {className: 'row-filter'}, empty, grid,
+        h('div', {className: 'filter-actions'},
+            button('Add new filter', () => {
+                const row = add();
+                draw();
+                row.column.focus();
+            }, {className: 'small'}),
+            options.on_apply ? button('Apply', () => options.on_apply(), {className: 'small primary'}) : null,
+            h('span', {className: 'spacer'}), clear),
+        sql);
+    const editor = {
+        element,
+        conditions: () => rows.map(row => ({column: row.column.value, criterion: row.criterion.value, value: row.value.value})),
+        problem: () => filterProblem(columns, editor.conditions()),
+        sql: () => filterConditionSQL(columns, editor.conditions()),
+        add: condition => { add(condition); draw(); },
+    };
+    for (const condition of initial) add(condition);
+    draw();
+    return editor;
+}
+
+/// The filter applied on the Data tab of each table (`database\u0000table` -> conditions), for this page load: the tab is
+/// drawn again after each change (an update of the matching rows, for example), and keeps showing the same rows.
+const DATA_FILTERS = new Map();
+
 const DATA_PAGE_SIZES = [['50', '50 rows'], ['100', '100 rows'], ['500', '500 rows']];
 
 /// The rows of a page, as text (`FORMAT JSONCompactStrings`, the text format of each type, which `typedLiteral` reads
@@ -8639,11 +8823,14 @@ const NULL_TEXT = 'ᴺᵁᴸᴸ';
 
 async function renderTableData(container, ctx) {
     ctx.columns = ctx.columns || await loadTableColumns(ctx);
-    const filter = textInput('', {placeholder: 'WHERE condition, for example city = \'Riyadh\'', 'aria-label': 'Filter'});
     const order = select([['', 'No order'], ...ctx.columns.map(column => [column.name, column.name])], '');
     const desc = checkbox('Descending', false);
     const size = select(DATA_PAGE_SIZES, '50');
-    const state = {offset: 0, filter: '', last: null};
+    /// `conditions`: the applied filter conditions (`rowFilterEditor`); `filter`: their WHERE condition.
+    const filter_key = `${ctx.database}\u0000${ctx.table}`;
+    const saved = (DATA_FILTERS.get(filter_key) || []).filter(c => ctx.columns.some(column => column.name === c.column));
+    const state = {offset: 0, filter: saved.length && !filterProblem(ctx.columns, saved) ? filterConditionSQL(ctx.columns, saved) : '',
+        conditions: saved.length && !filterProblem(ctx.columns, saved) ? saved : [], last: null};
     const grid = h('div', {}, loadingBox('Loading…'));
     const pager = h('div', {className: 'actions-row'});
     const editable = ctx.merge_tree;
@@ -8673,34 +8860,66 @@ async function renderTableData(container, ctx) {
             pager.replaceChildren();
         }
     };
+    const filter_error = h('div', {className: 'message error', role: 'alert', hidden: true});
+    const toggle = h('button', {type: 'button', className: 'button filter-toggle', 'aria-expanded': 'false', 'aria-pressed': 'false'}, 'Filter');
+    const panel = h('div', {className: 'box', hidden: true});
+    const show_state = () => {
+        toggle.textContent = state.conditions.length ? `Filter (${state.conditions.length})` : 'Filter';
+        toggle.setAttribute('aria-pressed', String(state.conditions.length > 0));
+    };
     const apply = async () => {
-        const text = filter.value.trim();
+        filter_error.hidden = true;
+        const conditions = editor.conditions();
+        const problem = filterProblem(ctx.columns, conditions);
+        if (problem) {
+            filter_error.textContent = problem;
+            filter_error.hidden = false;
+            return;
+        }
+        const text = filterConditionSQL(ctx.columns, conditions);
         if (text) {
             try {
-                const problem = await validateRowFilter(ctx.database, ctx.table, text);
-                if (problem) {
-                    grid.replaceChildren(h('div', {className: 'message error', role: 'alert'}, problem));
+                const invalid = await validateRowFilter(ctx.database, ctx.table, text);
+                if (invalid) {
+                    filter_error.textContent = invalid;
+                    filter_error.hidden = false;
                     return;
                 }
             } catch (e) {
                 if (e instanceof AdminSessionChanged) return;
-                grid.replaceChildren(errorBox(e, 'The filter is not valid:'));
+                filter_error.textContent = `The filter is not valid: ${e instanceof AdminQueryError ? e.summary : e.message}`;
+                filter_error.hidden = false;
                 return;
             }
         }
         state.filter = text;
+        state.conditions = conditions;
         state.offset = 0;
+        if (conditions.length) DATA_FILTERS.set(filter_key, conditions);
+        else DATA_FILTERS.delete(filter_key);
+        show_state();
         load();
     };
-    filter.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+    const editor = rowFilterEditor(ctx.columns, state.conditions, {on_apply: apply, on_clear: apply});
+    put(panel, editor.element, filter_error);
+    if (state.conditions.length) {
+        panel.hidden = false;
+        toggle.setAttribute('aria-expanded', 'true');
+    }
+    show_state();
+    toggle.addEventListener('click', () => {
+        panel.hidden = !panel.hidden;
+        toggle.setAttribute('aria-expanded', String(!panel.hidden));
+        if (!panel.hidden && !editor.conditions().length) editor.add();
+    });
     for (const control of [order, size]) control.addEventListener('change', () => { state.offset = 0; load(); });
     desc.input.addEventListener('change', load);
     container.append(h('div', {className: 'box'},
-        h('div', {className: 'toolbar'}, adminField('Filter', filter), button('Apply', apply), adminField('Order by', order), desc.element, adminField('Page', size)),
+        h('div', {className: 'toolbar'}, toggle, adminField('Order by', order), desc.element, adminField('Page', size)), panel,
         h('div', {className: 'actions-row'},
             ctx.view || ctx.dictionary ? null : grantButton(ctx, 'insert', 'Insert row', () => insertRowDialog(ctx)),
-            editable ? grantButton(ctx, 'update', 'Update matching rows', () => updateMatchingDialog(ctx, state.filter)) : null,
-            editable ? grantButton(ctx, 'delete', 'Delete matching rows', () => deleteMatchingDialog(ctx, state.filter), {className: 'danger'}) : null),
+            editable ? grantButton(ctx, 'update', 'Update matching rows', () => updateMatchingDialog(ctx, state.conditions)) : null,
+            editable ? grantButton(ctx, 'delete', 'Delete matching rows', () => deleteMatchingDialog(ctx, state.conditions), {className: 'danger'}) : null),
         ctx.view ? h('p', {className: 'note'}, 'A view has no data of its own: the rows are the result of its query.')
             : ctx.dictionary ? h('p', {className: 'note'}, 'The rows of a dictionary come from its source: change them there, then reload it (Overview).')
             : editable ? null : h('p', {className: 'note'}, 'Rows of this engine cannot be changed one by one: only MergeTree tables support UPDATE and DELETE.'),
@@ -8794,38 +9013,49 @@ async function countMatching(ctx, condition) {
     return Number(rows[0].c);
 }
 
-function updateMatchingDialog(ctx, filter) {
-    const condition = textInput(filter, {placeholder: 'WHERE condition'});
+/// The WHERE condition of the rows an update or a delete changes, from the filter editor of its dialog, or a message.
+async function matchingCondition(ctx, editor, what) {
+    const conditions = editor.conditions();
+    if (!conditions.length) return {problem: `Add a filter for the rows to ${what}.`};
+    const problem = filterProblem(ctx.columns, conditions);
+    if (problem) return {problem};
+    const condition = filterConditionSQL(ctx.columns, conditions);
+    const invalid = await validateRowFilter(ctx.database, ctx.table, condition);
+    return invalid ? {problem: invalid} : {condition};
+}
+
+function updateMatchingDialog(ctx, conditions) {
+    const editor = rowFilterEditor(ctx.columns, conditions);
     const column = select(writableColumns(ctx).filter(c => !isKeyColumn(c)).map(c => [c.name, `${c.name} (${c.type})`]), '');
     const expression = textInput('', {placeholder: 'expression, for example upper(city)'});
-    tableFormDialog(`Update rows of ${ctx.table}`, [adminField('Rows', condition, 'The rows to update. Prefilled with the filter of the Data tab.'),
+    tableFormDialog(`Update rows of ${ctx.table}`, [h('div', {className: 'filter-field'}, h('span', {className: 'label'}, 'Rows'), editor.element,
+        h('p', {className: 'note'}, 'The rows to update. Prefilled with the filter of the Data tab.')),
         h('div', {className: 'toolbar'}, adminField('Set column', column), adminField('To', expression)),
         h('p', {className: 'note'}, 'A mutation (ALTER TABLE ... UPDATE), applied in the background: see the Mutations tab. Columns of a key cannot be updated.')],
     'Review', async () => {
-        if (!condition.value.trim()) return 'Enter the condition of the rows to update.';
         if (!expression.value.trim()) return 'Enter the new value, as an expression.';
-        const problem = await validateRowFilter(ctx.database, ctx.table, condition.value.trim());
+        const {problem, condition} = await matchingCondition(ctx, editor, 'update');
         if (problem) return problem;
-        const count = await countMatching(ctx, condition.value.trim());
+        const count = await countMatching(ctx, condition);
         return tablePlan(ctx, 'update_rows', `Update ${count.toLocaleString('en-US')} rows of ${ctx.database}.${ctx.table}`,
             [{description: `Set ${column.value} of the ${count.toLocaleString('en-US')} rows that match`,
-                sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} UPDATE ${quoteIdentifier(column.value)} = ${expression.value.trim()} WHERE ${condition.value.trim()}`}],
-            {warning: count === 0 ? 'No row matches the condition now.' : null});
+                sql: `ALTER TABLE ${tableRef(ctx.database, ctx.table)} UPDATE ${quoteIdentifier(column.value)} = ${expression.value.trim()} WHERE ${condition}`}],
+            {warning: count === 0 ? 'No row matches the filter now.' : null});
     });
 }
 
-function deleteMatchingDialog(ctx, filter) {
-    const condition = textInput(filter, {placeholder: 'WHERE condition'});
-    tableFormDialog(`Delete rows of ${ctx.table}`, [adminField('Rows', condition, 'The rows to delete. Prefilled with the filter of the Data tab.'),
+function deleteMatchingDialog(ctx, conditions) {
+    const editor = rowFilterEditor(ctx.columns, conditions);
+    tableFormDialog(`Delete rows of ${ctx.table}`, [h('div', {className: 'filter-field'}, h('span', {className: 'label'}, 'Rows'), editor.element,
+        h('p', {className: 'note'}, 'The rows to delete. Prefilled with the filter of the Data tab. To delete every row, truncate the table (Overview).')),
         h('p', {className: 'note'}, 'A lightweight delete (DELETE FROM ... WHERE): the rows disappear from queries at once. Only a backup brings them back.')],
     'Review', async () => {
-        if (!condition.value.trim()) return 'Enter the condition of the rows to delete. To delete every row, truncate the table (Overview).';
-        const problem = await validateRowFilter(ctx.database, ctx.table, condition.value.trim());
+        const {problem, condition} = await matchingCondition(ctx, editor, 'delete');
         if (problem) return problem;
-        const count = await countMatching(ctx, condition.value.trim());
+        const count = await countMatching(ctx, condition);
         return tablePlan(ctx, 'delete_rows', `Delete ${count.toLocaleString('en-US')} rows of ${ctx.database}.${ctx.table}`,
-            [{description: `Delete the ${count.toLocaleString('en-US')} rows that match`, sql: `DELETE FROM ${tableRef(ctx.database, ctx.table)} WHERE ${condition.value.trim()}`}],
-            {danger: true, confirm_text: 'Delete', warning: count === 0 ? 'No row matches the condition now.' : null});
+            [{description: `Delete the ${count.toLocaleString('en-US')} rows that match`, sql: `DELETE FROM ${tableRef(ctx.database, ctx.table)} WHERE ${condition}`}],
+            {danger: true, confirm_text: 'Delete', warning: count === 0 ? 'No row matches the filter now.' : null});
     });
 }
 

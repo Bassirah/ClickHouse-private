@@ -55,7 +55,7 @@ The tabs of a table:
 |---|---|---|
 | **Overview** | Engine, rows, size, compression, parts, keys, storage policy, the query of a view, and the views and materialized views that read the table. For a `Replicated` table: its replicas, delay, and queue. | Comment, rename, optimize (with `FINAL` or `DEDUPLICATE`), truncate, drop. |
 | **Columns** | Each column with its keys, type, default, codec, size on disk, compression, and comment, from `system.columns`. | Add a column (with its position), change its type, default, codec, or comment, rename it, drop it. A column of a key cannot be renamed or dropped. |
-| **Data** | The rows, a page at a time, with a filter (a `WHERE` condition) and an order. | Insert a row, edit or delete one row, update or delete the rows that match a condition. |
+| **Data** | The rows, a page at a time, with a filter (as in the SQL Console) and an order. | Insert a row, edit or delete one row, update or delete the rows that match a condition. |
 | **Import data** | A form to load a file from your computer into this table: [Import data](/products/web-console/guides/import-data) with the table already chosen as the destination. | Insert the rows of the file (`INSERT ... FORMAT`), columns matched by name. |
 | **Indexes & projections** | Data skipping indexes (`system.data_skipping_indices`) and projections (`system.projections`), with their size on disk. | Add, build for the existing parts (`MATERIALIZE`), drop. |
 | **Partitions & parts** | Partitions with their parts, rows, and size; detached parts with the reason; the last 200 active parts. | Optimize, freeze, detach, or drop a partition; attach or delete a detached part. |
@@ -117,6 +117,27 @@ URL-encoded, and the tab one of `overview`, `columns`, `data`, `import`, `indexe
 `settings`, and `ddl`. It can be bookmarked or shared: when nobody is signed in, the console asks to sign in, then
 opens the tab.
 
+## Filtering rows {#filtering-rows}
+
+**Filter** on the Data tab works like the filter of a table in the SQL Console. Each condition has a column (listed
+with its type), a criterion offered for that type, and a value; **Add new filter** adds a condition, **×** removes one,
+**Apply** (or Enter in a value) shows the rows that match all the conditions, and **Clear all** removes them. The
+button shows the number of conditions applied, and the editor shows the `WHERE` condition they make.
+
+| Column type | Criteria |
+|---|---|
+| Strings (`String`, `FixedString`, `Enum`) | equals, does not equal, contains, in, not in, starts with, ends with, is null, is not null |
+| Numbers (`Int`, `UInt`, `Float`, `Decimal`) | equals, does not equal, contains, in, not in, is greater than, is less than, is greater than or equal to, is less than or equal to, is null, is not null |
+| Dates and times | equals, does not equal, contains, the four comparisons, is null, is not null |
+| Other types | equals, does not equal, contains, is null, is not null |
+
+- Values are typed as text and sent as string literals, which the server converts to the type of the column: `2026-11-15`
+  for a `Date`, `5000` for a number.
+- **in** and **not in** take values separated by commas.
+- **contains**, **starts with**, and **ends with** ignore case and match the value literally (`%` and `_` are not
+  wildcards); on a column that is not a string, they match its text (`toString`).
+- **is null** and **is not null** take no value.
+
 ## Editing data {#editing-data}
 
 ClickHouse has no row identifier. To change one row, the Data tab reads, with each row of a `MergeTree` table, the
@@ -133,8 +154,9 @@ Values are typed in the text format of their type, such as `2026-11-15` for a `D
 `Array(String)`, and sent as `CAST('<text>' AS <type>)`. A `Nullable` column has a **NULL** box. When inserting, a field
 left empty gets the default of the column.
 
-**Update matching rows** and **Delete matching rows** take a `WHERE` condition, prefilled with the filter of the tab,
-and show in the review how many rows match now. To delete every row, truncate the table instead.
+**Update matching rows** and **Delete matching rows** choose their rows with the same filter editor, prefilled with
+the filter applied on the tab, and show in the review how many rows match now. They need at least one condition: to
+delete every row, truncate the table instead.
 
 ## Limitations {#limitations}
 
