@@ -147,6 +147,42 @@ await test('Submit invalid credentials: login stays with an actionable error', a
     await context.close();
 });
 
+await test('Over plain HTTP from another host: the sign-in warns, and reviewed changes still apply', async () => {
+    /// A name that is not localhost makes the page an insecure context, as on a server opened at http://<address>:8123,
+    /// where the browser has no crypto.randomUUID, crypto.subtle, clipboard, or Web Locks.
+    const port = new URL(BASE).port;
+    const remote = await chromium.launch({args: [`--host-resolver-rules=MAP console.test 127.0.0.1`]});
+    const page = await remote.newPage({viewport: {width: 1400, height: 900}});
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    const base = `http://console.test:${port}`;
+    await page.goto(`${base}/console`);
+    check(await page.evaluate(() => !window.isSecureContext && typeof crypto.randomUUID === 'undefined'), 'the page is a secure context');
+    await waitUntil(page, () => !document.getElementById('login-warning').hidden);
+    const warning = await page.textContent('#login-warning');
+    check(warning.includes('clear text') && warning.includes('Serve the console over HTTPS'), `warning: ${warning}`);
+    await login(page, ADMIN_USER, ADMIN_PASSWORD);
+    await page.waitForURL(`${base}/console/home`);
+
+    /// A reviewed change: its records need an identifier, which no longer comes from crypto.randomUUID.
+    const table = `insecure_${Date.now()}`;
+    await adminQuery('CREATE DATABASE IF NOT EXISTS e2e_te');
+    await page.evaluate(path => navigate(path), '/console/tables');
+    await page.waitForSelector('#admin-view button:text("New table")');
+    await page.click('#admin-view button:text("New table")');
+    await page.waitForSelector('#admin-dialog[open]');
+    await page.selectOption('#admin-dialog select >> nth=0', 'e2e_te');
+    await page.fill('#admin-dialog input[placeholder="table name"]', table);
+    await page.fill('#admin-dialog input[aria-label="Column name"] >> nth=0', 'id');
+    await page.fill('#admin-dialog input[aria-label="Column type"] >> nth=0', 'UInt64');
+    await page.fill('#admin-dialog input[placeholder^="id"]', 'id');
+    await applyTableDialog(page);
+    check(await adminQuery(`EXISTS TABLE e2e_te.${table}`) === '1', 'the table was not created');
+    check(!errors.length, `page errors: ${errors}`);
+    await adminQuery(`DROP TABLE e2e_te.${table}`);
+    await remote.close();
+});
+
 await test('Login: duplicate submissions are prevented while connecting', async () => {
     const {context, page, log} = await newContext();
     await page.route(`${BASE}/?**`, async route => {

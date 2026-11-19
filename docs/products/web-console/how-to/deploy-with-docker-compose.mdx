@@ -100,6 +100,11 @@ The service becomes `healthy` when `/ping` answers. It keeps its data and logs i
 ## Sign in and set up {#sign-in-and-set-up}
 
 1. Open `http://<host>:<CONSOLE_HTTP_PORT>/console`, and sign in as `default` with `CLICKHOUSE_ADMIN_PASSWORD`.
+   Over plain HTTP from another machine, the password crosses the network unencrypted, and the browser keeps single
+   sign-on, encrypting the password of a cluster administrator, the **Copy** buttons, and deleting the SQL Console's
+   data of a closed session to secure pages: serve the console over HTTPS, or until then open it through an SSH tunnel,
+   which the browser treats as local: `ssh -L 8123:<CONSOLE_BIND>:<CONSOLE_HTTP_PORT> <user>@<host>`, then
+   `http://localhost:8123/console`.
 2. Under **Administration**, select **Set up** on **Component Access**, **Backup & Restore**, **Clusters**, and the
    tabs of **Data Access Policies** that you use. This creates the console tables. See
    [Setting up](/products/web-console/guides/component-access#setting-up).

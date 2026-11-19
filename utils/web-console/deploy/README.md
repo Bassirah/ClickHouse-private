@@ -56,7 +56,18 @@ cp .env.example .env && chmod 600 .env    # then fill it in
 docker compose up -d clickhouse
 ```
 
-Open `http://<host>:<CONSOLE_HTTP_PORT>/console` and sign in as `default` with `CLICKHOUSE_ADMIN_PASSWORD`. Then:
+Open `http://<host>:<CONSOLE_HTTP_PORT>/console` and sign in as `default` with `CLICKHOUSE_ADMIN_PASSWORD`.
+
+Over plain HTTP from another machine, the password crosses the network unencrypted, and the browser keeps single
+sign-on, encrypting the password of a cluster administrator, the Copy buttons, and deleting the SQL Console's data of a
+closed session to secure pages: serve the console over HTTPS (a reverse proxy with TLS in front of the HTTP port, or
+`https_port` with a certificate). Until then, open it through an SSH tunnel, which the browser treats as local:
+
+```bash
+ssh -L 8123:<CONSOLE_BIND>:<CONSOLE_HTTP_PORT> <user>@<host>    # then open http://localhost:8123/console
+```
+
+Then:
 
 1. On **Administration**, select **Set up** on Component Access, Backup & Restore, Clusters, and the tabs of Data
    Access Policies that you use. This creates the console tables.
