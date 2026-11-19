@@ -366,6 +366,18 @@ if (SIGN_IN) {
         check((await sql(`SELECT count() FROM system.users WHERE name = '${OUTSIDER}'`)) === '0', `${OUTSIDER}, in no group, was created`);
     });
 
+    await test('The sync revokes only the roles of its groups: a role granted otherwise stays', async () => {
+        /// A role that no group of Keycloak gives, granted by an administrator (or by a policy rule of Data Access
+        /// Policies): the sync, which runs every 5 seconds here, must not revoke it.
+        const role = `e2e_kc_extra_${RUN}`;
+        check(!(await sql(`CREATE ROLE ${role}`)), 'role not created');
+        check(!(await sql(`GRANT ${role} TO ${KC_USER}`)), 'role not granted');
+        await sleep(16000);
+        const roles = await sql(`SELECT arraySort(groupArray(granted_role_name)) FROM system.role_grants WHERE user_name = '${KC_USER}'`);
+        await sql(`DROP ROLE ${role}`);
+        check(roles.includes(role) && roles.includes(ROLE), `roles of ${KC_USER} after the sync: ${roles}`);
+    });
+
     await test('The sign-in page offers Keycloak, and a user signs in with it and gets the role of the group', async () => {
         const popup = await ssoSignIn(KC_USER, KC_PASSWORD);
         await page.waitForSelector('#shell:not([hidden])', {timeout: 60000});

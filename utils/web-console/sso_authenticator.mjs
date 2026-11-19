@@ -19,7 +19,9 @@
 /// groups whose name starts with SSO_ROLE_PREFIX, with a service account of the provider, and
 /// - creates a ClickHouse user `IDENTIFIED WITH http SERVER '<SSO_SERVER_NAME>'` for each enabled member;
 /// - grants the roles of their groups (a group `<prefix><role>` gives the role `<role>`, if it exists) and SSO_DEFAULT_ROLES,
-///   and revokes the roles they no longer get;
+///   and revokes the roles they no longer get. It revokes only the roles it manages, those of the groups `<prefix>*` and
+///   SSO_DEFAULT_ROLES: a role granted otherwise (by an administrator, or by a policy rule of Data Access Policies) is left
+///   alone. A role whose group is deleted from the provider is no longer managed: revoke it from its members by hand;
 /// - drops the users who left every such group, or were disabled or deleted.
 /// It changes only users identified with this authentication server: never a user with a password or another method.
 /// A read that finds no group with the prefix while such users exist is refused, not applied, so that a wrong setting or a
@@ -275,7 +277,9 @@ async function desiredUsers() {
             if (members.length < 500) break;
         }
     }
-    return {users, groups: prefixed.length};
+    /// The roles the sync manages: it revokes no other role, so that it does not undo grants made otherwise.
+    const managed_roles = new Set([...DEFAULT_ROLES, ...prefixed.map(g => g.name.slice(ROLE_PREFIX.length))]);
+    return {users, groups: prefixed.length, managed_roles};
 }
 
 /// The users identified with this authentication server, and their granted roles. system.users does not report the
@@ -304,7 +308,7 @@ async function audit(action, target, summary, result, error = '') {
 }
 
 async function syncOnce() {
-    const [{users: desired, groups}, managed, role_rows, all_users] = await Promise.all([desiredUsers(), managedUsers(), clickhouse('SELECT name FROM system.roles'),
+    const [{users: desired, groups, managed_roles}, managed, role_rows, all_users] = await Promise.all([desiredUsers(), managedUsers(), clickhouse('SELECT name FROM system.roles'),
         clickhouse('SELECT name FROM system.users')]);
     const roles = new Set(role_rows.map(r => r.name));
     /// No group at all is a wrong prefix, a wrong realm, or a service account that cannot see the groups, not users who
@@ -340,7 +344,7 @@ async function syncOnce() {
         }
         const current = managed.get(user);
         const grant = [...wanted].filter(r => !current.has(r));
-        const revoke = [...current].filter(r => !wanted.has(r));
+        const revoke = [...current].filter(r => !wanted.has(r) && managed_roles.has(r));
         if (grant.length) await run(`GRANT ${grant.map(quoteIdentifier).join(', ')} TO ${quoteIdentifier(user)}`, 'sso_grant_roles', user, `Grant ${grant.join(', ')} to ${user}`);
         if (revoke.length) await run(`REVOKE ${revoke.map(quoteIdentifier).join(', ')} FROM ${quoteIdentifier(user)}`, 'sso_revoke_roles', user, `Revoke ${revoke.join(', ')} from ${user}`);
         if (grant.length || revoke.length) await run(`SET DEFAULT ROLE ALL TO ${quoteIdentifier(user)}`, 'sso_default_roles', user, `Enable every role of ${user} by default`);

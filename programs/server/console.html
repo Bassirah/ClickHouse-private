@@ -5425,7 +5425,7 @@ function ldapUsersBox(page) {
     if (!directories.length || !session.admin.can.read_users) return null;
     const content = h('div', {}, h('span', {className: 'spinner'}));
     adminRows('SELECT name, storage, arraySort(default_roles_list) AS roles FROM system.users WHERE storage IN {s:Array(String)} ORDER BY storage, name',
-        {s: directories.map(d => d.name)}).then(rows => {
+        {s: arrayParam(directories.map(d => d.name))}).then(rows => {
         if (!isCurrent(page)) return;
         content.replaceChildren(rows.length ? dataTable([
             {title: 'User', render: r => adminLink(r.name, 'admin-users', r.name)},
@@ -9913,12 +9913,28 @@ function dapSelectUsers(spec, users, index) {
     return {matched, excluded};
 }
 
+/// The users no role can be granted to with SQL: those of a read-only user directory (an LDAP server, a configuration
+/// file). Their roles come from the directory (the groups of the role mapping) or from the file. `users`: rows of
+/// `system.users` with `name` and `storage`.
+function dapFixedUsers(users) {
+    return users.filter(u => !['local_directory', 'replicated', 'memory'].includes(u.storage)).map(u => u.name);
+}
+
 /// The entities a rule needs: `{key, kind, ...}` keyed for the ownership table. `owned` (keys this rule already
-/// owns) lets `on_stale: keep` hold what was provisioned for users whose attributes are stale.
-function dapRuleEntities(rule, users, index, classifications, owned) {
+/// owns) lets `on_stale: keep` hold what was provisioned for users whose attributes are stale. `fixed`: the users
+/// of `dapFixedUsers`, which rules that grant a role leave out (a row filter still applies to them).
+function dapRuleEntities(rule, users, index, classifications, owned, fixed = new Set()) {
     const spec = rule.spec;
     const short = dapRuleShort(rule.rule_id);
-    const {matched, excluded} = dapSelectUsers(spec, users, index);
+    let {matched, excluded} = dapSelectUsers(spec, users, index);
+    if (spec.kind !== 'row_filter') {
+        for (const m of matched.filter(m => fixed.has(m.user))) {
+            excluded.push({user: m.user, reason: 'In a read-only user directory (LDAP or a configuration file): no role can be granted to this user with SQL. '
+                + 'Give the role with a group of the directory instead.', hold: false});
+        }
+        matched = matched.filter(m => !fixed.has(m.user));
+        excluded = excluded.map(e => e.hold && fixed.has(e.user) ? {...e, hold: false} : e);
+    }
     const held_entries = excluded.filter(e => e.hold);
     const held = held_entries.map(e => e.user);
     const entities = [];
@@ -10066,8 +10082,9 @@ function dapPlan(desired, observed, owned, scope, restore = false) {
 
 /// The desired entities of every enabled rule. Rules that native controls cannot represent are returned in
 /// `rejected` and contribute nothing.
-function dapDesired(rules, definitions, values, classifications, users, owned, now) {
+function dapDesired(rules, definitions, values, classifications, users, owned, now, fixed = []) {
     const index = dapAttributeIndex(values, definitions, now);
+    const fixed_users = new Set(fixed);
     const desired = [];
     const rejected = [];
     for (const rule of rules.filter(r => r.enabled && !r.deleted)) {
@@ -10077,7 +10094,7 @@ function dapDesired(rules, definitions, values, classifications, users, owned, n
             continue;
         }
         const owned_keys = new Set(owned.filter(o => o.rule_id === rule.rule_id).map(o => o.key));
-        desired.push({rule, ...dapRuleEntities(rule, users, index, classifications, owned_keys)});
+        desired.push({rule, ...dapRuleEntities(rule, users, index, classifications, owned_keys, fixed_users)});
     }
     return {desired, rejected, index};
 }
@@ -11158,7 +11175,8 @@ async function dapLoadPlanState() {
         adminRows(`SELECT deployment_id, toString(kind) AS kind, scope, rules, steps, toString(result) AS result, verification, created_by,
             formatDateTime(created_at, '%Y-%m-%d %H:%i:%S', 'UTC') AS created_at FROM ${dapTable('dap_deployments')} ORDER BY created_at DESC LIMIT 50`)]);
     const users = access.users.map(u => u.name);
-    const {desired, rejected, index} = dapDesired(rules, attrs.definitions, attrs.values, attrs.classifications, users, owned, Date.now() / 1000);
+    const {desired, rejected, index} = dapDesired(rules, attrs.definitions, attrs.values, attrs.classifications, users, owned, Date.now() / 1000,
+        dapFixedUsers(access.users));
     return {rules, attrs, owned, access, deployments, desired, rejected, index};
 }
 
@@ -11308,7 +11326,7 @@ async function ruleDialog(existing) {
         const row = {rule_id, revision: existing ? existing.revision + 1 : 1, name: name.value.trim(), spec: JSON.stringify(next), enabled: enabled.input.checked, deleted: false,
             note: existing ? 'edited' : 'created'};
         const preview = dapRuleEntities({rule_id, spec: next}, state.access.users.map(u => u.name), state.index, state.attrs.classifications,
-            new Set(state.owned.filter(o => o.rule_id === rule_id).map(o => o.key)));
+            new Set(state.owned.filter(o => o.rule_id === rule_id).map(o => o.key)), new Set(dapFixedUsers(state.access.users)));
         return {action: 'dap_rule_revision', target_type: 'policy_rule', target_name: row.name, summary: `${existing ? 'Change' : 'Create'} the rule ${row.name} (revision ${row.revision})`,
             local_only: true, steps: [{description: `Save revision ${row.revision}: ${ruleSummary(next)}`,
                 sql: `INSERT INTO ${dapTable('dap_rules')} (rule_id, revision, name, spec, enabled, deleted, note) FORMAT JSONEachRow\n${JSON.stringify(row)}`}],

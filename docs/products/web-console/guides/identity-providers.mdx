@@ -288,7 +288,9 @@ confidential client of the provider that can read users and groups, every interv
 - creates a user `IDENTIFIED WITH http SERVER 'sso'` for each enabled member of the groups `clickhouse-<role>` (the
   prefix is `SSO_ROLE_PREFIX`);
 - grants the roles of their groups and the default roles, and revokes the roles they no longer get; a role that does
-  not exist is skipped;
+  not exist is skipped. It revokes only the roles it manages, those of the groups `clickhouse-*` and the default roles:
+  a role granted otherwise, by an administrator or by a policy rule of Data Access Policies, stays. A role whose group
+  is deleted from the provider is no longer managed: revoke it from its members by hand;
 - drops the users who left every such group, or were disabled or deleted.
 
 It changes only the users identified with this authentication server, never a user with a password or another method,

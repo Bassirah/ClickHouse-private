@@ -235,7 +235,12 @@ For each user of the server, a rule decides:
 - A user listed in **Exceptions** gets nothing from the rule, not even the policy that shows no row.
 - A user who has none of the selector's attributes, or whose fresh values do not satisfy the selector, is not in scope.
 - A user in scope whose attribute is missing or not trusted is excluded. With **Revoke**, what the rule gave is removed, and a row filter rule gives the user the policy that shows no row, because without any policy the user would read every row. With **Keep**, what was provisioned from the last known value stays until the value is fresh again; nothing new is provisioned from a stale value, and a missing value is not held.
+- For **Grant a role** and **Columns of a label need a clearance**, a user of a read-only user directory (an LDAP server, or a configuration file such as `users.xml`) is excluded: ClickHouse cannot grant a role to such a user with SQL. Give the role with a group of the directory instead (the role mapping of directory sign-in). A row filter rule still applies to these users.
 - Every other user in scope is matched.
+
+<Warning>
+A user of an LDAP directory exists on the server only from its first sign-in after the server starts. Until the access policy worker's next cycle after that sign-in (at most its interval, 60 seconds by default), no row policy of a row filter rule names the user, and the user reads the rows its grants allow without the filter. Where that matters, give directory users access to the table only through a role that is not granted before the filter applies.
+</Warning>
 
 <Warning>
 A rule with an empty **Users** selector has every user of the server in scope. For a row filter rule, every user without a trusted value of the attribute, including administrators and service accounts, gets the policy `dap_<rule>_none` and reads no row of the table. Select the users with a condition, for example `department = Finance, Sales`.
