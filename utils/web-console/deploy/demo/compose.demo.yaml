@@ -1,28 +1,31 @@
 # Demo identity services of the web console, next to compose.yaml, compose.sso.yaml, and compose.ldap-attributes.yaml:
 #
-#   keycloak       single sign-on (realm `acme`), on http://localhost:8180 of the host
+#   keycloak       single sign-on (realm `acme`)
 #   openldap       the directory of directory sign-in and of the user attributes (LDAPS inside the Compose network)
-#   phpldapadmin   a web interface to add and change directory users, on http://localhost:8380 of the host
+#   phpldapadmin   a web interface to add and change directory users
+#
+# With one of the two ways to reach them:
+#
+#   compose.demo-public.yaml   HTTPS on the public address of the host, with a Let's Encrypt certificate (Caddy)
+#   compose.demo-local.yaml    on 127.0.0.1 of the host, through an SSH tunnel
 #
 # demo/setup.sh writes the files these services read (under demo/state), and sets COMPOSE_FILE in .env, so that a plain
-# `docker compose` uses every file. See demo/README.md. Every port is published on 127.0.0.1 only: open them through an
-# SSH tunnel.
+# `docker compose` uses every file. See demo/README.md.
 services:
   keycloak:
     image: quay.io/keycloak/keycloak:${DEMO_KEYCLOAK_VERSION:-26.7}
     restart: unless-stopped
-    # Development mode (HTTP, an embedded database in the volume): a demo, not a production Keycloak. The realm is
-    # imported when it does not exist yet; later changes in the admin console stay in the volume.
+    # Development mode (an embedded database in the volume): a demo, not a production Keycloak. The realm is imported
+    # when it does not exist yet; later changes in the admin console stay in the volume.
     command: ["start-dev", "--import-realm", "--http-port=8180"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${DEMO_KEYCLOAK_ADMIN_PASSWORD:?run demo/setup.sh}
-      # The issuer in the tokens, the same for the browser (through the tunnel) and for the token authenticator, which
-      # shares this container's network: plain HTTP is accepted only on localhost.
-      KC_HOSTNAME: http://localhost:8180
+      # The public address of Keycloak, and so the issuer in the tokens.
+      KC_HOSTNAME: ${DEMO_KEYCLOAK_URL:?run demo/setup.sh}
+      # Behind the HTTPS proxy of compose.demo-public.yaml: the scheme and address come from X-Forwarded-*.
+      KC_PROXY_HEADERS: xforwarded
       KC_HEALTH_ENABLED: "true"
-    ports:
-      - "127.0.0.1:8180:8180"
     volumes:
       - ./demo/state/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
       - keycloak-data:/opt/keycloak/data
@@ -32,15 +35,6 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
-
-  # In the network of Keycloak, so that the issuer http://localhost:8180 is Keycloak for it too. The server reaches it
-  # at http://keycloak:29700 (demo/config/sso.xml). Only "started": the server depends on the authenticator, and must
-  # start even when Keycloak does not; the authenticator restarts until Keycloak answers.
-  sso-authenticator:
-    network_mode: service:keycloak
-    depends_on:
-      keycloak:
-        condition: service_started
 
   openldap:
     image: bitnamilegacy/openldap:2.6.8
@@ -72,16 +66,12 @@ services:
       # Plain LDAP on the Compose network only; ClickHouse and the access policy worker use LDAPS (port 1636).
       PHPLDAPADMIN_LDAP_HOSTS: "#PYTHON2BASH:[{'openldap': [{'server': [{'port': 1389}]}, {'login': [{'bind_id': 'cn=admin,dc=acme,dc=example'}]}]}]"
       PHPLDAPADMIN_HTTPS: "false"
-    ports:
-      - "127.0.0.1:8380:80"
     depends_on:
       openldap:
         condition: service_healthy
 
   clickhouse:
     volumes:
-      # Replaces config.d/sso.xml of compose.sso.yaml (the same target): the authenticator is at keycloak:29700.
-      - ./demo/config/sso.xml:/etc/clickhouse-server/config.d/sso.xml:ro
       # Directory sign-in, as generated on Identity Providers → LDAP → Configure LDAP…, with the directory's CA.
       - ./demo/config/ldap.xml:/etc/clickhouse-server/config.d/ldap.xml:ro
       - ./demo/state/ldap-tls/ca.crt:/etc/clickhouse-server/ldap/ca.crt:ro

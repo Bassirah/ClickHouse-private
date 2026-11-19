@@ -3,20 +3,43 @@
 # sign-on, an OpenLDAP directory for directory sign-in and user attributes, phpLDAPadmin to manage the directory, demo
 # users, groups, roles, and data, and a disk for backups. See demo/README.md.
 #
-#   cd deploy && sudo demo/setup.sh
+#   cd deploy && sudo demo/setup.sh --public <address>   # HTTPS on the public IP address or DNS name of the host
+#   cd deploy && sudo demo/setup.sh --local              # on 127.0.0.1 of the host, through an SSH tunnel
 #
-# It can run again: the passwords, the certificates, and the data are kept; the demo users get their passwords again.
-# Ports, all on 127.0.0.1 of the host: Keycloak 8180, phpLDAPadmin 8380.
+# --public: Caddy serves the console on https://<address>/console, Keycloak on https://<address>:8443, and phpLDAPadmin
+# on https://<address>:8444, with a Let's Encrypt certificate (ports 80, 443, 8443, and 8444 must be reachable), and the
+# plain HTTP and native ports of ClickHouse move to 127.0.0.1 (CONSOLE_BIND).
+# --local: the console on http://localhost:8123, Keycloak on http://localhost:8180, phpLDAPadmin on http://localhost:8380
+# of the computer with the tunnel.
+#
+# It can run again, without an option to keep the way chosen before: the passwords, the certificates, the data, and the
+# changes made in Keycloak and in the directory are kept; the demo users get their passwords again.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 DEMO=demo
 STATE=$DEMO/state
-# The port of the console on the computer of the demo (the SSH tunnel): the redirect URI of the Keycloak client.
-CONSOLE_PORT=${DEMO_CONSOLE_PORT:-8123}
 BASE_DN=dc=acme,dc=example
 
 die() { echo "setup.sh: $*" >&2; exit 1; }
+[ -f .env ] || die "run it in the deploy directory of an installed console (no .env)"
+previous=$(grep '^DEMO_PUBLIC_HOST=' .env | cut -d= -f2- || true)
+case "${1:-}" in
+    --public) [ -n "${2:-}" ] || die "--public needs the public IP address or DNS name of this host"; PUBLIC_HOST=$2 ;;
+    --local) PUBLIC_HOST= ;;
+    '') PUBLIC_HOST=$previous ;;
+    *) die "usage: demo/setup.sh [--public <address> | --local]" ;;
+esac
+if [ -n "$PUBLIC_HOST" ]; then
+    CONSOLE_URL=https://$PUBLIC_HOST
+    KEYCLOAK_URL=https://$PUBLIC_HOST:8443
+    LDAPADMIN_URL=https://$PUBLIC_HOST:8444
+else
+    # The port of the console on the computer with the tunnel: the redirect URI of the Keycloak client.
+    CONSOLE_URL=http://localhost:${DEMO_CONSOLE_PORT:-8123}
+    KEYCLOAK_URL=http://localhost:8180
+    LDAPADMIN_URL=http://localhost:8380
+fi
 pw() { grep "^$1=" .env | cut -d= -f2-; }
 set_env() {
     if grep -q "^$1=" .env; then
@@ -28,17 +51,9 @@ set_env() {
     fi
 }
 
-[ -f .env ] || die "run it in the deploy directory of an installed console (no .env)"
 [ "$(id -u)" = 0 ] || die "run it as root: it sets the owners of the files the containers read"
 command -v openssl > /dev/null || die "openssl is needed"
 docker compose version > /dev/null || die "Docker Compose v2 is needed"
-
-admin_sql() {
-    docker compose exec -T clickhouse clickhouse-client --password "$(pw CLICKHOUSE_ADMIN_PASSWORD)" "$@"
-}
-docker compose up -d --wait clickhouse > /dev/null 2>&1 || die "the server does not start: see docker compose logs clickhouse"
-[ "$(admin_sql -q "SELECT count() FROM system.roles WHERE name = 'console_admin_reader'" 2> /dev/null)" = 1 ] \
-    || die "the server is not running, or Component Access is not set up (README.md, step 6)"
 
 mkdir -p "$STATE"/keycloak "$STATE"/ldap-tls "$STATE"/ldap-ldif sso ldap
 chmod 700 "$STATE"
@@ -226,10 +241,9 @@ cat > "$STATE/keycloak/realm.json" <<EOF
   "clients": [{
     "clientId": "clickhouse-console", "name": "ClickHouse web console", "enabled": true, "publicClient": true, "protocol": "openid-connect",
     "standardFlowEnabled": true, "implicitFlowEnabled": false, "directAccessGrantsEnabled": false, "serviceAccountsEnabled": false,
-    "redirectUris": ["http://localhost:$CONSOLE_PORT/console/oidc-callback", "http://127.0.0.1:$CONSOLE_PORT/console/oidc-callback"],
+    "redirectUris": ["$CONSOLE_URL/console/oidc-callback"],
     "webOrigins": ["+"],
-    "attributes": {"pkce.code.challenge.method": "S256",
-      "post.logout.redirect.uris": "http://localhost:$CONSOLE_PORT/console/login##http://127.0.0.1:$CONSOLE_PORT/console/login"},
+    "attributes": {"pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "$CONSOLE_URL/console/login"},
     "protocolMappers": [
       {"name": "groups", "protocol": "openid-connect", "protocolMapper": "oidc-group-membership-mapper",
        "config": {"claim.name": "groups", "full.path": "false", "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true"}},
@@ -258,9 +272,18 @@ chmod 700 sso ldap && chmod 600 sso/sync-secret ldap/password && chmod 644 ldap/
 files=compose.yaml
 [ -n "$(pw DOCKER_GID)" ] && files=$files:compose.cluster-agent.yaml
 files=$files:compose.sso.yaml:compose.ldap-attributes.yaml:$DEMO/compose.demo.yaml
+if [ -n "$PUBLIC_HOST" ]; then
+    files=$files:$DEMO/compose.demo-public.yaml
+    # Only Caddy is public: the plain HTTP and native ports of ClickHouse are for this host (and SSH tunnels).
+    set_env CONSOLE_BIND 127.0.0.1
+else
+    files=$files:$DEMO/compose.demo-local.yaml
+fi
 set_env COMPOSE_FILE "$files"
+set_env DEMO_PUBLIC_HOST "$PUBLIC_HOST"
+set_env DEMO_KEYCLOAK_URL "$KEYCLOAK_URL"
 set_env SSO_NAME Keycloak
-set_env SSO_ISSUER http://localhost:8180/realms/acme
+set_env SSO_ISSUER "$KEYCLOAK_URL/realms/acme"
 set_env SSO_CLIENT_ID clickhouse-console
 set_env SSO_SYNC_CLIENT_ID clickhouse-sso-sync
 set_env SSO_SYNC_PASSWORD "$SSO_SYNC_PASSWORD"
@@ -275,6 +298,65 @@ set_env LDAP_ATTRIBUTES_MAP department=departmentNumber,branch=l
 set_env DEMO_KEYCLOAK_ADMIN_PASSWORD "$KEYCLOAK_ADMIN"
 set_env DEMO_LDAP_ADMIN_PASSWORD "$LDAP_ADMIN"
 
+# --- Caddy (--public): HTTPS for the console, Keycloak, and phpLDAPadmin. Let's Encrypt issues certificates for IP
+# addresses only with its short-lived profile (about 6 days, renewed by Caddy), and clients send no server name (SNI)
+# for an IP address, hence default_sni.
+
+if [ -n "$PUBLIC_HOST" ]; then
+    if [[ "$PUBLIC_HOST" =~ ^[0-9.]+$ || "$PUBLIC_HOST" == *:* ]]; then
+        global="default_sni $PUBLIC_HOST"
+        tls='tls {
+		issuer acme {
+			profile shortlived
+		}
+	}'
+    else
+        global='' tls=''
+    fi
+    cat > "$STATE/Caddyfile" <<END_OF_CADDYFILE
+{
+	$global
+}
+
+(certificate) {
+	$tls
+}
+
+# The console and the HTTP interface of ClickHouse; the address alone opens the console.
+https://$PUBLIC_HOST {
+	import certificate
+	@home {
+		method GET
+		path /
+		expression {query} == ""
+	}
+	redir @home /console 302
+	reverse_proxy clickhouse:8123 {
+		flush_interval -1
+	}
+}
+
+https://$PUBLIC_HOST:8443 {
+	import certificate
+	reverse_proxy keycloak:8180
+}
+
+https://$PUBLIC_HOST:8444 {
+	import certificate
+	reverse_proxy phpldapadmin:80
+}
+END_OF_CADDYFILE
+    chmod 644 "$STATE/Caddyfile"
+fi
+
+admin_sql() {
+    docker compose exec -T clickhouse clickhouse-client --password "$(pw CLICKHOUSE_ADMIN_PASSWORD)" "$@"
+}
+docker compose up -d --wait clickhouse > /dev/null 2>&1 || die "the server does not start: see docker compose logs clickhouse"
+[ "$(admin_sql -q "SELECT count() FROM system.roles WHERE name = 'console_admin_reader'" 2> /dev/null)" = 1 ] \
+    || die "the server is not running, or Component Access is not set up (README.md, step 6)"
+
+
 # --- Data, roles, and the account of the user sync, before the services that use them start.
 
 echo "Creating the demo data, the roles, and the account sso_sync"
@@ -285,7 +367,15 @@ if [ "$(admin_sql -q "SELECT count() FROM system.roles WHERE name = 'backup_admi
 fi
 
 echo "Starting the services (Keycloak takes about a minute)"
-docker compose up -d --wait
+docker compose up -d --wait --remove-orphans
+
+# --- The client of the console in Keycloak: the addresses of the console, also when the realm existed already.
+
+kc() { docker compose exec -T keycloak /opt/keycloak/bin/kcadm.sh "$@" --config /tmp/kcadm.config; }
+kc config credentials --server http://localhost:8180 --realm master --user admin --password "$KEYCLOAK_ADMIN" > /dev/null
+client=$(kc get clients -r acme -q clientId=clickhouse-console --fields id --format csv --noquotes | tr -d '\r')
+printf '{"redirectUris": ["%s/console/oidc-callback"], "webOrigins": ["+"], "attributes": {"post.logout.redirect.uris": "%s/console/login"}}' \
+    "$CONSOLE_URL" "$CONSOLE_URL" | kc update "clients/$client" -r acme --merge -f -
 
 # --- Passwords of the directory: the reader account and the demo users.
 
@@ -300,16 +390,21 @@ docker compose restart access-policy-worker > /dev/null 2>&1
 echo "Checking single sign-on"
 docker compose run --rm --no-deps sso-authenticator sso-authenticator --check-config
 
+if [ -n "$PUBLIC_HOST" ]; then
+    access="Open the addresses below in a browser, from anywhere."
+else
+    access="Tunnel from your computer, then open the addresses below:
+  ssh -L ${CONSOLE_URL##*:}:$(pw CONSOLE_BIND):$(pw CONSOLE_HTTP_PORT) -L 8180:127.0.0.1:8180 -L 8380:127.0.0.1:8380 <user>@<this host>"
+fi
 cat > "$STATE/CREDENTIALS.txt" <<EOF
 Web console demo: credentials (keep this file private; demo/state/secrets.env has the same values)
 
-Tunnel from your computer, then open the addresses below:
-  ssh -L $CONSOLE_PORT:$(pw CONSOLE_BIND):$(pw CONSOLE_HTTP_PORT) -L 8180:127.0.0.1:8180 -L 8380:127.0.0.1:8380 <user>@<this host>
+$access
 
-Web console        http://localhost:$CONSOLE_PORT/console
+Web console        $CONSOLE_URL/console
   administrator    default / (CLICKHOUSE_ADMIN_PASSWORD in .env)
 
-Keycloak           http://localhost:8180/admin/master/console/#/acme
+Keycloak           $KEYCLOAK_URL/admin/master/console/#/acme
   administrator    admin / $KEYCLOAK_ADMIN
   realm acme, single sign-on ("Sign in with Keycloak" on the console)
     alice / $ALICE    group clickhouse-analysts  -> role analysts
@@ -317,7 +412,7 @@ Keycloak           http://localhost:8180/admin/master/console/#/acme
     carol / $CAROL    group clickhouse-auditors  -> role auditors
     pia   / $PIA    no group: refused by the console
 
-phpLDAPadmin       http://localhost:8380
+phpLDAPadmin       $LDAPADMIN_URL
   administrator    cn=admin,$BASE_DN / $LDAP_ADMIN
   directory sign-in (user name and password on the console)
     dana / $DANA    finance, london,   group clickhouse-analysts
